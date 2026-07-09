@@ -39,6 +39,9 @@ enum Command {
         /// Target env file
         #[arg(long, default_value = ".env", value_name = "PATH")]
         env_file: String,
+        /// Apply the plan: write the env files and rewrite references
+        #[arg(long)]
+        write: bool,
     },
     /// Self-diagnostics: toolchain, git availability, grammar integrity
     Doctor,
@@ -60,12 +63,14 @@ fn main() -> std::process::ExitCode {
             no_color,
             fail_on,
             env_file,
+            write,
         } => commands::env::run(&commands::env::EnvArgs {
             path,
             json,
             no_color,
             fail_on,
             env_file,
+            write,
         }),
         Command::Doctor => commands::doctor::run().map(|()| 0),
         Command::Spike { path } => commands::spike::run(&path).map(|()| 0),

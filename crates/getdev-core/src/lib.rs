@@ -6,6 +6,7 @@
 pub mod config;
 pub mod env;
 pub mod findings;
+pub mod mutate;
 pub mod report;
 pub mod scan;
 pub mod secrets;

@@ -23,4 +23,5 @@ dist = true
 anyhow = { workspace = true }
 clap = { workspace = true }
 getdev-core = { workspace = true }
+getdev-gitx = { workspace = true }
 getdev-grammars = { workspace = true }

@@ -30,7 +30,7 @@ impl Lang {
         }
     }
 
-    fn language(self) -> Language {
+    pub fn language(self) -> Language {
         match self {
             Self::JavaScript => getdev_grammars::javascript(),
             Self::TypeScript => getdev_grammars::typescript(),
