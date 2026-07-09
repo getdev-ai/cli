@@ -98,7 +98,11 @@ conventional commits.
 
 ## License & sustainability
 
-Apache-2.0. The CLI is 100% free forever — no accounts, no paid features, and that's
-stated policy, not a phase. Development is supported through [getdev.ai](https://getdev.ai)
-— the companion platform for vibe-coding devs. Optional paid *support* may exist one day;
-paid *features* never will.
+getdev is built and funded by [getdev.ai](https://getdev.ai) — the portfolio platform for
+people who ship. The CLI is free, Apache-2.0, and needs no account.
+
+**Can getdev stop being free?** Every released version is Apache-2.0 forever — you can
+always fork the last commit. There is no CLA, so contributed code can't be relicensed even
+if I wanted to (contributions are DCO sign-off only). The CLI works with no account and
+talks to no getdev server. And the business doesn't need it to be paid: the paid product is
+the platform; the CLI is not a trial and has no paid tier.

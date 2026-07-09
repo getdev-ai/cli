@@ -99,7 +99,8 @@ Coverage floor: 80% on library crates (`cargo-llvm-cov`); 100% of shipped rules 
 - **DCO sign-off required** on every commit: `git commit -s` adds the
   `Signed-off-by: Your Name <you@example.com>` trailer. This certifies you have the right to
   submit the code under Apache-2.0 (see [developercertificate.org](https://developercertificate.org)).
-  No CLA.
+  **DCO, never a CLA** — a CLA would let us relicense your contributions; DCO makes that
+  impossible. Your code stays Apache-2.0, period.
 - One concern per PR. Include tests. Fill in the PR template.
 - CI must be fully green (fmt, clippy, tests on all 3 OSes, cargo-deny) before review.
 
