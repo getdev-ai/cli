@@ -2,7 +2,7 @@
 
 Settled technical decisions in lightweight ADR form. Check here before proposing "why don't we just…" changes — if a decision is listed as settled, re-opening it requires a new entry, not a drive-by change.
 
-> **Source:** distilled from `getdev-development-plan.md` §3.2, §3.4, §6, §8, §11 (plus repo-setup decisions made during P0 scaffolding); this doc is normative for the technology and process choices below.
+> **Source:** distilled from the project master plan (internal) §3.2, §3.4, §6, §8, §11 (plus repo-setup decisions made during P0 scaffolding); this doc is normative for the technology and process choices below.
 
 ---
 

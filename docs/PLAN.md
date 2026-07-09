@@ -2,7 +2,7 @@
 
 Canonical working reference for getdev's product definition: command inventory, global flags, exit codes, contractual per-command scopes, performance budgets, quality gates, and success metrics.
 
-> **Source:** distilled from `getdev-development-plan.md` §2, §3.5, §9, §13; this doc is normative for command scopes (§2.3), global flags and exit codes (§2.2), performance budgets, and quality/release gates. Section numbering intentionally mirrors the master plan.
+> **Source:** distilled from the project master plan (internal) §2, §3.5, §9, §13; this doc is normative for command scopes (§2.3), global flags and exit codes (§2.2), performance budgets, and quality/release gates. Section numbering intentionally mirrors the master plan.
 
 **§2.3 command scopes are CONTRACTUAL.** Do not add features or flags not listed there. Anything not listed goes to the v0.2+ backlog — propose it in `docs/ROADMAP.md`, do not implement it.
 
@@ -55,7 +55,7 @@ Canonical working reference for getdev's product definition: command inventory, 
 
 ### 2.3 Per-command specification (v0.1 scope) — CONTRACTUAL
 
-These scopes are contractual (see CLAUDE.md rule 6). Text is carried over essentially verbatim from the master plan.
+These scopes are contractual. Text is carried over essentially verbatim from the master plan.
 
 #### `getdev real`
 

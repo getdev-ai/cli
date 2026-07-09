@@ -20,8 +20,7 @@
 
 ## Product & engineering specs (normative)
 
-Distilled from the master plan ([../getdev-development-plan.md](../getdev-development-plan.md));
-where they conflict, these docs win — they are what CLAUDE.md holds the code to.
+Distilled from the project master plan (internal); where anything conflicts, these docs win.
 
 | Doc | Normative for |
 |---|---|

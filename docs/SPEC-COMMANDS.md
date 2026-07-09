@@ -2,7 +2,7 @@
 
 Normative behavior spec for every getdev command in v0.1: synopsis, behavior, flags, mutation and network contracts, and golden output examples.
 
-> **Source:** distilled from `getdev-development-plan.md` §2 and Appendix A; this doc is normative for command behavior and output. Command *scopes* are contractual per `docs/PLAN.md` §2.3 — do not add flags or features not listed there. **Golden examples in this doc are normative:** implemented output must match their structure and content.
+> **Source:** distilled from the project master plan (internal) §2 and Appendix A; this doc is normative for command behavior and output. Command *scopes* are contractual per `docs/PLAN.md` §2.3 — do not add flags or features not listed there. **Golden examples in this doc are normative:** implemented output must match their structure and content.
 
 Global flags (`--json`, `--quiet`, `--verbose`, `--no-color`, `--config`, `--path`, `--fail-on`, `--fix`, `--offline`, `--version`, `--help`) apply to every command and live in `docs/PLAN.md` §2.2, together with the exit-code contract (0 clean · 1 findings ≥ `--fail-on` · 2 execution error · 3 config error).
 

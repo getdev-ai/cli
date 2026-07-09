@@ -2,7 +2,7 @@
 
 Phase plan for v0.1 and the milestone sequence through v1.0, including what is explicitly out of scope.
 
-> **Source:** distilled from `getdev-development-plan.md` §6 and §14; this doc is normative for phase ordering, exit criteria, and scope boundaries between versions.
+> **Source:** distilled from the project master plan (internal) §6 and §14; this doc is normative for phase ordering, exit criteria, and scope boundaries between versions.
 
 **Current status:** P0 in progress — workspace scaffold + scan walker spike merged 2026-07-09; findings/config/report in progress.
 

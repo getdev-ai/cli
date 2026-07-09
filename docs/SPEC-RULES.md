@@ -2,7 +2,7 @@
 
 Normative specification of the declarative rule format used by all rule packs (`rules/audit/`, `rules/real/`, `rules/review/`, `rules/ship/`).
 
-> **Source:** distilled from `getdev-development-plan.md` Appendix B, §2.3, §3.2, §9.2, §10; this doc is normative for rule file structure, fixture requirements, and the declarative-only constraint.
+> **Source:** distilled from the project master plan (internal) Appendix B, §2.3, §3.2, §9.2, §10; this doc is normative for rule file structure, fixture requirements, and the declarative-only constraint.
 
 ---
 

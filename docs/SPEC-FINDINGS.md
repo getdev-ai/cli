@@ -4,7 +4,7 @@ The unified findings format every analyzer produces, every renderer consumes, an
 emits. **This document is normative**; the implementation is `crates/getdev-core/src/findings.rs`
 and the two must never drift (a PR changing one must change both).
 
-Source: distilled from getdev-development-plan.md §4.
+Source: distilled from the project master plan (internal) §4.
 
 ## Envelope
 

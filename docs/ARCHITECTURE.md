@@ -2,7 +2,7 @@
 
 High-level design of the getdev workspace: crate boundaries, the shared-scan engine, mutation safety, language support, and technology choices.
 
-> **Source:** distilled from `getdev-development-plan.md` §3 and §8; this doc is normative for crate responsibilities, the parse-once invariant, mutation safety invariants, and the network boundary. Plan cross-crate/engine changes against this doc first.
+> **Source:** distilled from the project master plan (internal) §3 and §8; this doc is normative for crate responsibilities, the parse-once invariant, mutation safety invariants, and the network boundary. Plan cross-crate/engine changes against this doc first.
 
 ---
 
@@ -107,7 +107,7 @@ Go/Rust/Ruby project detection returns a clear "stack not yet supported for deep
 - `thiserror` for typed errors inside library crates; `anyhow` (with context) at the CLI boundary only.
 - No `unwrap()`/`expect()` outside tests — lint-enforced (`clippy::unwrap_used`, `clippy::expect_used` denied).
 - No panics across crate boundaries; analyzer panics on hostile input are treated as release-blocking bugs.
-- Error messages: lowercase start, actionable, name the file/flag involved (per CLAUDE.md style).
+- Error messages: lowercase start, actionable, name the file/flag involved.
 - User-facing output goes through `core::report` renderers — never `println!` from analyzers.
 
 ## Network boundary rule

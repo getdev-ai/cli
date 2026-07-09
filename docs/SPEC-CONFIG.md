@@ -3,7 +3,7 @@
 Configuration surface and precedence rules. **This document is normative**; the
 implementation is `crates/getdev-core/src/config.rs` and the two must never drift.
 
-Source: distilled from getdev-development-plan.md §5.
+Source: distilled from the project master plan (internal) §5.
 
 ## Precedence
 

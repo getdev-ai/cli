@@ -2,7 +2,7 @@
 
 How getdev is tested: the layered pyramid, the ground-truth corpus, the false-positive policy, coverage floors, and the commands that run each layer.
 
-> **Source:** distilled from `getdev-development-plan.md` §8 and §9; this doc is normative for test layering, fixture requirements, coverage floors, and corpus/FP gates.
+> **Source:** distilled from the project master plan (internal) §8 and §9; this doc is normative for test layering, fixture requirements, coverage floors, and corpus/FP gates.
 
 ---
 
@@ -13,7 +13,7 @@ From fastest/narrowest to slowest/broadest:
 | Layer | What | How |
 |---|---|---|
 | 1. Unit | Rule matchers, parsers, individual functions | Plain `#[test]`, per crate |
-| 2. Per-rule fixtures | Every shipped rule: **≥ 3 positive + ≥ 3 negative** fixture files, table-driven | Fixtures in `testdata/fixtures/`; each rule registered in tests — no exceptions (CLAUDE.md rule 3) |
+| 2. Per-rule fixtures | Every shipped rule: **≥ 3 positive + ≥ 3 negative** fixture files, table-driven | Fixtures in `testdata/fixtures/`; each rule registered in tests — no exceptions |
 | 3. Corpus integration | Full commands run against `testdata/corpus/` via `assert_cmd`; golden-file JSON output via `insta` snapshots | `cargo test -p getdev-cli --test corpus` |
 | 4. Property tests | `proptest`: snap round-trip (snap → mutate randomly → back → tree byte-identical, 1000 iterations); mutate (output always reparses) | Part of `cargo test --workspace` |
 | 5. Benchmarks | `criterion` suite gating the performance budgets in `docs/PLAN.md` §3.5 | `cargo bench -p getdev-core` |

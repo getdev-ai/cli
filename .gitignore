@@ -15,5 +15,22 @@ __pycache__/
 .vscode/
 *.swp
 
-# local env
+# local env / secrets — never commit, no exceptions
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+credentials*.toml
+
+# AI-assistant working files & internal planning — local only, not for the public repo
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+.mcp.json
+getdev-development-plan.md
+getdev-market-research.md
+getdev-claude-code-docs-guide.md
+/pdf/
+/planning/
