@@ -8,10 +8,11 @@
 //! serialized); everything user-visible carries only masked previews.
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::findings::{Finding, Severity};
-use crate::scan::{self, ScanError};
+use crate::mutate::{self, MutateError, PlannedWrite};
+use crate::scan::{self, Lang, ScanError};
 use crate::secrets::{PatternError, SecretMatch, SecretPatterns};
 
 #[derive(Debug, thiserror::Error)]
@@ -20,6 +21,16 @@ pub enum EnvError {
     Patterns(#[from] PatternError),
     #[error(transparent)]
     Scan(#[from] ScanError),
+    #[error(transparent)]
+    Mutate(#[from] MutateError),
+    #[error("failed to read {path}: {source}")]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("{path} changed since the plan was computed — re-run getdev env")]
+    Stale { path: PathBuf },
 }
 
 #[derive(Debug, Clone)]
@@ -42,15 +53,14 @@ pub struct PlanEntry {
     pub var_name: String,
     /// project-relative path, forward slashes
     pub file: String,
+    pub lang: Lang,
     pub line: u32,
     pub column: u32,
     pub identifier: String,
     pub secret: SecretMatch,
     /// byte span of the literal (incl. quotes) for the rewrite step
     pub value_span: (usize, usize),
-    /// the raw secret — crate-private; only `mutate`/apply may read it
-    /// (unused until the --write slice lands)
-    #[allow(dead_code)]
+    /// the raw secret — crate-private; only apply may read it
     pub(crate) value: String,
 }
 
@@ -86,6 +96,7 @@ pub fn plan(root: &Path, options: &EnvOptions) -> Result<EnvPlan, EnvError> {
         entries.push(PlanEntry {
             var_name,
             file: relative_display(&assignment.path, root),
+            lang: assignment.lang,
             line: assignment.line,
             column: assignment.column,
             identifier: assignment.name,
@@ -217,6 +228,240 @@ fn relative_display(path: &Path, root: &Path) -> String {
 /// Highest severity in the plan, if any — used for `--fail-on`.
 pub fn max_severity(plan: &EnvPlan) -> Option<Severity> {
     plan.entries.iter().map(|e| e.secret.severity).max()
+}
+
+/// What `apply` did, for the command's summary output.
+#[derive(Debug)]
+pub struct AppliedSummary {
+    pub vars_written: Vec<String>,
+    pub files_rewritten: Vec<String>,
+    pub env_file_created: bool,
+    pub example_file: String,
+    pub gitignore_patched: bool,
+}
+
+/// Apply the plan (`--write`): rewrite each literal to the stack's idiomatic
+/// env accessor, write `.env` (values) and `.env.example` (keys only), and
+/// ensure the env file is gitignored. All disk changes go through
+/// [`crate::mutate`] — verified in memory first, atomic, rolled back on
+/// mid-plan failure. NOTE: raw secret values are written to exactly one
+/// place: the env file.
+pub fn apply(
+    root: &Path,
+    plan: &EnvPlan,
+    options: &EnvOptions,
+) -> Result<AppliedSummary, EnvError> {
+    let mut writes: Vec<PlannedWrite> = Vec::new();
+
+    // group rewrites per file, replacing spans back-to-front
+    let mut by_file: Vec<(&str, Vec<&PlanEntry>)> = Vec::new();
+    for entry in &plan.entries {
+        match by_file.iter_mut().find(|(file, _)| *file == entry.file) {
+            Some((_, group)) => group.push(entry),
+            None => by_file.push((entry.file.as_str(), vec![entry])),
+        }
+    }
+
+    let mut files_rewritten = Vec::new();
+    for (file, mut group) in by_file {
+        let path = root.join(file);
+        let original = std::fs::read_to_string(&path).map_err(|source| EnvError::Read {
+            path: path.clone(),
+            source,
+        })?;
+        group.sort_by_key(|e| std::cmp::Reverse(e.value_span.0));
+
+        let lang = group[0].lang;
+        let mut content = original.clone();
+        for entry in &group {
+            let (start, end) = entry.value_span;
+            // the span must still hold the exact literal we planned against
+            let current = content.get(start..end);
+            if current.is_none_or(|lit| !lit.contains(entry.value.as_str())) {
+                return Err(EnvError::Stale { path });
+            }
+            content.replace_range(start..end, &accessor(lang, &entry.var_name));
+        }
+        if lang == Lang::Python {
+            content = ensure_os_import(&content);
+        }
+
+        files_rewritten.push(file.to_owned());
+        writes.push(PlannedWrite::RewriteSource {
+            path,
+            lang,
+            original,
+            new_content: content,
+        });
+    }
+
+    // .env — append values, never rewrite existing lines
+    let env_path = root.join(&options.env_file);
+    let env_original = read_optional(&env_path);
+    let mut env_content = env_original.clone().unwrap_or_default();
+    ensure_trailing_newline(&mut env_content);
+    env_content.push_str("# added by getdev env\n");
+    for entry in &plan.entries {
+        env_content.push_str(&format!(
+            "{}={}\n",
+            entry.var_name,
+            dotenv_quote(&entry.value)
+        ));
+    }
+    writes.push(PlannedWrite::WriteFile {
+        path: env_path,
+        original: env_original.clone(),
+        new_content: env_content,
+    });
+
+    // .env.example — keys only, never values
+    let example_file = format!("{}.example", options.env_file);
+    let example_path = root.join(&example_file);
+    let example_original = read_optional(&example_path);
+    let mut example_content = example_original.clone().unwrap_or_default();
+    ensure_trailing_newline(&mut example_content);
+    let existing_example_keys = keys_of(example_original.as_deref().unwrap_or(""));
+    for entry in &plan.entries {
+        if !existing_example_keys.contains(&entry.var_name) {
+            example_content.push_str(&format!("{}=\n", entry.var_name));
+        }
+    }
+    writes.push(PlannedWrite::WriteFile {
+        path: example_path,
+        original: example_original,
+        new_content: example_content,
+    });
+
+    // .gitignore — ensure the env file can't be committed going forward
+    let gitignore_path = root.join(".gitignore");
+    let gitignore_original = read_optional(&gitignore_path);
+    let gitignore_patched = !gitignore_covers(
+        gitignore_original.as_deref().unwrap_or(""),
+        &options.env_file,
+    );
+    if gitignore_patched {
+        let mut gitignore_content = gitignore_original.clone().unwrap_or_default();
+        ensure_trailing_newline(&mut gitignore_content);
+        gitignore_content.push_str(&options.env_file);
+        gitignore_content.push('\n');
+        writes.push(PlannedWrite::WriteFile {
+            path: gitignore_path,
+            original: gitignore_original,
+            new_content: gitignore_content,
+        });
+    }
+
+    mutate::apply(writes)?;
+
+    Ok(AppliedSummary {
+        vars_written: plan.entries.iter().map(|e| e.var_name.clone()).collect(),
+        files_rewritten,
+        env_file_created: env_original.is_none(),
+        example_file,
+        gitignore_patched,
+    })
+}
+
+/// The idiomatic env accessor for each stack.
+fn accessor(lang: Lang, var_name: &str) -> String {
+    match lang {
+        Lang::JavaScript | Lang::TypeScript | Lang::Tsx => format!("process.env.{var_name}"),
+        Lang::Python => format!("os.environ[\"{var_name}\"]"),
+    }
+}
+
+/// Insert `import os` if the module doesn't import it, after any shebang,
+/// leading comments, and module docstring (inserting before the docstring
+/// would demote it to a plain expression).
+fn ensure_os_import(content: &str) -> String {
+    let has_os_import = content.lines().any(|line| {
+        let line = line.trim_start();
+        line == "import os"
+            || line.starts_with("import os ")
+            || line.starts_with("import os,")
+            || line.starts_with("import os.")
+            || line.starts_with("from os import")
+            || line.starts_with("from os.")
+    });
+    if has_os_import {
+        return content.to_owned();
+    }
+
+    let mut insert_at = 0;
+    let mut in_docstring: Option<&str> = None;
+    for line in content.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if let Some(delim) = in_docstring {
+            insert_at += line.len();
+            if trimmed.ends_with(delim) {
+                in_docstring = None;
+            }
+            continue;
+        }
+        let is_prefix = trimmed.is_empty()
+            || trimmed.starts_with('#')
+            || trimmed.starts_with("#!")
+            || trimmed.starts_with("# -*-");
+        if is_prefix {
+            insert_at += line.len();
+            continue;
+        }
+        if let Some(delim) = ["\"\"\"", "'''"].iter().find(|d| trimmed.starts_with(**d)) {
+            insert_at += line.len();
+            // single-line docstring closes on the same line
+            if trimmed.len() < delim.len() * 2 || !trimmed.ends_with(*delim) {
+                in_docstring = Some(delim);
+            }
+            continue;
+        }
+        break;
+    }
+
+    let mut out = String::with_capacity(content.len() + 12);
+    out.push_str(&content[..insert_at]);
+    out.push_str("import os\n");
+    out.push_str(&content[insert_at..]);
+    out
+}
+
+/// dotenv-format value: quote when the value contains characters that would
+/// change meaning unquoted.
+fn dotenv_quote(value: &str) -> String {
+    if value.contains(|c: char| c.is_whitespace() || c == '#' || c == '"' || c == '\'') {
+        format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+    } else {
+        value.to_owned()
+    }
+}
+
+fn read_optional(path: &Path) -> Option<String> {
+    std::fs::read_to_string(path).ok()
+}
+
+fn ensure_trailing_newline(content: &mut String) {
+    if !content.is_empty() && !content.ends_with('\n') {
+        content.push('\n');
+    }
+}
+
+fn keys_of(env_content: &str) -> HashSet<String> {
+    env_content
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.starts_with('#') {
+                return None;
+            }
+            line.split_once('=').map(|(k, _)| k.trim().to_owned())
+        })
+        .collect()
+}
+
+fn gitignore_covers(gitignore: &str, env_file: &str) -> bool {
+    gitignore.lines().any(|line| {
+        let line = line.trim();
+        line == env_file || line == format!("/{env_file}") || line == ".env*" || line == ".env.*"
+    })
 }
 
 #[cfg(test)]

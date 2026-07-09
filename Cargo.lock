@@ -177,6 +177,7 @@ dependencies = [
  "anyhow",
  "clap",
  "getdev-core",
+ "getdev-gitx",
  "getdev-grammars",
 ]
 
