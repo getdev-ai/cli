@@ -1,0 +1,19 @@
+# Rust
+/target/
+**/target/
+
+# Python packaging artifacts (packaging/reserve/pypi-getdev)
+dist/
+*.egg-info/
+__pycache__/
+
+# macOS
+.DS_Store
+
+# editors
+.idea/
+.vscode/
+*.swp
+
+# local env
+.env

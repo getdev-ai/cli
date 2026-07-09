@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "getdev"
+version = "0.0.1"
+description = "getdev is not a Python package — it's a native CLI that verifies, secures, and ships AI-generated code. This package defensively reserves the name; install the real tool from https://getdev.ai"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.8"
+authors = [{ name = "Pavel Zelenin" }]
+keywords = ["cli", "security", "ai", "audit", "secrets"]
+classifiers = [
+  "Development Status :: 1 - Planning",
+  "License :: OSI Approved :: Apache Software License",
+  "Environment :: Console",
+]
+
+[project.urls]
+Homepage = "https://getdev.ai"
+Source = "https://github.com/pzelenin/getdev-cli"
+
+[project.scripts]
+getdev = "getdev:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/getdev"]
