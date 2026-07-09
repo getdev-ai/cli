@@ -1,5 +1,7 @@
+use std::path::Path;
 use std::process::Command;
 
+use getdev_core::config::Config;
 use getdev_grammars::tree_sitter::Parser;
 
 pub fn run() -> anyhow::Result<()> {
@@ -7,6 +9,15 @@ pub fn run() -> anyhow::Result<()> {
 
     println!("getdev {}", env!("CARGO_PKG_VERSION"));
     println!();
+
+    // config validity (.getdev.toml in CWD; missing file is fine)
+    match Config::load(Path::new(".")) {
+        Ok(_) => report(true, "config (.getdev.toml valid or absent)"),
+        Err(err) => {
+            failures += 1;
+            report(false, &format!("config: {err}"));
+        }
+    }
 
     // git availability (required for snap/back/review)
     match Command::new("git").arg("--version").output() {

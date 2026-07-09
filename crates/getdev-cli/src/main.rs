@@ -31,10 +31,26 @@ enum Command {
     },
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
-    match cli.command {
+    let result = match cli.command {
         Command::Doctor => commands::doctor::run(),
         Command::Spike { path } => commands::spike::run(&path),
+    };
+    match result {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("error: {err:#}");
+            // exit-code contract (docs/PLAN.md §2.2):
+            // 1 findings ≥ --fail-on · 2 execution error · 3 config error
+            if err
+                .downcast_ref::<getdev_core::config::ConfigError>()
+                .is_some()
+            {
+                std::process::ExitCode::from(3)
+            } else {
+                std::process::ExitCode::from(2)
+            }
+        }
     }
 }
