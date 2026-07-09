@@ -1,6 +1,6 @@
 {
   "name": "getdev",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "getdev — verify, secure, and ship AI-generated code. One binary, runs locally, nothing leaves your machine. This is a placeholder release reserving the package name while the CLI is in development; the real binary distribution lands with v0.1.",
   "keywords": ["cli", "security", "ai", "vibe-coding", "audit", "secrets", "slopsquatting"],
   "homepage": "https://getdev.ai",

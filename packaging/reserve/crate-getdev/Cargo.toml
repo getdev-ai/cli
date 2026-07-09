@@ -1,6 +1,9 @@
+# standalone — not a member of the repo's cargo workspace
+[workspace]
+
 [package]
 name = "getdev"
-version = "0.0.0"
+version = "0.0.1"
 edition = "2021"
 description = "getdev — verify, secure, and ship AI-generated code. Placeholder reserving the crate name; the CLI lands with v0.1."
 license = "Apache-2.0"

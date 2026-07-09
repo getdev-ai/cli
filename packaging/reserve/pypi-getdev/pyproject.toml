@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "getdev"
-version = "0.0.1"
-description = "getdev is not a Python package — it's a native CLI that verifies, secures, and ships AI-generated code. This package defensively reserves the name; install the real tool from https://getdev.ai"
+version = "0.0.2"
+description = "getdev is a Rust CLI, not a Python package — it verifies, secures, and ships AI-generated code. This package permanently and defensively reserves the name; install the real tool via npm i -g getdev, brew install getdev-ai/tap/getdev, or https://getdev.ai/cli"
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.8"
