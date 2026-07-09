@@ -1,0 +1,26 @@
+[package]
+# crates.io package name is `getdev` (so `cargo install getdev` works);
+# the directory is crates/getdev-cli per workspace layout
+name = "getdev"
+description = "verify, secure, and ship AI-generated code — one binary, runs locally, nothing leaves your machine"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lints]
+workspace = true
+
+# publish = false keeps pre-release code off crates.io, but the binary must
+# still be distributable by cargo-dist
+[package.metadata.dist]
+dist = true
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+getdev-core = { workspace = true }
+getdev-grammars = { workspace = true }

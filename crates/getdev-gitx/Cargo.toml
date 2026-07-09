@@ -1,0 +1,15 @@
+[package]
+name = "getdev-gitx"
+description = "git plumbing for getdev snap/back and diff extraction, via std::process::Command"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

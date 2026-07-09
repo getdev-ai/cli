@@ -1,0 +1,19 @@
+[package]
+name = "getdev-grammars"
+description = "tree-sitter grammars for getdev, re-exported behind one crate boundary"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+# NOTE: deliberately no `[lints] workspace = true` — this is the only crate
+# allowed to touch unsafe/FFI (the grammar C bindings underneath).
+
+[dependencies]
+tree-sitter = { workspace = true }
+tree-sitter-javascript = { workspace = true }
+tree-sitter-typescript = { workspace = true }
+tree-sitter-python = { workspace = true }

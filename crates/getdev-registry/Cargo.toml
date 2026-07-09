@@ -1,0 +1,15 @@
+[package]
+name = "getdev-registry"
+description = "npm/PyPI registry clients and cache for getdev — the only crate allowed network access"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

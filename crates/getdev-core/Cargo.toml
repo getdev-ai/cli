@@ -1,0 +1,19 @@
+[package]
+name = "getdev-core"
+description = "getdev engine: scan, findings, rules, mutate, report — no network code here"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+getdev-grammars = { workspace = true }
+ignore = { workspace = true }
+streaming-iterator = { workspace = true }
+thiserror = { workspace = true }
