@@ -5,6 +5,8 @@ mod commands;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+use getdev_core::findings::Severity;
+
 #[derive(Parser)]
 #[command(
     name = "getdev",
@@ -20,6 +22,24 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Extract hardcoded secrets to .env (dry-run by default)
+    Env {
+        /// Directory to scan
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        /// Machine-readable output (findings schema)
+        #[arg(long)]
+        json: bool,
+        /// Disable ANSI colors (NO_COLOR is also honored)
+        #[arg(long)]
+        no_color: bool,
+        /// Exit 1 if any finding is at or above this severity
+        #[arg(long, value_name = "SEVERITY")]
+        fail_on: Option<Severity>,
+        /// Target env file
+        #[arg(long, default_value = ".env", value_name = "PATH")]
+        env_file: String,
+    },
     /// Self-diagnostics: toolchain, git availability, grammar integrity
     Doctor,
     /// P0 de-risking spike: walk + parse + query a directory (dev-only)
@@ -34,11 +54,24 @@ enum Command {
 fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
-        Command::Doctor => commands::doctor::run(),
-        Command::Spike { path } => commands::spike::run(&path),
+        Command::Env {
+            path,
+            json,
+            no_color,
+            fail_on,
+            env_file,
+        } => commands::env::run(&commands::env::EnvArgs {
+            path,
+            json,
+            no_color,
+            fail_on,
+            env_file,
+        }),
+        Command::Doctor => commands::doctor::run().map(|()| 0),
+        Command::Spike { path } => commands::spike::run(&path).map(|()| 0),
     };
     match result {
-        Ok(()) => std::process::ExitCode::SUCCESS,
+        Ok(code) => std::process::ExitCode::from(code),
         Err(err) => {
             eprintln!("error: {err:#}");
             // exit-code contract (docs/PLAN.md §2.2):
