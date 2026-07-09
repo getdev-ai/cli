@@ -51,6 +51,21 @@ impl Lang {
             Self::Python => "(function_definition) @fn",
         }
     }
+
+    /// Query for `identifier = "string literal"` shapes — the raw material
+    /// for secret detection (`env`, later `audit`). Template strings and
+    /// f-strings are deliberately excluded: interpolated values are not
+    /// literal secrets.
+    fn string_assignment_query(self) -> &'static str {
+        match self {
+            Self::JavaScript | Self::TypeScript | Self::Tsx => {
+                "(variable_declarator name: (identifier) @name value: (string) @value)\n\
+                 (assignment_expression left: (identifier) @name right: (string) @value)\n\
+                 (pair key: (property_identifier) @name value: (string) @value)"
+            }
+            Self::Python => "(assignment left: (identifier) @name right: (string) @value)",
+        }
+    }
 }
 
 impl fmt::Display for Lang {
@@ -119,6 +134,133 @@ pub fn scan_path(root: &Path) -> Result<(Vec<FileScan>, Vec<ScanError>), ScanErr
     }
 
     Ok((results, skipped))
+}
+
+/// A string literal assigned to a named identifier or object key.
+#[derive(Debug, Clone)]
+pub struct StringAssignment {
+    pub path: PathBuf,
+    pub lang: Lang,
+    /// the identifier / property name the literal is assigned to
+    pub name: String,
+    /// literal contents with quotes (and Python string prefixes) stripped
+    pub value: String,
+    /// 1-based position of the literal
+    pub line: u32,
+    pub column: u32,
+    /// byte span of the whole literal node (incl. quotes) — used by the
+    /// rewrite engine to replace the literal with an env accessor
+    pub value_span: (usize, usize),
+}
+
+/// Walk `root` and collect every `name = "literal"` shape in supported
+/// languages. Same skip semantics as [`scan_path`].
+pub fn collect_string_assignments(
+    root: &Path,
+) -> Result<(Vec<StringAssignment>, Vec<ScanError>), ScanError> {
+    let mut results = Vec::new();
+    let mut skipped = Vec::new();
+
+    for entry in WalkBuilder::new(root).build().flatten() {
+        if !entry.file_type().is_some_and(|t| t.is_file()) {
+            continue;
+        }
+        let path = entry.path();
+        let Some(lang) = Lang::from_path(path) else {
+            continue;
+        };
+        match assignments_in_file(path, lang) {
+            Ok(mut found) => results.append(&mut found),
+            Err(err @ (ScanError::Grammar(_) | ScanError::Query(_))) => return Err(err),
+            Err(err) => skipped.push(err),
+        }
+    }
+
+    Ok((results, skipped))
+}
+
+fn assignments_in_file(path: &Path, lang: Lang) -> Result<Vec<StringAssignment>, ScanError> {
+    let source = std::fs::read_to_string(path).map_err(|source| ScanError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+
+    let language = lang.language();
+    let mut parser = Parser::new();
+    parser.set_language(&language)?;
+    let tree = parser
+        .parse(&source, None)
+        .ok_or_else(|| ScanError::Parse {
+            path: path.to_path_buf(),
+        })?;
+
+    let query = Query::new(&language, lang.string_assignment_query())?;
+    let name_idx = query.capture_index_for_name("name");
+    let value_idx = query.capture_index_for_name("value");
+
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
+    let mut results = Vec::new();
+
+    while let Some(m) = matches.next() {
+        let mut name = None;
+        let mut value_node = None;
+        for capture in m.captures {
+            if Some(capture.index) == name_idx {
+                name = capture.node.utf8_text(source.as_bytes()).ok();
+            } else if Some(capture.index) == value_idx {
+                value_node = Some(capture.node);
+            }
+        }
+        let (Some(name), Some(node)) = (name, value_node) else {
+            continue;
+        };
+        let Ok(raw) = node.utf8_text(source.as_bytes()) else {
+            continue;
+        };
+        let Some(value) = strip_string_delimiters(raw, lang) else {
+            continue; // interpolated / prefixed strings are not literals
+        };
+        if value.is_empty() {
+            continue;
+        }
+        let pos = node.start_position();
+        results.push(StringAssignment {
+            path: path.to_path_buf(),
+            lang,
+            name: name.to_owned(),
+            value,
+            line: u32::try_from(pos.row).unwrap_or(u32::MAX).saturating_add(1),
+            column: u32::try_from(pos.column)
+                .unwrap_or(u32::MAX)
+                .saturating_add(1),
+            value_span: (node.start_byte(), node.end_byte()),
+        });
+    }
+
+    Ok(results)
+}
+
+/// Strip quotes (and Python prefixes) from a string literal's source text.
+/// Returns None for strings we must not treat as plain literals (f-strings,
+/// byte strings, raw prefixes with interpolation semantics).
+fn strip_string_delimiters(raw: &str, lang: Lang) -> Option<String> {
+    let mut s = raw;
+    if lang == Lang::Python {
+        // reject f/b prefixes (interpolation / bytes); allow r/u
+        let prefix_len = s.chars().take_while(|c| c.is_ascii_alphabetic()).count();
+        let prefix = s[..prefix_len].to_lowercase();
+        if prefix.contains('f') || prefix.contains('b') {
+            return None;
+        }
+        s = &s[prefix_len..];
+    }
+    for quote in ["\"\"\"", "'''", "\"", "'"] {
+        if s.len() >= quote.len() * 2 && s.starts_with(quote) && s.ends_with(quote) {
+            return Some(s[quote.len()..s.len() - quote.len()].to_owned());
+        }
+    }
+    None
 }
 
 fn scan_file(path: &Path, lang: Lang) -> Result<FileScan, ScanError> {
