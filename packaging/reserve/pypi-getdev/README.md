@@ -11,8 +11,8 @@ Install the real tool:
 
 ```bash
 curl -fsSL https://getdev.ai/install.sh | sh
-# or: brew install pzelenin/tap/getdev · npx getdev · cargo install getdev
+# or: brew install getdev-ai/tap/getdev · npx getdev · cargo install getdev
 ```
 
 - Site: https://getdev.ai
-- Source (Apache-2.0): https://github.com/pzelenin/getdev-cli
+- Source (Apache-2.0): https://github.com/getdev-ai/cli

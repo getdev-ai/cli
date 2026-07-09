@@ -6,9 +6,9 @@
   "homepage": "https://getdev.ai",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/pzelenin/getdev-cli.git"
+    "url": "git+https://github.com/getdev-ai/cli.git"
   },
-  "bugs": "https://github.com/pzelenin/getdev-cli/issues",
+  "bugs": "https://github.com/getdev-ai/cli/issues",
   "license": "Apache-2.0",
   "author": "Pavel Zelenin",
   "bin": { "getdev": "index.js" },

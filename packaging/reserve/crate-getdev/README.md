@@ -7,4 +7,4 @@ From v0.1, `cargo install getdev` (or `cargo binstall getdev` for prebuilt binar
 installs the real tool.
 
 - Site: https://getdev.ai
-- Source (Apache-2.0): https://github.com/pzelenin/getdev-cli
+- Source (Apache-2.0): https://github.com/getdev-ai/cli

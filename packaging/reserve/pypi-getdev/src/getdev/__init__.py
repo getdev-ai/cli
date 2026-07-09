@@ -12,5 +12,5 @@ def main() -> None:
         "  curl -fsSL https://getdev.ai/install.sh | sh\n"
         "\n"
         "  site:    https://getdev.ai\n"
-        "  source:  https://github.com/pzelenin/getdev-cli"
+        "  source:  https://github.com/getdev-ai/cli"
     )

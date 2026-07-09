@@ -19,7 +19,7 @@ classifiers = [
 
 [project.urls]
 Homepage = "https://getdev.ai"
-Source = "https://github.com/pzelenin/getdev-cli"
+Source = "https://github.com/getdev-ai/cli"
 
 [project.scripts]
 getdev = "getdev:main"

@@ -59,8 +59,8 @@ tag v0.1.0
  ├─ attest: SLSA provenance (GitHub attestations)
  ├─ create GitHub Release (draft) + upload artifacts + git-cliff notes
  ├─ publish npm package `getdev`                (NPM_TOKEN)
- ├─ push Homebrew formula → pzelenin/homebrew-tap    (HOMEBREW_TAP_TOKEN)
- ├─ bump Scoop manifest → pzelenin/scoop-bucket      (SCOOP_BUCKET_TOKEN)
+ ├─ push Homebrew formula → getdev-ai/homebrew-tap    (HOMEBREW_TAP_TOKEN)
+ ├─ bump Scoop manifest → getdev-ai/scoop-bucket      (SCOOP_BUCKET_TOKEN)
  └─ cargo publish: getdev-grammars → core/registry/gitx → getdev   (CARGO_REGISTRY_TOKEN)
 ```
 
@@ -69,12 +69,12 @@ tag v0.1.0
 1. Run the smoke checklist (below) against the **draft** release artifacts.
 2. Publish the GitHub Release (undraft).
 3. Repoint getdev.ai `install.sh`/`install.ps1` at the new version (checksum-verified
-   deploy — a PR to the `pzelenin/getdev` website repo) and update the CLI listing there
+   deploy — a PR to the website repo) and update the CLI listing there
    if the release changes user-facing surface.
 4. Verify each channel:
    - `curl -fsSL https://getdev.ai/install.sh | sh` in a clean container
    - `npx getdev@latest version`
-   - `brew update && brew install pzelenin/tap/getdev`
+   - `brew update && brew install getdev-ai/tap/getdev`
    - `scoop update getdev` (Windows VM)
    - `cargo binstall getdev` resolves the prebuilt artifact
    - `getdev update` from the previous version self-updates and signature-verifies
@@ -94,7 +94,7 @@ targets = [
   "x86_64-pc-windows-msvc",
 ]
 installers = ["shell", "powershell", "npm", "homebrew"]
-tap = "pzelenin/homebrew-tap"
+tap = "getdev-ai/homebrew-tap"
 npm-package = "getdev"
 ci = ["github"]
 install-path = "~/.getdev/bin"
@@ -116,13 +116,13 @@ shasum -a 256 -c getdev-aarch64-apple-darwin.tar.xz.sha256
 
 # cosign keyless signature (identity = the release workflow, issuer = GitHub OIDC)
 cosign verify-blob \
-  --certificate-identity-regexp 'github.com/pzelenin/getdev-cli/.github/workflows/release.yml' \
+  --certificate-identity-regexp 'github.com/getdev-ai/cli/.github/workflows/release.yml' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   --bundle getdev-aarch64-apple-darwin.tar.xz.sigstore.json \
   getdev-aarch64-apple-darwin.tar.xz
 
 # SLSA provenance via GitHub attestations
-gh attestation verify getdev-aarch64-apple-darwin.tar.xz --repo pzelenin/getdev-cli
+gh attestation verify getdev-aarch64-apple-darwin.tar.xz --repo getdev-ai/cli
 ```
 
 ## Hotfix releases

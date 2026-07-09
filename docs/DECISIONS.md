@@ -118,10 +118,10 @@ Settled technical decisions in lightweight ADR form. Check here before proposing
 
 **Decision:** The Scoop manifest is maintained manually (see `packaging/` and `docs/DISTRIBUTION.md`), updated as part of the release checklist.
 
-## 15. Repository named `getdev-cli`
+## 15. Repository lives at `getdev-ai/cli`; product name stays `getdev`
 
 **Date:** 2026-07-09 · **Status:** settled
 
-**Context:** The `pzelenin/getdev` repository name is taken by the getdev.ai website.
+**Context:** The bare `getdev` GitHub name is held by an unrelated dormant account, and the getdev.ai website lives in its own private repo. Doubling the brand in the slug (`getdev-ai/getdev-cli`) reads poorly in links.
 
-**Decision:** The CLI lives at `pzelenin/getdev-cli`. The product, binary, and published crate are still named `getdev`.
+**Decision:** The CLI lives under the `getdev-ai` org (matching the domain, like `getsentry`/`astral-sh`) as `getdev-ai/cli` — the GitHub-CLI pattern (`cli/cli` → `gh`). Everything users *type* stays `getdev`: binary, Homebrew formula, npm package, crates.io crate, release artifacts. Formula/package names must match the command, so they never take the short repo form. Vacated slugs (`pzelenin/getdev-cli`) are never reused — reuse would destroy GitHub's redirects.

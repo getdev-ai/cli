@@ -8,10 +8,9 @@
 > Install channels below describe the release target, not what works today.
 > See [docs/](docs/) for the full development plan and release engineering docs.
 
-This repo (`getdev-cli`) is the CLI tool. The [getdev.ai](https://getdev.ai) site — landing,
-docs pages, and the tool listing — lives in the separate
-[`pzelenin/getdev`](https://github.com/pzelenin/getdev) repo. The product, binary, and
-package name everywhere (Homebrew, npm, crates.io, releases) is plain **`getdev`**.
+This repo (`getdev-ai/cli`) is the CLI tool; [getdev.ai](https://getdev.ai) is the
+project's home — landing, docs, and install scripts. The product, binary, and package
+name everywhere you type it (Homebrew, npm, crates.io, releases) is plain **`getdev`**.
 
 getdev is a free, open-source CLI toolbelt for AI-assisted ("vibe") development. AI coding
 agents hallucinate packages, hardcode secrets, skip auth, and leave debris behind. getdev is
@@ -42,7 +41,7 @@ what you run *after* the agent:
 curl -fsSL https://getdev.ai/install.sh | sh
 
 # Homebrew
-brew install pzelenin/tap/getdev
+brew install getdev-ai/tap/getdev
 
 # npm (no Rust required — downloads the native binary)
 npx getdev check          # or: npm install -g getdev
@@ -74,7 +73,7 @@ CI usage: `getdev check --json --fail-on high`
 ## Building from source
 
 ```bash
-git clone https://github.com/pzelenin/getdev-cli
+git clone https://github.com/getdev-ai/cli
 cd getdev-cli
 cargo build --workspace --release
 ```

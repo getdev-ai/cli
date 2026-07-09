@@ -28,7 +28,7 @@ Prerequisites:
   bundled SQLite compile from C.
 
 ```bash
-git clone https://github.com/pzelenin/getdev-cli
+git clone https://github.com/getdev-ai/cli
 cd getdev-cli
 cargo check --workspace        # fast inner loop — use this while iterating
 cargo build --workspace

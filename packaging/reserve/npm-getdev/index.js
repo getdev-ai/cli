@@ -7,6 +7,6 @@ console.log(
     "The real native-binary distribution arrives with v0.1.",
     "",
     "  site:    https://getdev.ai",
-    "  source:  https://github.com/pzelenin/getdev-cli",
+    "  source:  https://github.com/getdev-ai/cli",
   ].join("\n")
 );
