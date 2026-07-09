@@ -1,0 +1,6 @@
+# Shows the "Sponsor" button on the repo.
+# getdev.ai is the project's home and support hub — the CLI is free forever;
+# sponsorship funds development and promotion, never features.
+custom: ["https://getdev.ai"]
+# Enable when enrolled in GitHub Sponsors (Settings → Sponsors dashboard):
+# github: [pzelenin]

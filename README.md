@@ -98,6 +98,7 @@ conventional commits.
 
 ## License & sustainability
 
-Apache-2.0. The CLI is 100% free forever — no accounts, no paid features. If you want to
-support the project: GitHub Sponsors / OpenCollective. Optional paid *support* may exist
-one day; paid *features* never will.
+Apache-2.0. The CLI is 100% free forever — no accounts, no paid features, and that's
+stated policy, not a phase. Development is supported through [getdev.ai](https://getdev.ai)
+— the companion platform for vibe-coding devs. Optional paid *support* may exist one day;
+paid *features* never will.
