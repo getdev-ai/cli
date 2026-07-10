@@ -25,6 +25,7 @@ clap = { workspace = true }
 getdev-core = { workspace = true }
 getdev-gitx = { workspace = true }
 getdev-grammars = { workspace = true }
+getdev-registry = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 

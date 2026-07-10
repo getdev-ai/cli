@@ -435,6 +435,7 @@ dependencies = [
  "getdev-core",
  "getdev-gitx",
  "getdev-grammars",
+ "getdev-registry",
  "reqwest",
  "serde",
 ]

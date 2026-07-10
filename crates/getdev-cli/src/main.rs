@@ -130,7 +130,7 @@ fn run(cli: Cli) -> anyhow::Result<u8> {
             quiet,
             verbose,
         }),
-        Command::Doctor => commands::doctor::run(offline).map(|()| 0),
+        Command::Doctor => commands::doctor::run(offline, cli.global.fix).map(|()| 0),
         Command::Spike { path } => commands::spike::run(&path).map(|()| 0),
     }
 }
