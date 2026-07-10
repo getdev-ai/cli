@@ -12,6 +12,12 @@ pub struct EnvArgs {
     pub fail_on: Option<Severity>,
     pub env_file: String,
     pub write: bool,
+    /// Suppress banner/summary chatter; findings still render (global flag,
+    /// docs/PLAN.md §2.2).
+    pub quiet: bool,
+    /// Debug-level detail, repeatable (global flag, docs/PLAN.md §2.2) —
+    /// shows per-file skip reasons instead of just a count.
+    pub verbose: u8,
 }
 
 pub fn run(args: &EnvArgs) -> anyhow::Result<u8> {
@@ -48,45 +54,54 @@ pub fn run(args: &EnvArgs) -> anyhow::Result<u8> {
     } else {
         let color = ColorMode::resolve(args.no_color, std::io::stdout().is_terminal());
         print!("{}", report::render_terminal(&report, color));
-        match &applied {
-            Some(summary) => {
-                println!();
-                println!(
-                    "applied: {} var(s) → {} ({}), {} file(s) rewritten{}",
-                    summary.vars_written.len(),
-                    options.env_file,
-                    if summary.env_file_created {
-                        "created"
-                    } else {
-                        "appended"
-                    },
-                    summary.files_rewritten.len(),
-                    if summary.gitignore_patched {
-                        ", .gitignore patched"
-                    } else {
-                        ""
-                    }
-                );
-                println!(
-                    "keys documented in {} — commit that file, never {}",
-                    summary.example_file, options.env_file
-                );
+        if !args.quiet {
+            match &applied {
+                Some(summary) => {
+                    println!();
+                    println!(
+                        "applied: {} var(s) → {} ({}), {} file(s) rewritten{}",
+                        summary.vars_written.len(),
+                        options.env_file,
+                        if summary.env_file_created {
+                            "created"
+                        } else {
+                            "appended"
+                        },
+                        summary.files_rewritten.len(),
+                        if summary.gitignore_patched {
+                            ", .gitignore patched"
+                        } else {
+                            ""
+                        }
+                    );
+                    println!(
+                        "keys documented in {} — commit that file, never {}",
+                        summary.example_file, options.env_file
+                    );
+                }
+                None if !plan.entries.is_empty() => {
+                    println!();
+                    println!(
+                        "dry run — nothing written. {} secret(s) would move to {} (getdev env --write)",
+                        plan.entries.len(),
+                        options.env_file
+                    );
+                }
+                None => {}
             }
-            None if !plan.entries.is_empty() => {
-                println!();
-                println!(
-                    "dry run — nothing written. {} secret(s) would move to {} (getdev env --write)",
-                    plan.entries.len(),
-                    options.env_file
-                );
-            }
-            None => {}
         }
         if !plan.skipped.is_empty() {
-            println!(
-                "{} unreadable file(s) skipped (-v for details)",
-                plan.skipped.len()
-            );
+            if args.verbose > 0 {
+                println!("{} unreadable file(s) skipped:", plan.skipped.len());
+                for skipped in &plan.skipped {
+                    println!("  - {skipped}");
+                }
+            } else if !args.quiet {
+                println!(
+                    "{} unreadable file(s) skipped (-v for details)",
+                    plan.skipped.len()
+                );
+            }
         }
     }
 

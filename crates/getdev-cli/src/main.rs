@@ -1,10 +1,12 @@
 #![forbid(unsafe_code)]
 
 mod commands;
+mod update;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
+use getdev_core::config::{self, Config};
 use getdev_core::findings::Severity;
 
 #[derive(Parser)]
@@ -16,8 +18,33 @@ use getdev_core::findings::Severity;
                   One binary, runs locally, nothing leaves your machine."
 )]
 struct Cli {
+    #[command(flatten)]
+    global: GlobalArgs,
     #[command(subcommand)]
     command: Command,
+}
+
+/// True global flags (docs/PLAN.md §2.2): accepted after any subcommand
+/// thanks to clap's `global = true`, resolved once in `main` and threaded
+/// explicitly to each command — no hidden global state, consistent with
+/// `scan.rs`'s parse-once design.
+#[derive(Args, Debug, Clone, Default)]
+struct GlobalArgs {
+    /// Suppress banner/progress; findings only
+    #[arg(long, short = 'q', global = true)]
+    quiet: bool,
+    /// Debug-level detail (repeatable: -vv)
+    #[arg(long, short = 'v', global = true, action = clap::ArgAction::Count)]
+    verbose: u8,
+    /// Alternate config file (default: ./.getdev.toml)
+    #[arg(long, global = true, value_name = "PATH")]
+    config: Option<PathBuf>,
+    /// Never hit the network; use cache only
+    #[arg(long, global = true)]
+    offline: bool,
+    /// Apply auto-fixes where the command supports them
+    #[arg(long, global = true)]
+    fix: bool,
 }
 
 #[derive(Subcommand)]
@@ -56,26 +83,7 @@ enum Command {
 
 fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
-    let result = match cli.command {
-        Command::Env {
-            path,
-            json,
-            no_color,
-            fail_on,
-            env_file,
-            write,
-        } => commands::env::run(&commands::env::EnvArgs {
-            path,
-            json,
-            no_color,
-            fail_on,
-            env_file,
-            write,
-        }),
-        Command::Doctor => commands::doctor::run().map(|()| 0),
-        Command::Spike { path } => commands::spike::run(&path).map(|()| 0),
-    };
-    match result {
+    match run(cli) {
         Ok(code) => std::process::ExitCode::from(code),
         Err(err) => {
             eprintln!("error: {err:#}");
@@ -90,5 +98,50 @@ fn main() -> std::process::ExitCode {
                 std::process::ExitCode::from(2)
             }
         }
+    }
+}
+
+/// Resolves config precedence once (flags > project > global > defaults)
+/// and threads the result explicitly to every command — see `GlobalArgs`'s
+/// doc-comment for why this stays explicit rather than becoming hidden
+/// global state.
+fn run(cli: Cli) -> anyhow::Result<u8> {
+    let path = command_path(&cli.command);
+    let cfg = Config::resolve(cli.global.config.as_deref(), &path)?;
+    let offline = config::offline_resolved(cli.global.offline, &cfg);
+    let quiet = cli.global.quiet;
+    let verbose = cli.global.verbose;
+
+    match cli.command {
+        Command::Env {
+            path,
+            json,
+            no_color,
+            fail_on,
+            env_file,
+            write,
+        } => commands::env::run(&commands::env::EnvArgs {
+            path,
+            json,
+            no_color,
+            fail_on,
+            env_file,
+            write,
+            quiet,
+            verbose,
+        }),
+        Command::Doctor => commands::doctor::run(offline, cli.global.fix).map(|()| 0),
+        Command::Spike { path } => commands::spike::run(&path).map(|()| 0),
+    }
+}
+
+/// The directory config resolution and (where applicable) the command
+/// itself operate against. `doctor` is self-diagnostic and has no `--path`
+/// of its own (docs/PLAN.md §2.3 doesn't list one) — it resolves config
+/// against `.`, matching its pre-existing behavior.
+fn command_path(command: &Command) -> PathBuf {
+    match command {
+        Command::Env { path, .. } | Command::Spike { path } => path.clone(),
+        Command::Doctor => PathBuf::from("."),
     }
 }
