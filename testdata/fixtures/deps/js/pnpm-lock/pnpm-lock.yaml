@@ -1,0 +1,14 @@
+lockfileVersion: '6.0'
+
+importers:
+  .:
+    dependencies:
+      fastify:
+        specifier: ^4.0.0
+        version: 4.26.2
+
+packages:
+  /fastify@4.26.2:
+    resolution: {integrity: sha512-fake==}
+  /@fastify/error@3.4.1:
+    resolution: {integrity: sha512-fake==}

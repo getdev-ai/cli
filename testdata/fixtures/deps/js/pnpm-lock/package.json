@@ -1,0 +1,7 @@
+{
+  "name": "fixture-pnpm-lock",
+  "version": "1.0.0",
+  "dependencies": {
+    "fastify": "^4.0.0"
+  }
+}

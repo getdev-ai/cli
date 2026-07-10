@@ -4,6 +4,7 @@
 //! ScanContext land in later phases per docs/PLAN.md.
 
 pub mod config;
+pub mod deps;
 pub mod env;
 pub mod findings;
 pub mod mutate;
