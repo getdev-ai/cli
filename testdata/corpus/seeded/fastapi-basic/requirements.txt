@@ -1,0 +1,2 @@
+fastapi
+requests-auth-helper-xyz==1.0.0

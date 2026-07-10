@@ -1,0 +1,6 @@
+{
+  "seeded": [
+    { "id": "real/nonexistent-package", "file": "requirements.txt", "package": "django-audit-helper-xyz" },
+    { "id": "real/phantom-import", "file": "myapp/models.py", "package": "fake_geoip_lookup_xyz" }
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "seeded": [
+    { "id": "real/typosquat-suspect", "file": "package.json", "package": "left-pat" },
+    { "id": "real/nonexistent-api", "file": "src/server.js", "package": "acme-api-client" }
+  ]
+}

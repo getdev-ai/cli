@@ -1,0 +1,6 @@
+{
+  "seeded": [
+    { "id": "real/typosquat-suspect", "file": "requirements.txt", "package": "reqeusts" },
+    { "id": "real/phantom-import", "file": "flaskr/app.py", "package": "fake_html_sanitizer_xyz" }
+  ]
+}

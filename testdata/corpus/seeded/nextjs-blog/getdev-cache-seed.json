@@ -1,0 +1,9 @@
+{
+  "npm": {
+    "next": true,
+    "react": true,
+    "react-dom": true,
+    "next-markdown-render-helper-xyz": false
+  },
+  "pypi": {}
+}

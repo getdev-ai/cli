@@ -1,0 +1,9 @@
+{
+  "npm": {
+    "next": true,
+    "react": true,
+    "react-dom": true,
+    "chalck": true
+  },
+  "pypi": {}
+}

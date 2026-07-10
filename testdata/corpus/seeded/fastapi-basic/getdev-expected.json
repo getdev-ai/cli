@@ -1,0 +1,6 @@
+{
+  "seeded": [
+    { "id": "real/nonexistent-package", "file": "requirements.txt", "package": "requests-auth-helper-xyz" },
+    { "id": "real/phantom-import", "file": "app/main.py", "package": "fake_analytics_sdk_xyz" }
+  ]
+}

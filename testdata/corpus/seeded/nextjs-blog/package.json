@@ -1,0 +1,10 @@
+{
+  "name": "nextjs-blog-seed",
+  "private": true,
+  "dependencies": {
+    "next": "14.2.3",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "next-markdown-render-helper-xyz": "^1.0.0"
+  }
+}

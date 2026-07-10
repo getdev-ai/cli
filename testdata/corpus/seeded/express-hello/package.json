@@ -1,0 +1,8 @@
+{
+  "name": "express-hello-seed",
+  "private": true,
+  "dependencies": {
+    "express": "^4.18.2",
+    "totally-fake-auth-helper-xyz": "^1.0.0"
+  }
+}

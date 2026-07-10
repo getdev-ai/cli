@@ -1,0 +1,6 @@
+{
+  "seeded": [
+    { "id": "real/typosquat-suspect", "file": "requirements.txt", "package": "djago" },
+    { "id": "real/nonexistent-api", "file": "api/views.py", "package": "acme_payments_sdk" }
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "npm": {
+    "express": true,
+    "left-pat": true,
+    "acme-api-client": true
+  },
+  "pypi": {}
+}

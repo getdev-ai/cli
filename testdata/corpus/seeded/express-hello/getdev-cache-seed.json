@@ -1,0 +1,7 @@
+{
+  "npm": {
+    "express": true,
+    "totally-fake-auth-helper-xyz": false
+  },
+  "pypi": {}
+}

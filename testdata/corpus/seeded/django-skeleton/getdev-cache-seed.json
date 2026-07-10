@@ -1,0 +1,7 @@
+{
+  "npm": {},
+  "pypi": {
+    "django": true,
+    "django-audit-helper-xyz": false
+  }
+}

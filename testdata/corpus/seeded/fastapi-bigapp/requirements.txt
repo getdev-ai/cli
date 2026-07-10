@@ -1,0 +1,2 @@
+fastapi
+acme-api-client==2.0.0

@@ -1,0 +1,6 @@
+{
+  "seeded": [
+    { "id": "real/nonexistent-api", "file": "app/main.py", "package": "acme_api_client" },
+    { "id": "real/unknown-model-string", "file": "app/main.py", "package": "gpt5-turbo-hallucinated" }
+  ]
+}

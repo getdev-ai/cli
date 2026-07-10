@@ -1,0 +1,3 @@
+djago==4.2
+djangorestframework==3.14.0
+acme-payments-sdk==1.0.0

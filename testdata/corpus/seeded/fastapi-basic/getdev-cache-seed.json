@@ -1,0 +1,7 @@
+{
+  "npm": {},
+  "pypi": {
+    "fastapi": true,
+    "requests-auth-helper-xyz": false
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "npm": {},
+  "pypi": {
+    "flask": true,
+    "flask-auth-helper-xyz": false
+  }
+}

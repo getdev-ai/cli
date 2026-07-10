@@ -1,0 +1,7 @@
+{
+  "seeded": [
+    { "id": "real/nonexistent-package", "file": "package.json", "package": "totally-fake-auth-helper-xyz" },
+    { "id": "real/phantom-import", "file": "src/app.js", "package": "not-a-real-logger-xyz" },
+    { "id": "real/unknown-model-string", "file": "src/app.js", "package": "gpt5-turbo-hallucinated" }
+  ]
+}

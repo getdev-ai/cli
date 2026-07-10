@@ -1,0 +1,7 @@
+{
+  "npm": {},
+  "pypi": {
+    "fastapi": true,
+    "acme-api-client": true
+  }
+}
