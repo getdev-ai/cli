@@ -3,6 +3,7 @@
 //! schema, project config, and report renderers. Rules, mutate, and the full
 //! ScanContext land in later phases per docs/PLAN.md.
 
+pub mod apisurface;
 pub mod config;
 pub mod deps;
 pub mod env;
