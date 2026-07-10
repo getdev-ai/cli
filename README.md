@@ -5,9 +5,10 @@
 [![CI](https://github.com/getdev-ai/cli/actions/workflows/ci.yml/badge.svg)](https://github.com/getdev-ai/cli/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-> **Status: pre-development (P0 — foundation).** The plan is written, the code is not.
-> Install channels below describe the release target, not what works today.
-> See [docs/](docs/) for the full development plan and release engineering docs.
+> **Status: pre-v0.1, under active construction.** The `env` command (hardcoded-secret
+> extraction) works today; `real` (package/API hallucination detection) is landing now;
+> the rest of the toolbelt is being built phase by phase — see [docs/ROADMAP.md](docs/ROADMAP.md).
+> Install channels below describe the v0.1 release target, not every command that works today.
 
 This repo (`getdev-ai/cli`) is the CLI tool; [getdev.ai](https://getdev.ai) is the
 project's home — landing, docs, and install scripts. The product, binary, and package
