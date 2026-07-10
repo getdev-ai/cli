@@ -25,3 +25,8 @@ clap = { workspace = true }
 getdev-core = { workspace = true }
 getdev-gitx = { workspace = true }
 getdev-grammars = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+assert_cmd = "2.2.2"
