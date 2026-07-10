@@ -1,0 +1,5 @@
+# core deps
+Flask==2.3.0
+-r base.txt
+git+https://github.com/psf/requests.git@main#egg=requests
+requests>=2.0,<3.0  # pin
