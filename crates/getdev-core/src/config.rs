@@ -1,10 +1,11 @@
-//! `.getdev.toml` project configuration.
+//! `.getdev.toml` project configuration + `~/.getdev/config.toml` global
+//! configuration.
 //!
 //! Normative spec: docs/SPEC-CONFIG.md. Precedence is
-//! **flags > project config > global config > built-in defaults**; this
-//! module owns the project-config layer (global `~/.getdev/config.toml`
-//! lands with the cache work in P2). Unknown keys are hard errors — a typo
-//! that silently disables a check is worse than a loud failure (exit code 3).
+//! **flags > project config > global config > built-in defaults**, resolved
+//! per invocation by [`Config::resolve`]. Unknown keys are hard errors at
+//! every layer — a typo that silently disables a check is worse than a loud
+//! failure (exit code 3).
 
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -12,6 +13,12 @@ use std::path::{Path, PathBuf};
 use crate::findings::Severity;
 
 pub const PROJECT_CONFIG_FILE: &str = ".getdev.toml";
+/// File name under the global config directory (`~/.getdev/`).
+pub const GLOBAL_CONFIG_FILE: &str = "config.toml";
+/// Directory name under `$HOME`/`%USERPROFILE%` that holds the global
+/// config (and, separately, the registry cache — see
+/// `getdev_registry::cache::cache_dir`).
+const GLOBAL_CONFIG_DIR_NAME: &str = ".getdev";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -211,6 +218,195 @@ impl Config {
             source: Box::new(source),
         })
     }
+
+    /// Load `~/.getdev/config.toml` (`GETDEV_CONFIG_HOME` overrides the
+    /// directory — the hermetic-test seam, same shape as
+    /// `getdev_registry::cache::cache_dir`'s `GETDEV_CACHE_DIR`). A missing
+    /// file is the default config; a malformed one is a hard error exactly
+    /// like the project layer (exit code 3).
+    pub fn load_global() -> Result<Self, ConfigError> {
+        Self::load_global_at(&global_config_dir())
+    }
+
+    /// Hermetic-test entry point for the global layer: load
+    /// `dir/config.toml` directly, bypassing env-var resolution. Mirrors
+    /// `getdev_registry::Cache::open_at`'s override-by-parameter pattern —
+    /// tests must never mutate process-wide env vars (see that crate's test
+    /// module for the rationale).
+    pub fn load_global_at(dir: &Path) -> Result<Self, ConfigError> {
+        let path = dir.join(GLOBAL_CONFIG_FILE);
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default());
+            }
+            Err(source) => return Err(ConfigError::Read { path, source }),
+        };
+        Self::parse(&text, &path)
+    }
+
+    /// Pure field-level precedence merge: a `project` value that differs
+    /// from the built-in default wins; otherwise a `global` value that
+    /// differs from the default wins; otherwise the default applies.
+    /// `docs/SPEC-CONFIG.md`: **flags > project > global > defaults** — this
+    /// implements the project/global/defaults half of that chain (flags are
+    /// applied by the CLI layer on top of the `Config` this returns).
+    #[must_use]
+    pub fn merge(project: Config, global: Config) -> Config {
+        let default = Config::default();
+        Config {
+            project: ProjectConfig {
+                stack: pick(
+                    project.project.stack,
+                    global.project.stack,
+                    default.project.stack,
+                ),
+            },
+            check: CheckConfig {
+                fail_on: pick(
+                    project.check.fail_on,
+                    global.check.fail_on,
+                    default.check.fail_on,
+                ),
+                score_badge: pick(
+                    project.check.score_badge,
+                    global.check.score_badge,
+                    default.check.score_badge,
+                ),
+            },
+            real: RealConfig {
+                offline: pick(
+                    project.real.offline,
+                    global.real.offline,
+                    default.real.offline,
+                ),
+                check_apis: pick(
+                    project.real.check_apis,
+                    global.real.check_apis,
+                    default.real.check_apis,
+                ),
+                typosquat_sensitivity: pick(
+                    project.real.typosquat_sensitivity,
+                    global.real.typosquat_sensitivity,
+                    default.real.typosquat_sensitivity,
+                ),
+            },
+            audit: AuditConfig {
+                severity_min: pick(
+                    project.audit.severity_min,
+                    global.audit.severity_min,
+                    default.audit.severity_min,
+                ),
+            },
+            review: ReviewConfig {
+                against: pick(
+                    project.review.against,
+                    global.review.against,
+                    default.review.against,
+                ),
+            },
+            env: EnvConfig {
+                include_urls: pick(
+                    project.env.include_urls,
+                    global.env.include_urls,
+                    default.env.include_urls,
+                ),
+                env_file: pick(
+                    project.env.env_file,
+                    global.env.env_file,
+                    default.env.env_file,
+                ),
+            },
+            snap: SnapConfig {
+                keep: pick(project.snap.keep, global.snap.keep, default.snap.keep),
+                auto_snap_before_fix: pick(
+                    project.snap.auto_snap_before_fix,
+                    global.snap.auto_snap_before_fix,
+                    default.snap.auto_snap_before_fix,
+                ),
+            },
+            ship: ShipConfig {
+                target: pick(project.ship.target, global.ship.target, default.ship.target),
+                run_build: pick(
+                    project.ship.run_build,
+                    global.ship.run_build,
+                    default.ship.run_build,
+                ),
+            },
+            ignore: IgnoreConfig {
+                rules: pick(
+                    project.ignore.rules,
+                    global.ignore.rules,
+                    default.ignore.rules,
+                ),
+                paths: pick(
+                    project.ignore.paths,
+                    global.ignore.paths,
+                    default.ignore.paths,
+                ),
+            },
+            suppressions: pick(
+                project.suppressions,
+                global.suppressions,
+                default.suppressions,
+            ),
+        }
+    }
+
+    /// Resolve the full precedence chain for one invocation: load the
+    /// project config (from `cli_config` if the `--config` flag was given,
+    /// else `dir/.getdev.toml`), load the global config, and merge them.
+    /// Flags themselves are applied by the caller on top of the result.
+    pub fn resolve(cli_config: Option<&Path>, dir: &Path) -> Result<Self, ConfigError> {
+        let project = match cli_config {
+            Some(path) => {
+                let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+                Self::parse(&text, path)?
+            }
+            None => Self::load(dir)?,
+        };
+        let global = Self::load_global()?;
+        Ok(Self::merge(project, global))
+    }
+}
+
+/// Resolves the global config directory: `GETDEV_CONFIG_HOME` first (the
+/// hermetic-test override — tests must never touch the real `~/.getdev`),
+/// else `~/.getdev` (`%USERPROFILE%` on Windows).
+pub fn global_config_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("GETDEV_CONFIG_HOME") {
+        return PathBuf::from(dir);
+    }
+    let home_var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    let home = std::env::var_os(home_var)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    home.join(GLOBAL_CONFIG_DIR_NAME)
+}
+
+/// The single source of truth for offline mode across every command:
+/// true if the `--offline` flag was passed, OR `GETDEV_OFFLINE` is set
+/// (any value), OR `[real].offline = true` in the resolved config.
+#[must_use]
+pub fn offline_resolved(flag: bool, cfg: &Config) -> bool {
+    flag || std::env::var_os("GETDEV_OFFLINE").is_some() || cfg.real.offline
+}
+
+/// `project` wins if it differs from `default` (i.e. was explicitly set to
+/// something other than the compiled-in default); otherwise `global` wins
+/// under the same rule; otherwise `default` applies. This is the field-level
+/// precedence primitive `Config::merge` applies to every key.
+fn pick<T: PartialEq>(project: T, global: T, default: T) -> T {
+    if project != default {
+        project
+    } else if global != default {
+        global
+    } else {
+        default
+    }
 }
 
 #[cfg(test)]
@@ -218,6 +414,7 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     const FULL_EXAMPLE: &str = r#"
 [project]
@@ -307,5 +504,94 @@ reason = "test fixture key, not a real secret"
         std::fs::create_dir_all(&dir).unwrap();
         let config = Config::load(&dir).unwrap();
         assert_eq!(config, Config::default());
+    }
+
+    fn tmp_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "getdev-cfg-global-{label}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn missing_global_config_is_default() {
+        let dir = tmp_dir("missing");
+        let config = Config::load_global_at(&dir).unwrap();
+        assert_eq!(config, Config::default());
+    }
+
+    #[test]
+    fn malformed_global_config_is_a_hard_parse_error() {
+        let dir = tmp_dir("malformed");
+        std::fs::write(
+            dir.join(GLOBAL_CONFIG_FILE),
+            "[check]\nfail_onn = \"low\"\n",
+        )
+        .unwrap();
+        let err = Config::load_global_at(&dir).unwrap_err();
+        assert!(matches!(err, ConfigError::Parse { .. }));
+    }
+
+    #[test]
+    fn global_only_value_is_used_when_project_unset() {
+        let dir = tmp_dir("global-only");
+        std::fs::write(dir.join(GLOBAL_CONFIG_FILE), "[check]\nfail_on = \"low\"\n").unwrap();
+        let global = Config::load_global_at(&dir).unwrap();
+        let merged = Config::merge(Config::default(), global);
+        assert_eq!(merged.check.fail_on, Severity::Low);
+    }
+
+    #[test]
+    fn project_value_overrides_the_same_key_set_in_global() {
+        let dir = tmp_dir("project-overrides");
+        std::fs::write(dir.join(GLOBAL_CONFIG_FILE), "[check]\nfail_on = \"low\"\n").unwrap();
+        let global = Config::load_global_at(&dir).unwrap();
+        let project = Config::parse(
+            "[check]\nfail_on = \"critical\"\n",
+            Path::new(".getdev.toml"),
+        )
+        .unwrap();
+        let merged = Config::merge(project, global);
+        assert_eq!(merged.check.fail_on, Severity::Critical);
+    }
+
+    #[test]
+    fn merge_falls_back_to_default_when_neither_layer_sets_a_key() {
+        let merged = Config::merge(Config::default(), Config::default());
+        assert_eq!(merged, Config::default());
+    }
+
+    #[test]
+    fn offline_resolved_true_when_flag_set() {
+        assert!(offline_resolved(true, &Config::default()));
+    }
+
+    #[test]
+    fn offline_resolved_true_when_config_real_offline_set() {
+        let mut cfg = Config::default();
+        cfg.real.offline = true;
+        assert!(offline_resolved(false, &cfg));
+    }
+
+    // The `GETDEV_OFFLINE` env-var branch of `offline_resolved` is a single
+    // `var_os` read (see the function above), exercised the same way
+    // `getdev_registry::client::resolve_offline`'s env branch is: not
+    // re-verified here via `std::env::set_var`, which this crate's
+    // `unsafe_code = "forbid"` lint plus the workspace's env-var-mutation
+    // convention (see `getdev-registry/src/cache.rs` tests) both steer away
+    // from in a parallel-test binary. This next test instead pins down that
+    // *absent* the env var, an unset flag and unset config both resolve to
+    // `false` — the behavior CI relies on for every other hermetic test.
+    #[test]
+    fn offline_resolved_false_when_nothing_is_set_and_env_var_absent() {
+        if std::env::var_os("GETDEV_OFFLINE").is_none() {
+            assert!(!offline_resolved(false, &Config::default()));
+        }
     }
 }
