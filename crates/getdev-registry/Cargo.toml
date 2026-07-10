@@ -13,3 +13,10 @@ homepage.workspace = true
 workspace = true
 
 [dependencies]
+rayon = { workspace = true }
+reqwest = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+strsim = { workspace = true }
+thiserror = { workspace = true }
