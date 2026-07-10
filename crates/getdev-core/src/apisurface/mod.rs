@@ -14,6 +14,7 @@
 //! `real` command can still surface it as an `info`-tier hint.
 
 pub mod dts;
+pub mod pysurface;
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -58,6 +59,19 @@ pub struct UsageSite {
     pub line: u32,
 }
 
+/// Collect every JS/TS/TSX and Python usage site under `root`'s project
+/// source (never `node_modules`/`site-packages` — those are the surfaces
+/// being checked against, not usage sites). Same skip-not-fail contract as
+/// [`crate::scan::scan_path`]: grammar/query errors are programming bugs
+/// and propagate; per-file read/parse trouble is collected, never fatal.
+pub fn collect_usages(root: &Path) -> Result<(Vec<UsageSite>, Vec<ScanError>), ScanError> {
+    let (mut sites, mut skipped) = dts::collect_js_usages(root)?;
+    let (py_sites, py_skipped) = pysurface::collect_py_usages(root)?;
+    sites.extend(py_sites);
+    skipped.extend(py_skipped);
+    Ok((sites, skipped))
+}
+
 /// Project-relative display path, forward slashes — mirrors
 /// `deps::relative_display`/`env::plan`'s convention. Duplicated locally
 /// (rather than imported) since `deps`'s copy is crate-private to that
@@ -69,6 +83,8 @@ pub(crate) fn relative_display(path: &Path, root: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
+
     use super::*;
 
     #[test]
@@ -78,5 +94,31 @@ mod tests {
             relative_display(Path::new("/proj/src/a.ts"), root),
             "src/a.ts"
         );
+    }
+
+    #[test]
+    fn collect_usages_combines_js_and_python_sites() {
+        let dir = std::env::temp_dir().join(format!(
+            "getdev-apisurface-collect-usages-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("a.ts"),
+            "import { helper } from 'js-pkg';\nhelper();\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("b.py"), "from json import dumps\ndumps({})\n").unwrap();
+
+        let (usages, skipped) = collect_usages(&dir).unwrap();
+        assert!(skipped.is_empty());
+        let pairs: Vec<(&str, &str)> = usages
+            .iter()
+            .map(|u| (u.package.as_str(), u.member.as_str()))
+            .collect();
+        assert!(pairs.contains(&("js-pkg", "helper")));
+        assert!(pairs.contains(&("json", "dumps")));
     }
 }
