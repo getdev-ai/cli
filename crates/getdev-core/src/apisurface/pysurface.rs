@@ -395,7 +395,9 @@ pub(crate) fn collect_py_usages(
     let mut results = Vec::new();
     let mut skipped = Vec::new();
 
-    for entry in WalkBuilder::new(root).build().flatten() {
+    let mut builder = WalkBuilder::new(root);
+    builder.filter_entry(super::is_not_installed_package_dir);
+    for entry in builder.build().flatten() {
         if !entry.file_type().is_some_and(|t| t.is_file()) {
             continue;
         }
