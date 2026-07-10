@@ -10,6 +10,7 @@ pub mod env;
 pub mod findings;
 pub mod models;
 pub mod mutate;
+pub mod real;
 pub mod report;
 pub mod scan;
 pub mod secrets;
