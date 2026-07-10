@@ -2,6 +2,7 @@
 
 > **Verify, secure, and ship AI-generated code. One binary, runs locally, nothing leaves your machine.**
 
+[![CI](https://github.com/getdev-ai/cli/actions/workflows/ci.yml/badge.svg)](https://github.com/getdev-ai/cli/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 > **Status: pre-development (P0 — foundation).** The plan is written, the code is not.
