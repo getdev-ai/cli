@@ -393,12 +393,34 @@ fn bare_js_module(spec: &str) -> String {
 /// named imports (`import { a, b as c } from 'pkg'`) and TS
 /// `import x = require('pkg')` / CommonJS `const x = require('pkg')` are
 /// captured too.
-const IMPORT_BINDING_QUERY: &str = "\
+///
+/// `import_require_clause` is a TypeScript-only grammar node — it does not
+/// exist in the plain JavaScript grammar, so a query referencing it
+/// unconditionally fails with `QueryError: Invalid node type
+/// import_require_clause` the moment `usages_in_file` runs against a `.js`
+/// file (every plain Node/Express project). Branch by language, mirroring
+/// `imports_js.rs`'s `import_query` pattern, so the JS variant omits the
+/// TS-only clause entirely.
+const IMPORT_BINDING_QUERY_JS: &str = "\
+    (import_statement (import_clause (identifier) @binding) source: (string) @src)\n\
+    (import_statement (import_clause (namespace_import (identifier) @binding)) source: (string) @src)\n\
+    (import_statement (import_clause (named_imports (import_specifier name: (identifier) @named_name alias: (identifier)? @named_alias))) source: (string) @src)\n\
+    (variable_declarator name: (identifier) @binding value: (call_expression function: (identifier) @fn (#eq? @fn \"require\") arguments: (arguments (string) @src)))";
+
+const IMPORT_BINDING_QUERY_TS: &str = "\
     (import_statement (import_clause (identifier) @binding) source: (string) @src)\n\
     (import_statement (import_clause (namespace_import (identifier) @binding)) source: (string) @src)\n\
     (import_statement (import_clause (named_imports (import_specifier name: (identifier) @named_name alias: (identifier)? @named_alias))) source: (string) @src)\n\
     (import_require_clause (identifier) @binding source: (string) @src)\n\
     (variable_declarator name: (identifier) @binding value: (call_expression function: (identifier) @fn (#eq? @fn \"require\") arguments: (arguments (string) @src)))";
+
+fn import_binding_query(lang: Lang) -> &'static str {
+    match lang {
+        Lang::JavaScript => IMPORT_BINDING_QUERY_JS,
+        Lang::TypeScript | Lang::Tsx => IMPORT_BINDING_QUERY_TS,
+        Lang::Python => "",
+    }
+}
 
 const MEMBER_EXPRESSION_QUERY: &str =
     "(member_expression object: (identifier) @obj property: (property_identifier) @prop)";
@@ -455,7 +477,7 @@ fn usages_in_file(path: &Path, lang: Lang, root: &Path) -> Result<Vec<UsageSite>
     let mut results = Vec::new();
     let mut bindings: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
-    let binding_query = Query::new(&language, IMPORT_BINDING_QUERY)?;
+    let binding_query = Query::new(&language, import_binding_query(lang))?;
     let src_idx = binding_query.capture_index_for_name("src");
     let binding_idx = binding_query.capture_index_for_name("binding");
     let named_name_idx = binding_query.capture_index_for_name("named_name");

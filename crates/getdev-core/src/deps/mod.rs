@@ -174,7 +174,16 @@ pub fn build_graph(root: &Path) -> Result<(DependencyGraph, Vec<ScanError>), Dep
 
     let mut imports = Vec::with_capacity(js_raw.len() + py_raw.len());
     for raw in js_raw {
-        let resolution = classify(&raw, &declared_npm_set, &node_builtins, &locals);
+        // npm: the declared set is never normalized, so the raw import
+        // specifier is the correct lookup key as-is.
+        let declared_key = raw.module.clone();
+        let resolution = classify(
+            &raw,
+            &declared_npm_set,
+            &declared_key,
+            &node_builtins,
+            &locals,
+        );
         imports.push(ImportRef {
             module: raw.module,
             file: raw.file,
@@ -184,7 +193,25 @@ pub fn build_graph(root: &Path) -> Result<(DependencyGraph, Vec<ScanError>), Dep
         });
     }
     for raw in py_raw {
-        let resolution = classify(&raw, &declared_pypi_set, &python_stdlib, &locals);
+        // pypi: `declared_pypi_set` is PEP 503-normalized (manifest_py.rs),
+        // but `raw.module` is the raw import spelling (e.g. the underscore
+        // form `typing_extensions`/`acme_api_client` that mirrors the
+        // installed package's real directory name) — normalize the lookup
+        // key here too, or every PyPI package whose distribution name uses
+        // hyphens where its import name uses underscores (an extremely
+        // common convention) is misclassified as `real/phantom-import`
+        // despite being correctly declared. `builtins`/`locals` are
+        // deliberately checked against the UNNORMALIZED `raw.module` below
+        // (via `classify`) since those sets are raw filesystem/stdlib names,
+        // not PEP 503 identifiers.
+        let declared_key = normalize_pep503(&raw.module);
+        let resolution = classify(
+            &raw,
+            &declared_pypi_set,
+            &declared_key,
+            &python_stdlib,
+            &locals,
+        );
         imports.push(ImportRef {
             module: raw.module,
             file: raw.file,
@@ -213,9 +240,16 @@ pub fn build_graph(root: &Path) -> Result<(DependencyGraph, Vec<ScanError>), Dep
     ))
 }
 
+/// `declared_key` is the lookup key to use against `declared` specifically —
+/// callers pass a PEP 503-normalized key for Pypi (matching how
+/// `declared_pypi_set` itself was built) and the raw specifier as-is for
+/// npm. `builtins`/`locals` are always checked against `raw.module`
+/// unnormalized, since those sets are raw filesystem/stdlib names, not
+/// PEP 503 identifiers.
 fn classify(
     raw: &RawImport,
     declared: &BTreeSet<String>,
+    declared_key: &str,
     builtins: &HashSet<String>,
     locals: &HashSet<String>,
 ) -> ImportResolution {
@@ -225,7 +259,7 @@ fn classify(
     if builtins.contains(&raw.module) {
         return ImportResolution::Builtin;
     }
-    if declared.contains(&raw.module) {
+    if declared.contains(declared_key) {
         return ImportResolution::Declared;
     }
     if locals.contains(&raw.module) {
