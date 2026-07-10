@@ -17,6 +17,7 @@ getdev-grammars = { workspace = true }
 humantime = { workspace = true }
 ignore = { workspace = true }
 owo-colors = { workspace = true }
+pyproject-toml = "0.13"
 regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

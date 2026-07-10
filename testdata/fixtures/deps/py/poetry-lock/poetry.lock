@@ -1,0 +1,20 @@
+[[package]]
+name = "certifi"
+version = "2024.2.2"
+description = "Python package for providing Mozilla's CA Bundle."
+optional = false
+python-versions = ">=3.6"
+files = []
+
+[[package]]
+name = "charset-normalizer"
+version = "3.3.2"
+description = "The Real First Universal Charset Detector."
+optional = false
+python-versions = ">=3.7"
+files = []
+
+[metadata]
+lock-version = "2.0"
+python-versions = "^3.11"
+content-hash = "fakehash"

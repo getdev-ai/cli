@@ -8,15 +8,17 @@
 //! Open Question 2: `real`'s checks are a programmatic core-analyzer
 //! category, like `core::secrets`, not a YAML matcher pack).
 //!
-//! This module grows across 03-02's three tasks: JS/TS manifest parsing
-//! (this commit), Python manifest parsing, then AST import extraction +
+//! This module grows across 03-02's three tasks: JS/TS manifest parsing,
+//! Python manifest parsing (this commit), then AST import extraction +
 //! the `DependencyGraph` reconciliation.
 
 mod manifest_js;
+mod manifest_py;
 
 use std::path::PathBuf;
 
 pub use manifest_js::declared_npm;
+pub use manifest_py::{declared_pypi, normalize_pep503};
 
 #[derive(Debug, thiserror::Error)]
 pub enum DepsError {
@@ -50,4 +52,10 @@ pub enum DepsError {
         #[source]
         source: yarn_lock_parser::YarnLockError,
     },
+    // pyproject-toml (0.13, transitively toml 0.9) returns its own
+    // `toml::de::Error` type, distinct from this crate's `toml` 0.8
+    // dependency — captured as a message rather than a typed `#[source]` to
+    // avoid depending on a second `toml` major version just to name it.
+    #[error("invalid pyproject.toml at {path}: {message}")]
+    PyProjectToml { path: PathBuf, message: String },
 }
