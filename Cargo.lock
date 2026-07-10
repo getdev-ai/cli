@@ -436,8 +436,10 @@ dependencies = [
  "getdev-gitx",
  "getdev-grammars",
  "getdev-registry",
+ "rayon",
  "reqwest",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -70,6 +70,30 @@ enum Command {
         #[arg(long)]
         write: bool,
     },
+    /// Verify packages / APIs / model strings actually exist
+    Real {
+        /// Directory to scan
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        /// Machine-readable output (findings schema)
+        #[arg(long)]
+        json: bool,
+        /// Disable ANSI colors (NO_COLOR is also honored)
+        #[arg(long)]
+        no_color: bool,
+        /// Exit 1 if any finding is at or above this severity
+        #[arg(long, value_name = "SEVERITY")]
+        fail_on: Option<Severity>,
+        /// Only run the dependency/package existence checks
+        #[arg(long, conflicts_with_all = ["apis_only", "models_only"])]
+        deps_only: bool,
+        /// Only run the API-surface checks
+        #[arg(long, conflicts_with_all = ["deps_only", "models_only"])]
+        apis_only: bool,
+        /// Only run the LLM model-string check
+        #[arg(long, conflicts_with_all = ["deps_only", "apis_only"])]
+        models_only: bool,
+    },
     /// Self-diagnostics: toolchain, git availability, grammar integrity
     Doctor,
     /// P0 de-risking spike: walk + parse + query a directory (dev-only)
@@ -130,6 +154,26 @@ fn run(cli: Cli) -> anyhow::Result<u8> {
             quiet,
             verbose,
         }),
+        Command::Real {
+            path,
+            json,
+            no_color,
+            fail_on,
+            deps_only,
+            apis_only,
+            models_only,
+        } => commands::real::run(&commands::real::RealArgs {
+            path,
+            json,
+            no_color,
+            fail_on,
+            offline,
+            deps_only,
+            apis_only,
+            models_only,
+            quiet,
+            verbose,
+        }),
         Command::Doctor => commands::doctor::run(offline, cli.global.fix).map(|()| 0),
         Command::Spike { path } => commands::spike::run(&path).map(|()| 0),
     }
@@ -141,7 +185,9 @@ fn run(cli: Cli) -> anyhow::Result<u8> {
 /// against `.`, matching its pre-existing behavior.
 fn command_path(command: &Command) -> PathBuf {
     match command {
-        Command::Env { path, .. } | Command::Spike { path } => path.clone(),
+        Command::Env { path, .. } | Command::Real { path, .. } | Command::Spike { path } => {
+            path.clone()
+        }
         Command::Doctor => PathBuf::from("."),
     }
 }
