@@ -8,6 +8,7 @@ pub mod config;
 pub mod deps;
 pub mod env;
 pub mod findings;
+pub mod models;
 pub mod mutate;
 pub mod report;
 pub mod scan;

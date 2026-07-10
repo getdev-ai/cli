@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "families": [
+    "claude-opus-",
+    "claude-sonnet-",
+    "claude-haiku-",
+    "claude-fable-",
+    "claude-3",
+    "gpt-",
+    "o1-",
+    "o3-",
+    "o4-",
+    "gemini-",
+    "mistral-",
+    "mixtral-",
+    "llama-",
+    "command-",
+    "grok-",
+    "deepseek-"
+  ],
+  "call_sites": ["model", "model_name", "modelId", "model_id", "deployment"]
+}
