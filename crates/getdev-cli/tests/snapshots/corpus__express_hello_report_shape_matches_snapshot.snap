@@ -1,0 +1,70 @@
+---
+source: crates/getdev-cli/tests/corpus.rs
+assertion_line: 363
+expression: report
+---
+{
+  "findings": [
+    {
+      "command": "real",
+      "confidence": "high",
+      "detail": "declared in the manifest. No package with this name has ever been published on npm.",
+      "file": "package.json",
+      "fixable": false,
+      "id": "real/nonexistent-package",
+      "message": "Package 'totally-fake-auth-helper-xyz' does not exist on npm",
+      "refs": [
+        "https://getdev.ai/rules/real/nonexistent-package"
+      ],
+      "remediation": "remove the dependency or replace it with a real package providing the needed functionality",
+      "severity": "critical"
+    },
+    {
+      "command": "real",
+      "confidence": "high",
+      "detail": "this import is neither a manifest-declared package, a language builtin, nor a local project module — a likely hallucinated or since-removed dependency",
+      "end_line": 2,
+      "file": "src/app.js",
+      "fixable": false,
+      "id": "real/phantom-import",
+      "line": 2,
+      "message": "Import 'not-a-real-logger-xyz' resolves to no declared dependency, builtin, or local module",
+      "refs": [
+        "https://getdev.ai/rules/real/phantom-import"
+      ],
+      "remediation": "declare 'not-a-real-logger-xyz' as a dependency, or remove the import if it was never needed",
+      "severity": "high"
+    },
+    {
+      "command": "real",
+      "confidence": "medium",
+      "detail": "no vendor family prefix (Anthropic/OpenAI/Google/Mistral/Meta/Cohere/xAI/DeepSeek) matched this literal — it may be a hallucinated, deprecated, or newly-released model id",
+      "end_line": 5,
+      "file": "src/app.js",
+      "fixable": false,
+      "id": "real/unknown-model-string",
+      "line": 5,
+      "message": "Model string 'gpt5-turbo-hallucinated' matches no known vendor family",
+      "refs": [
+        "https://getdev.ai/rules/real/unknown-model-string"
+      ],
+      "remediation": "verify this model id exists with the provider before shipping",
+      "severity": "medium"
+    }
+  ],
+  "generated_at": "<redacted>",
+  "project": {
+    "path": "<redacted>",
+    "stack": []
+  },
+  "schema_version": "1",
+  "summary": {
+    "critical": 1,
+    "fixable": 0,
+    "high": 1,
+    "info": 0,
+    "low": 0,
+    "medium": 1
+  },
+  "tool_version": "<redacted>"
+}

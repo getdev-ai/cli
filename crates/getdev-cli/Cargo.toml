@@ -32,4 +32,5 @@ serde = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = "2.2.2"
+insta = { version = "1.48.0", features = ["json"] }
 serde_json = { workspace = true }
