@@ -1,0 +1,2 @@
+import flask
+import totally_fake_nested_phantom_module

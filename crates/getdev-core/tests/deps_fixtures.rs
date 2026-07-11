@@ -220,6 +220,186 @@ fn supported_stack_never_reports_unsupported_hint() {
     assert!(graph.unsupported_stack.is_none());
 }
 
+/// A4: a manifest nested inside a subdirectory (`backend/requirements.txt`,
+/// mirroring a real `backend/` + `frontend/` service layout) must be
+/// discovered, not just a root-level manifest — on the old root-only
+/// discovery this fixture's `flask` import wrongly classified as
+/// `real/phantom-import` despite being correctly declared one directory
+/// down.
+#[test]
+fn py_nested_manifest_is_discovered_and_declared_import_is_not_phantom() {
+    let dir = fixtures("py/nested-manifest");
+    let (graph, skipped) = deps::build_graph(&dir).unwrap();
+    assert!(skipped.is_empty());
+    assert_eq!(
+        resolution_of(&graph.imports, "flask"),
+        Some(&ImportResolution::Declared),
+        "a manifest nested under backend/ must still be discovered (A4)"
+    );
+    assert_eq!(
+        resolution_of(&graph.imports, "totally_fake_nested_phantom_module"),
+        Some(&ImportResolution::Phantom),
+        "control: an undeclared import in the same nested file must still be Phantom"
+    );
+}
+
+/// A5: `import yaml` with `pyyaml` declared (not `yaml`) must resolve as
+/// `Declared` via the import-name -> distribution-name alias table, not
+/// `real/phantom-import`.
+#[test]
+fn py_import_alias_yaml_declares_as_pyyaml_is_not_phantom() {
+    let dir = fixtures("py/alias");
+    let (graph, skipped) = deps::build_graph(&dir).unwrap();
+    assert!(skipped.is_empty());
+    assert_eq!(
+        resolution_of(&graph.imports, "yaml"),
+        Some(&ImportResolution::Declared),
+        "import yaml must resolve via the pyyaml alias (A5)"
+    );
+}
+
+/// A6: `operator`/`shlex`/`optparse` are Python stdlib and must never be
+/// phantom, even with zero manifests present.
+#[test]
+fn py_stdlib_gap_modules_are_never_phantom() {
+    let dir = fixtures("py/stdlib-gap");
+    let (graph, skipped) = deps::build_graph(&dir).unwrap();
+    assert!(skipped.is_empty());
+    for module in ["operator", "shlex", "optparse"] {
+        assert_eq!(
+            resolution_of(&graph.imports, module),
+            Some(&ImportResolution::Builtin),
+            "{module} must be recognized as stdlib (A6)"
+        );
+    }
+}
+
+/// A10: a malformed manifest (invalid JSON) must become a skip entry, not
+/// abort `build_graph` for the whole project — a sibling manifest's
+/// declared names must still come through.
+#[test]
+fn js_malformed_manifest_is_skipped_not_fatal() {
+    let dir = fixtures("js/malformed-manifest");
+    let (graph, skipped) = deps::build_graph(&dir).unwrap();
+    assert_eq!(skipped.len(), 1, "the malformed manifest must be skipped");
+    assert!(
+        skipped[0].to_string().contains("backend/package.json")
+            || skipped[0].to_string().contains("backend"),
+        "skip reason should reference the malformed file: {}",
+        skipped[0]
+    );
+    assert!(
+        graph
+            .declared
+            .get(&Ecosystem::Npm)
+            .is_some_and(|set| set.contains("lodash")),
+        "the sibling, valid root manifest must still be parsed"
+    );
+}
+
+/// A11: PEP 621 `[project.optional-dependencies]` (every extras group) and
+/// PEP 735 `[dependency-groups]` must be unioned into the declared set.
+#[test]
+fn py_pyproject_optional_dependencies_and_dependency_groups() {
+    assert_eq!(
+        declared_pypi_set("py/pyproject-optional-deps"),
+        names(&["requests", "pytest", "ruff", "black"])
+    );
+}
+
+/// A11: `[tool.poetry.group.*.dependencies]` and
+/// `[tool.poetry.dev-dependencies]` must be unioned into the declared set.
+#[test]
+fn py_pyproject_poetry_group_and_dev_dependencies() {
+    assert_eq!(
+        declared_pypi_set("py/pyproject-poetry-groups"),
+        names(&["django", "black", "mypy"])
+    );
+}
+
+/// A16: dynamic `import("pkg")` and `export ... from "pkg"` sources must be
+/// extracted and reconciled just like a static `import`/`require`.
+#[test]
+fn js_dynamic_import_and_export_from_are_reconciled() {
+    let dir = fixtures("js/dynamic-import");
+    let (graph, skipped) = deps::build_graph(&dir).unwrap();
+    assert!(skipped.is_empty());
+    assert_eq!(
+        resolution_of(&graph.imports, "left-pad"),
+        Some(&ImportResolution::Declared),
+        "export {{ x }} from \"pkg\" must be extracted and reconciled (A16)"
+    );
+    assert_eq!(
+        resolution_of(&graph.imports, "totally-fake-dynamic-only-pkg"),
+        Some(&ImportResolution::Phantom),
+        "dynamic import(\"pkg\") must be extracted and reconciled (A16)"
+    );
+}
+
+/// F8: `-r base.txt` must be resolved (relative to the requirements file)
+/// and recursively parsed, and a bare `.` line must yield NO declared name
+/// (never the bogus literal `.`/`-`).
+#[test]
+fn py_requirements_include_is_resolved_and_bare_dot_yields_no_name() {
+    let declared = declared_pypi_set("py/requirements-include");
+    assert_eq!(declared, names(&["requests"]));
+    assert!(
+        !declared.contains("."),
+        "bare `.` line must not yield a name"
+    );
+    assert!(
+        !declared.contains("-"),
+        "bare `.` line must not yield \"-\""
+    );
+}
+
+/// A7 regression, exercised at the `build_graph` level (not just the raw
+/// walker unit tests in `scan.rs`): a `node_modules` tree outside a git
+/// repository must be excluded from both manifest discovery and import
+/// extraction — this tempdir is deliberately never `git init`-ed.
+#[test]
+fn node_modules_is_excluded_outside_a_git_repo_at_build_graph_level() {
+    let dir = std::env::temp_dir().join(format!(
+        "getdev-deps-a7-regression-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("node_modules/vendored-pkg")).unwrap();
+    std::fs::write(
+        dir.join("node_modules/vendored-pkg/package.json"),
+        r#"{"dependencies": {"should-never-be-declared": "^1.0.0"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("node_modules/vendored-pkg/index.js"),
+        "require(\"should-never-be-an-import\");\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"dependencies": {"left-pad": "^1.3.0"}}"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join("index.js"), "require(\"left-pad\");\n").unwrap();
+
+    let (graph, skipped) = deps::build_graph(&dir).unwrap();
+    assert!(skipped.is_empty());
+    assert!(
+        graph
+            .declared
+            .get(&Ecosystem::Npm)
+            .is_some_and(|set| !set.contains("should-never-be-declared")),
+        "node_modules/vendored-pkg/package.json must never be discovered"
+    );
+    assert!(
+        resolution_of(&graph.imports, "should-never-be-an-import").is_none(),
+        "node_modules source must never be walked for imports"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // Ensure the fixture directory itself is what the doc comment claims —
 // guards against silently pointing at an empty/renamed directory.
 #[test]
@@ -231,13 +411,21 @@ fn fixture_root_exists() {
         "js/pnpm-lock",
         "js/yarn-lock",
         "js/phantom",
+        "js/malformed-manifest",
+        "js/dynamic-import",
         "py/requirements",
+        "py/requirements-include",
         "py/pyproject-pep621",
         "py/pyproject-poetry",
+        "py/pyproject-optional-deps",
+        "py/pyproject-poetry-groups",
         "py/poetry-lock",
         "py/uv-lock",
         "py/normalization",
         "py/phantom",
+        "py/nested-manifest",
+        "py/alias",
+        "py/stdlib-gap",
         "go-only",
     ] {
         let path = fixtures(dir);
