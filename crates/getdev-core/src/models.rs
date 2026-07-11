@@ -217,4 +217,29 @@ mod tests {
             .classify_model("anthropic.claude-3-5-sonnet-20241022-v2:0", "model_id")
             .is_none());
     }
+
+    /// F6 — documented residual FP class: an ORM-style `model:` key whose
+    /// value happens to look like a model id (hyphen + version suffix)
+    /// still flags at medium/medium once it reaches a model call site
+    /// name. This is an accepted trade-off (03-REVIEW.md F6): the family
+    /// gate protects every real model id from ANY known vendor, so the only
+    /// remaining false-positive surface is a non-model field that happens
+    /// to share a call-site identifier name (`model`) AND happens to look
+    /// like a dashed/versioned id — narrow, and always emits a
+    /// human-readable "matches no known vendor family" detail rather than
+    /// staying silent, so it is a documented trade-off, not a silent bug.
+    #[test]
+    fn orm_style_model_field_collision_is_a_documented_medium_medium_finding() {
+        let m = matcher();
+        let verdict = m.classify_model("user-profile-v2", "model").unwrap();
+
+        let finding = crate::real::unknown_model_finding(&verdict, "app/models.py", Some(12));
+        assert_eq!(finding.severity, crate::findings::Severity::Medium);
+        assert_eq!(finding.confidence, crate::findings::Confidence::Medium);
+        assert!(finding
+            .detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("no vendor family prefix"));
+    }
 }

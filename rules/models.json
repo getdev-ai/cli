@@ -38,5 +38,5 @@
     "meta.llama",
     "amazon.nova-"
   ],
-  "call_sites": ["model", "model_name", "modelId", "model_id", "deployment"]
+  "call_sites": ["model", "model_name", "modelId", "model_id"]
 }
