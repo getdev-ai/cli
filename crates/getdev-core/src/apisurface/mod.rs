@@ -245,18 +245,16 @@ pub(crate) fn relative_display(path: &Path, root: &Path) -> String {
     rel.to_string_lossy().replace('\\', "/")
 }
 
-/// `WalkBuilder::filter_entry` predicate shared by `dts::collect_js_usages`
-/// and `pysurface::collect_py_usages`: usage extraction walks *project*
-/// source, never the installed packages under `node_modules`/
-/// `site-packages` — those are the surfaces being checked against, and
-/// treating their own source as "usage sites" would be both semantically
-/// wrong and, on a real project, prohibitively slow to walk.
-pub(crate) fn is_not_installed_package_dir(entry: &ignore::DirEntry) -> bool {
-    !matches!(
-        entry.file_name().to_str(),
-        Some("node_modules" | "site-packages")
-    )
-}
+// `dts::collect_js_usages`/`pysurface::collect_py_usages` walk *project*
+// source, never the installed packages under `node_modules`/`site-packages`
+// — those are the surfaces being checked against, and treating their own
+// source as "usage sites" would be both semantically wrong and, on a real
+// project, prohibitively slow to walk. This exclusion (plus `.venv`, `.git`,
+// `dist`, `build`, `target`, ...) is now enforced uniformly by
+// `crate::scan::project_walker` (A7) — both call sites build on it directly
+// rather than layering a second, narrower `filter_entry` on top (which would
+// silently replace, not compose with, the shared one; `ignore::WalkBuilder`
+// stores at most one filter).
 
 #[cfg(test)]
 mod tests {

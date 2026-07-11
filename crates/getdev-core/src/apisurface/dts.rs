@@ -14,7 +14,6 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use getdev_grammars::tree_sitter::{Node, Parser, Query, QueryCursor};
-use ignore::WalkBuilder;
 use serde::Deserialize;
 use streaming_iterator::StreamingIterator;
 
@@ -56,7 +55,12 @@ pub fn enumerate_js(pkg_dir: &Path) -> Result<ApiSurface, SurfaceError> {
 
     let parsed = match parse_dts_file(&entry) {
         Ok(parsed) => parsed,
-        Err(ScanError::Read { .. } | ScanError::Parse { .. }) => return Ok(unreadable()),
+        Err(
+            ScanError::Read { .. }
+            | ScanError::Parse { .. }
+            | ScanError::TooLarge { .. }
+            | ScanError::Skipped { .. },
+        ) => return Ok(unreadable()),
         Err(err @ (ScanError::Grammar(_) | ScanError::Query(_))) => return Err(err.into()),
     };
 
@@ -85,7 +89,12 @@ pub fn enumerate_js(pkg_dir: &Path) -> Result<ApiSurface, SurfaceError> {
                         tier = SurfaceTier::Dynamic;
                     }
                 }
-                Err(ScanError::Read { .. } | ScanError::Parse { .. }) => {
+                Err(
+                    ScanError::Read { .. }
+                    | ScanError::Parse { .. }
+                    | ScanError::TooLarge { .. }
+                    | ScanError::Skipped { .. },
+                ) => {
                     tier = SurfaceTier::Dynamic;
                 }
                 Err(err @ (ScanError::Grammar(_) | ScanError::Query(_))) => {
@@ -153,10 +162,7 @@ fn normalize_dts_path(pkg_dir: &Path, types_field: &str) -> PathBuf {
 }
 
 fn parse_dts_file(path: &Path) -> Result<ParsedDts, ScanError> {
-    let source = std::fs::read_to_string(path).map_err(|source| ScanError::Read {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let source = crate::scan::read_source_capped(path)?;
 
     let language = Lang::TypeScript.language();
     let mut parser = Parser::new();
@@ -434,9 +440,7 @@ pub(crate) fn collect_js_usages(
     let mut results = Vec::new();
     let mut skipped = Vec::new();
 
-    let mut builder = WalkBuilder::new(root);
-    builder.filter_entry(super::is_not_installed_package_dir);
-    for entry in builder.build().flatten() {
+    for entry in crate::scan::project_walker(root).build().flatten() {
         if !entry.file_type().is_some_and(|t| t.is_file()) {
             continue;
         }
@@ -458,10 +462,7 @@ pub(crate) fn collect_js_usages(
 }
 
 fn usages_in_file(path: &Path, lang: Lang, root: &Path) -> Result<Vec<UsageSite>, ScanError> {
-    let source = std::fs::read_to_string(path).map_err(|source| ScanError::Read {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let source = crate::scan::read_source_capped(path)?;
 
     let language = lang.language();
     let mut parser = Parser::new();
