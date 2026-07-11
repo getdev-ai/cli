@@ -371,8 +371,11 @@ fn accessor(lang: Lang, var_name: &str) -> String {
 }
 
 /// Insert `import os` if the module doesn't import it, after any shebang,
-/// leading comments, and module docstring (inserting before the docstring
-/// would demote it to a plain expression).
+/// leading comments, module docstring, and `from __future__ import …`
+/// statements (inserting before the docstring would demote it to a plain
+/// expression; inserting before a `__future__` import is a SyntaxError —
+/// CPython requires those to be the first statement(s) in the module,
+/// C1/03-REVIEW.md).
 fn ensure_os_import(content: &str) -> String {
     let has_os_import = content.lines().any(|line| {
         let line = line.trim_start();
@@ -412,6 +415,10 @@ fn ensure_os_import(content: &str) -> String {
             if trimmed.len() < delim.len() * 2 || !trimmed.ends_with(*delim) {
                 in_docstring = Some(delim);
             }
+            continue;
+        }
+        if trimmed.starts_with("from __future__ import") {
+            insert_at += line.len();
             continue;
         }
         break;
@@ -491,6 +498,48 @@ mod tests {
             "STRIPE_SECRET_KEY_3"
         );
         assert_eq!(dedupe_name("OTHER", &mut taken), "OTHER");
+    }
+
+    /// C1 regression: `import os` must land AFTER any `from __future__
+    /// import …` line(s) — CPython requires future-imports to be the first
+    /// statement(s) in the module, so inserting `import os` before them
+    /// raises `SyntaxError: from __future__ imports must occur at the
+    /// beginning of the file`.
+    #[test]
+    fn ensure_os_import_lands_after_future_imports() {
+        let content = "from __future__ import annotations\n\nvalue = 1\n";
+        let out = ensure_os_import(content);
+
+        let future_pos = out.find("from __future__ import annotations").unwrap();
+        let os_pos = out.find("import os").unwrap();
+        assert!(
+            os_pos > future_pos,
+            "import os must be inserted after the __future__ import, got:\n{out}"
+        );
+
+        // must also parse cleanly as Python
+        let mut parser = getdev_grammars::tree_sitter::Parser::new();
+        parser.set_language(&Lang::Python.language()).unwrap();
+        let tree = parser.parse(&out, None).unwrap();
+        assert!(
+            !tree.root_node().has_error(),
+            "rewritten module must parse cleanly:\n{out}"
+        );
+    }
+
+    /// Multiple future-import lines (a real-world shape) all get skipped.
+    #[test]
+    fn ensure_os_import_skips_multiple_future_imports() {
+        let content = "\"\"\"Module docstring.\"\"\"\nfrom __future__ import annotations\nfrom __future__ import division\n\nvalue = 1\n";
+        let out = ensure_os_import(content);
+        let last_future = out.rfind("from __future__ import division").unwrap();
+        let os_pos = out.find("import os").unwrap();
+        assert!(os_pos > last_future);
+
+        let mut parser = getdev_grammars::tree_sitter::Parser::new();
+        parser.set_language(&Lang::Python.language()).unwrap();
+        let tree = parser.parse(&out, None).unwrap();
+        assert!(!tree.root_node().has_error());
     }
 
     #[test]
