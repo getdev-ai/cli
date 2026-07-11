@@ -117,11 +117,24 @@ fn run_real(app_dir: &Path, label: &str) -> Value {
 
     let output = assert.get_output();
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Recall-gate hardening: a crash or an unexpected non-zero exit on ONE
+    // corpus app must fail the whole gate loudly and explicitly, not get
+    // silently swallowed by a JSON-parse panic whose message happens to be
+    // legible. No `--fail-on` is ever passed here, so a clean `real` run
+    // against any corpus fixture must always exit 0.
+    let code = output.status.code();
+    assert_eq!(
+        code,
+        Some(0),
+        "getdev real crashed or exited non-zero for {} — exit={code:?} stdout={stdout} \
+         stderr={stderr}",
+        app_dir.display(),
+    );
     let report: Value = serde_json::from_str(&stdout).unwrap_or_else(|err| {
         panic!(
-            "stdout was not valid JSON ({err}) for {}: stdout={stdout} stderr={}",
+            "stdout was not valid JSON ({err}) for {}: stdout={stdout} stderr={stderr}",
             app_dir.display(),
-            String::from_utf8_lossy(&output.stderr)
         )
     });
 
@@ -171,6 +184,14 @@ fn app_label(app_dir: &Path) -> String {
 /// recall is measured against each app's `getdev-expected.json`, matching
 /// on rule `id` + `file` (a seeded defect's exact line can shift as the
 /// corpus evolves; id + file is the stable, documented recall criterion).
+///
+/// D3's second half lives here too: recall alone can pass while an app
+/// drowns in EXTRA false findings that happen to not collide with the
+/// catalogued ones — a seeded app is meant to double as its own sentinel on
+/// every file it did NOT seed a defect into. So every finding on a seeded
+/// app must be one of the catalogued `(id, file)` pairs; anything else is
+/// an unexpected finding, catalogued here as a hard failure rather than a
+/// silently-tolerated extra.
 #[test]
 fn seeded_recall_is_100_percent() {
     let apps = seeded_apps();
@@ -181,6 +202,7 @@ fn seeded_recall_is_100_percent() {
     );
 
     let mut misses = Vec::new();
+    let mut unexpected = Vec::new();
     for app_dir in &apps {
         let label = app_label(app_dir);
         let expected_path = app_dir.join("getdev-expected.json");
@@ -206,6 +228,23 @@ fn seeded_recall_is_100_percent() {
                 misses.push(format!("{label}: missing {} @ {}", exp.id, exp.file));
             }
         }
+
+        let allowed: std::collections::HashSet<(&str, &str)> = expected
+            .seeded
+            .iter()
+            .map(|exp| (exp.id.as_str(), exp.file.as_str()))
+            .collect();
+        for f in &findings {
+            let id = f["id"].as_str().unwrap_or("?");
+            let file = f["file"].as_str().unwrap_or("?");
+            if !allowed.contains(&(id, file)) {
+                unexpected.push(format!(
+                    "{label}: unexpected {id} @ {file} [{}] :: {}",
+                    f["severity"].as_str().unwrap_or("?"),
+                    f["message"].as_str().unwrap_or("?"),
+                ));
+            }
+        }
     }
 
     assert!(
@@ -213,13 +252,38 @@ fn seeded_recall_is_100_percent() {
         "seeded recall is not 100% (the P2 exit criterion) -- missed findings:\n{}",
         misses.join("\n")
     );
+    assert!(
+        unexpected.is_empty(),
+        "seeded apps produced findings beyond their catalogued getdev-expected.json entries — \
+         recall can pass while the analyzer drowns a real signal in extra false positives; if \
+         an extra finding is legitimately correct, add it to that app's catalogue with a \
+         comment explaining why (never loosen this assertion instead):\n{}",
+        unexpected.join("\n")
+    );
 }
 
-/// The false-positive budget (docs/PLAN.md §9.2): the aggregate `real/*`
-/// finding rate across all sentinel snapshots, measured per scanned source
-/// file (JS/TS/TSX/Python, excluding vendored `node_modules`/
-/// `site-packages` surface stubs — the same units `deps`/`apisurface`
-/// actually scan), must stay under 5%.
+/// A finding counts toward the docs/PLAN.md §9.2 false-positive budget only
+/// at warning+ severity (low/medium/high/critical). An info-severity
+/// finding — e.g. `real/nonexistent-api`'s A3 aggregated "could not verify
+/// N usage(s) of 'pkg' — not installed/no readable types" note, the
+/// deliberate, honest output of `sentinels/js-untyped/` — is a
+/// verification note admitting getdev could not confirm one way or the
+/// other, never a claim that something is actually wrong; counting it
+/// against the FP budget would just be double-charging the exact
+/// uncertainty A2/A3 were fixed to surface honestly instead of masking with
+/// a fabricated High.
+fn is_warning_plus(finding: &Value) -> bool {
+    finding["severity"].as_str() != Some("info")
+}
+
+/// The false-positive budget (docs/PLAN.md §9.2): D3 (03-REVIEW.md) — an
+/// aggregate-across-every-rule rate can pass while one specific rule is
+/// badly behaved and just gets diluted by several well-behaved ones, which
+/// is exactly the FP-storm class the Theme A audit found. The rate is
+/// computed PER RULE ID instead: that rule's warning+ finding count across
+/// every sentinel snapshot, divided by the total number of source files
+/// scanned across the whole sentinel set. Every rule that fires at all must
+/// stay under 5%.
 #[test]
 fn sentinels_stay_quiet() {
     let apps = sentinel_apps();
@@ -229,21 +293,30 @@ fn sentinels_stay_quiet() {
         apps.len()
     );
 
-    let mut total_findings = 0usize;
     let mut total_files = 0usize;
+    let mut per_rule_counts: BTreeMap<String, usize> = BTreeMap::new();
     let mut offenders = Vec::new();
 
     for app_dir in &apps {
         let label = app_label(app_dir);
         let report = run_real(app_dir, &label);
         let findings = real_findings(&report);
-        total_findings += findings.len();
         total_files += count_source_files(app_dir);
         for f in &findings {
+            let id = f["id"].as_str().unwrap_or("?").to_owned();
+            let counted = is_warning_plus(f);
+            if counted {
+                *per_rule_counts.entry(id.clone()).or_insert(0) += 1;
+            }
             offenders.push(format!(
-                "{label}: {} [{}] {}:{} :: {}",
-                f["id"].as_str().unwrap_or("?"),
+                "{label}: {id} [{}/{}]{} {}:{} :: {}",
+                f["severity"].as_str().unwrap_or("?"),
                 f["confidence"].as_str().unwrap_or("?"),
+                if counted {
+                    ""
+                } else {
+                    " (info — excluded from the budget)"
+                },
                 f["file"].as_str().unwrap_or("?"),
                 f["line"]
                     .as_u64()
@@ -254,12 +327,31 @@ fn sentinels_stay_quiet() {
         }
     }
 
-    let fp_rate = total_findings as f64 / total_files.max(1) as f64;
+    let denom = total_files.max(1) as f64;
+    let mut table = Vec::new();
+    let mut failures = Vec::new();
+    for (rule_id, count) in &per_rule_counts {
+        let rate = *count as f64 / denom;
+        table.push(format!(
+            "  {rule_id}: {count}/{total_files} files = {:.1}%",
+            rate * 100.0
+        ));
+        if rate >= 0.05 {
+            failures.push(format!(
+                "{rule_id}: {:.1}% ({count}/{total_files} files) >= the 5% budget",
+                rate * 100.0
+            ));
+        }
+    }
+
     assert!(
-        fp_rate < 0.05,
-        "sentinel false-positive rate {:.1}% ({total_findings}/{total_files} scanned files) \
-         exceeds the 5% budget (docs/PLAN.md §9.2):\n{}",
-        fp_rate * 100.0,
+        failures.is_empty(),
+        "per-rule sentinel false-positive rate exceeds the 5% budget (docs/PLAN.md §9.2):\n{}\n\n\
+         per-rule breakdown ({total_files} source files scanned across {} sentinels):\n{}\n\n\
+         every finding:\n{}",
+        failures.join("\n"),
+        apps.len(),
+        table.join("\n"),
         offenders.join("\n")
     );
 }

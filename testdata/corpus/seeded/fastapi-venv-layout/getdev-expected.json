@@ -1,0 +1,5 @@
+{
+  "seeded": [
+    { "id": "real/nonexistent-package", "file": "app/main.py", "package": "fake-analytics-sdk-abc" }
+  ]
+}

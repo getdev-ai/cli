@@ -5,10 +5,29 @@ Two halves, both exercised by `crates/getdev-cli/tests/corpus.rs`:
 - `seeded/` — synthetic "vibe-coded" apps with deliberately seeded fake
   packages/APIs/model-strings. Every seeded defect is cataloged in a
   companion `getdev-expected.json` — recall (100% of seeded fake packages
-  caught) is measured against this catalog, per app.
-- `sentinels/` — real, permissively-licensed OSS snapshots, vendored small.
-  `getdev real` should stay quiet on them (the false-positive budget,
-  docs/PLAN.md §9.2: aggregate FP rate < 5%).
+  caught) is measured against this catalog, per app. A seeded app also
+  doubles as its own sentinel on every file it did NOT seed a defect into:
+  `seeded_recall_is_100_percent` additionally asserts every finding on a
+  seeded app is one of the catalogued `(id, file)` pairs — an extra,
+  uncatalogued finding fails the gate even though recall is 100% (D3,
+  03-REVIEW.md — "recall passes while drowning in extra false positives").
+- `sentinels/` — apps `getdev real` should stay quiet on (the false-positive
+  budget, docs/PLAN.md §9.2). Most are real, permissively-licensed OSS
+  snapshots vendored small; a few (`py-aliases/`, `js-untyped/`) are small
+  synthetic first-party fixtures written specifically to reproduce a FP
+  class the Theme A audit found in real-world layouts that the vendored
+  snapshots didn't happen to exercise — see "`sentinels/` provenance"
+  below. **The FP budget is measured PER RULE ID**, not as one aggregate
+  rate across every rule (D3): a rule's warning+ (low/medium/high/critical)
+  finding count across every sentinel file, divided by the total number of
+  source files scanned across the whole sentinel set, must stay under 5%
+  for every rule that fires at all — an aggregate rate can hide one
+  badly-behaved rule diluted by several well-behaved ones. Info-severity
+  findings (e.g. the A3 aggregated "could not verify N usage(s) of 'pkg' —
+  not installed/no readable types" note) are excluded from the count
+  entirely: that severity is a deliberate, honest "could not confirm"
+  admission, not a false claim that something is wrong — see
+  `sentinels/js-untyped/` below.
 
 Both halves are run **fully hermetically**: `GETDEV_OFFLINE=1` +
 `GETDEV_CACHE_DIR` pointed at a temp directory seeded from each app's
@@ -36,7 +55,7 @@ seeded app carries:
   never fabricates a `Missing` verdict from an unconfirmed lookup
   (`corpus_run_is_hermetic`, T-3-07).
 
-Seeded defect types used across the ten apps (docs/PLAN.md §2.3's six
+Seeded defect types used across the seeded apps (docs/PLAN.md §2.3's six
 contractual `real/*` rule IDs):
 
 | Rule ID | Mechanism | Ecosystem coverage |
@@ -57,7 +76,7 @@ unsatisfiable by construction, not a genuine regression signal — so it is
 intentionally omitted here and left for whenever version-history evidence
 lands.
 
-### The ten seeded apps
+### The seeded apps
 
 | App | Framework | Seeded defects |
 |---|---|---|
@@ -71,6 +90,14 @@ lands.
 | `seeded/flask-microblog/` | Flask | `real/nonexistent-package` (pypi), `real/unknown-model-string` (Python) |
 | `seeded/django-skeleton/` | Django | `real/nonexistent-package` (pypi), `real/phantom-import` (Python) |
 | `seeded/django-rest-tutorial/` | Django | `real/nonexistent-api` (Python), `real/typosquat-suspect` (pypi) |
+| `seeded/fastapi-venv-layout/` | FastAPI | `real/nonexistent-package` (pypi) — A1 corpus-realism regression: dependencies installed under a real `.venv/lib/python3.12/site-packages/` layout (not a flat root `site-packages/`), proving venv discovery finds a genuine surface (`typed_lib.real_fn()`) with zero `Unreadable` wall while a genuinely-fake declared dependency still fires |
+| `seeded/express-nested/` | Node/Express | `real/nonexistent-package` (npm) — A4/A7 corpus-realism regression: manifest + source live under `backend/` (not root), proving recursive manifest discovery — if it regressed, the fake dependency would misclassify as `real/phantom-import` instead (different rule id, caught by the id+file recall match) |
+
+`fastapi-venv-layout/` and `express-nested/` were added to close a gap the
+Theme A audit found: every other seeded app declares dependencies at the
+project root with a flat `site-packages/`/root-only manifest, which is the
+one layout shape A1/A4 explicitly had to stop assuming (03-REVIEW.md's
+"Theme A preamble" — "the fixtures/corpus encode unrealistic layouts").
 
 ## `sentinels/` provenance
 
@@ -94,6 +121,34 @@ without a confirmed permissive license.
 | `microblog/` | `miguelgrinberg/microblog` | `a975ef64864354867c88e0ed3a17ba7d17dca752` (branch `main`) | MIT | Flask | `app/cli.py` + `app/errors/handlers.py` (further trimmed from the full `app/` tree — see "Surface stubs" below) |
 | `django-flatpages/` | `django/django` | `f51347964a85bd4881caabf3c736b2c54d75262f` (branch `main`) | BSD-3-Clause | Django | `django/contrib/flatpages/{models,urls}.py` — **substituted for `cookiecutter/cookiecutter-django`** (see below) |
 | `django-rest-framework/` | `encode/django-rest-framework` | `6f0b74def3fcc81e126b87b08e59abdb6c2ad056` (branch `main`) | BSD-3-Clause | Django | `rest_framework/{permissions,exceptions}.py` |
+
+### Synthetic sentinels: `py-aliases/`, `js-untyped/`
+
+Two sentinels are **not** vendored OSS snapshots — they are small,
+first-party fixtures written to reproduce specific FP classes the Theme A
+audit found in real-world layouts that none of the ten vendored snapshots
+above happened to exercise:
+
+- **`py-aliases/`** (A5) — a clean app whose only imports (`yaml`, `PIL`,
+  `dotenv`) are exactly the well-known case where the PyPI distribution
+  name differs from the Python import name
+  (`rules/real/py-import-aliases.json`: `pyyaml`, `pillow`,
+  `python-dotenv`). Deliberately plain `import <name>` statements with no
+  attribute access, so this sentinel isolates the alias table's
+  `deps::build_graph` classification end-to-end — it must produce **zero**
+  findings; member-usage/API-surface behavior is a separate concern
+  exercised elsewhere.
+- **`js-untyped/`** (A3) — a clean app depending on a package that is
+  genuinely installed (`node_modules/acme-metrics/` exists, with a real
+  `package.json` + `index.js`) but ships no `.d.ts`/`types` field — the
+  "installed but untyped" path real npm packages without bundled types (or
+  without a `@types/*` package) hit constantly. A named-import member usage
+  against it must resolve to `SurfaceTier::Unreadable` and stay
+  **info-severity**, never `high` — the package genuinely exists and is
+  genuinely used; getdev just cannot read its surface statically. This is
+  the fixture the FP budget's severity-counting rule (above) exists for:
+  its one `real/nonexistent-api` finding is real and expected, but must
+  never count against the 5% budget.
 
 ### Substitution: `cookiecutter-django` → `django/django`
 

@@ -1,0 +1,8 @@
+{
+  "name": "express-nested-seed-backend",
+  "private": true,
+  "dependencies": {
+    "express": "^4.18.2",
+    "fake-npm-pkg-xyz": "^1.0.0"
+  }
+}

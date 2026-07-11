@@ -1,0 +1,5 @@
+{
+  "seeded": [
+    { "id": "real/nonexistent-package", "file": "backend/src/index.js", "package": "fake-npm-pkg-xyz" }
+  ]
+}

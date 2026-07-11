@@ -1,0 +1,7 @@
+{
+  "name": "js-untyped-sentinel",
+  "private": true,
+  "dependencies": {
+    "acme-metrics": "^1.0.0"
+  }
+}

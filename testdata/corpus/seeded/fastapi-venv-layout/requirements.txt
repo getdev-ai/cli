@@ -1,0 +1,3 @@
+fastapi==1.0.0
+typed-lib==1.0.0
+fake-analytics-sdk-abc==1.0.0

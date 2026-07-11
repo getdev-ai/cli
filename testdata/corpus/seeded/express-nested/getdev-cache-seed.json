@@ -1,0 +1,7 @@
+{
+  "npm": {
+    "express": true,
+    "fake-npm-pkg-xyz": false
+  },
+  "pypi": {}
+}

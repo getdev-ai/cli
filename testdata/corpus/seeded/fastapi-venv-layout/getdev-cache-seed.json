@@ -1,0 +1,8 @@
+{
+  "npm": {},
+  "pypi": {
+    "fastapi": true,
+    "typed-lib": true,
+    "fake-analytics-sdk-abc": false
+  }
+}
