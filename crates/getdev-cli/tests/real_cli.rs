@@ -153,6 +153,127 @@ fn models_only_scopes_the_run_to_model_findings() {
     assert_eq!(before, after, "getdev real must never mutate the project");
 }
 
+/// A1 — venv discovery: `getdev real` must resolve a real
+/// `.venv/lib/pythonX.Y/site-packages` layout (the overwhelming majority of
+/// real Python projects), not the fictional literal `<root>/site-packages`.
+/// A genuinely nonexistent member on a package installed only under the
+/// `.venv` must still be caught with the resolved surface's real
+/// High-confidence severity (proving the surface was actually read from the
+/// `.venv`, not silently treated as `NotInstalled`).
+#[test]
+fn apis_only_resolves_a_venv_layout_site_packages() {
+    let dir = tmp_dir("venv-layout");
+    std::fs::write(dir.join("requirements.txt"), "typed_pkg==1.0.0\n").unwrap();
+    std::fs::write(
+        dir.join("main.py"),
+        "import typed_pkg\n\ntyped_pkg.real_fn()\ntyped_pkg.fake_fn()\n",
+    )
+    .unwrap();
+    let site_packages = dir
+        .join(".venv")
+        .join("lib")
+        .join("python3.12")
+        .join("site-packages");
+    let pkg_dir = site_packages.join("typed_pkg");
+    std::fs::create_dir_all(&pkg_dir).unwrap();
+    std::fs::write(
+        pkg_dir.join("__init__.py"),
+        "__all__ = [\"real_fn\"]\n\ndef real_fn():\n    pass\n",
+    )
+    .unwrap();
+
+    let assert = getdev()
+        .current_dir(&dir)
+        .env("GETDEV_OFFLINE", "1")
+        .env("GETDEV_CACHE_DIR", dir.join("cache"))
+        .arg("real")
+        .arg("--apis-only")
+        .arg("--offline")
+        .arg("--json")
+        .assert();
+
+    let output = assert.get_output();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let report: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|err| panic!("stdout was not valid JSON ({err}): {stdout}"));
+    let findings = report["findings"].as_array().unwrap();
+
+    let hit = findings
+        .iter()
+        .find(|f| f["id"] == "real/nonexistent-api" && f["message"].as_str().unwrap_or_default().contains("fake_fn"))
+        .unwrap_or_else(|| panic!("expected a real/nonexistent-api finding for fake_fn (venv surface never resolved), got: {stdout}"));
+    assert_eq!(
+        hit["severity"], "high",
+        "a Resolved-surface miss from a properly-discovered .venv must stay high severity"
+    );
+    // The real member must never be flagged — proves the surface was
+    // actually read (an unresolved venv would yield NotInstalled/info on
+    // every usage, real_fn included).
+    assert!(findings.iter().all(|f| {
+        !f["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("real_fn")
+    }));
+}
+
+/// A15 — an imported-but-never-declared fake package must still get a
+/// registry check: `real/nonexistent-package` (critical) fires from the
+/// import alone, with a "did you mean" suggestion when a near-name top-N
+/// candidate exists.
+#[test]
+fn phantom_import_of_a_near_name_typo_gets_nonexistent_package_and_suggestion() {
+    let dir = tmp_dir("phantom-typo");
+    let cache_dir = dir.join("cache");
+    // "reqeusts" is never declared in any manifest, only imported —
+    // deps::build_graph classifies it ImportResolution::Phantom.
+    std::fs::write(
+        dir.join("main.py"),
+        "import reqeusts\n\nreqeusts.get('x')\n",
+    )
+    .unwrap();
+
+    let cache = Cache::open_at(&cache_dir).unwrap();
+    cache
+        .put_existence(Ecosystem::Pypi, "reqeusts", Existence::Missing)
+        .unwrap();
+    drop(cache);
+
+    let assert = getdev()
+        .current_dir(&dir)
+        .env("GETDEV_OFFLINE", "1")
+        .env("GETDEV_CACHE_DIR", &cache_dir)
+        .arg("real")
+        .arg("--deps-only")
+        .arg("--offline")
+        .arg("--json")
+        .assert();
+
+    let output = assert.get_output();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let report: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|err| panic!("stdout was not valid JSON ({err}): {stdout}"));
+    let findings = report["findings"].as_array().unwrap();
+
+    let hit = findings
+        .iter()
+        .find(|f| {
+            f["id"] == "real/nonexistent-package"
+                && f["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("reqeusts")
+        })
+        .unwrap_or_else(|| {
+            panic!("expected a real/nonexistent-package finding for the imported-only fake package 'reqeusts', got: {stdout}")
+        });
+    assert_eq!(hit["severity"], "critical");
+    assert_eq!(
+        hit["suggestion"].as_str().unwrap_or_default(),
+        "did you mean 'requests'?"
+    );
+}
+
 #[test]
 fn more_than_one_only_flag_is_rejected() {
     let dir = tmp_dir("conflicting-flags");

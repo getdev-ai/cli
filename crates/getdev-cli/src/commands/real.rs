@@ -143,10 +143,31 @@ fn run_deps_group(
     let datasets = Datasets::embedded()?;
     let client = RegistryClient::new(offline)?;
 
+    // A15: the registry lookup set is declared UNION imported (bare
+    // package name, non-stdlib/non-local) — an import that resolves to
+    // `Phantom` (declared nowhere, not a builtin, not local) is exactly
+    // that: undeclared but still worth a nonexistent-package/typosquat
+    // registry check ("did you mean the package you forgot to
+    // declare?"), not just a `real/phantom-import` finding.
     let mut names: Vec<(CoreEco, String)> = Vec::new();
+    let mut seen: std::collections::HashSet<(CoreEco, String)> = std::collections::HashSet::new();
     for (eco, set) in &graph.declared {
         for name in set {
-            names.push((*eco, name.clone()));
+            if seen.insert((*eco, name.clone())) {
+                names.push((*eco, name.clone()));
+            }
+        }
+    }
+    for import_ref in &graph.imports {
+        if import_ref.resolution != deps::ImportResolution::Phantom {
+            continue;
+        }
+        let key = match import_ref.ecosystem {
+            CoreEco::Npm => import_ref.module.clone(),
+            CoreEco::Pypi => deps::normalize_pep503(&import_ref.module),
+        };
+        if seen.insert((import_ref.ecosystem, key.clone())) {
+            names.push((import_ref.ecosystem, key));
         }
     }
 
@@ -180,6 +201,15 @@ fn run_deps_group(
             Some(imp) => (imp.file.clone(), Some(imp.line)),
             None => (default_manifest_file(eco).to_owned(), None),
         };
+        // A15: `declared` reflects actual manifest membership now, not a
+        // hardcoded `true` — a Phantom-resolution import added to `names`
+        // above was never declared, and `nonexistent_package_finding`'s
+        // `where_found` wording ("imported" vs. "declared in the
+        // manifest") depends on this being accurate.
+        let declared = graph
+            .declared
+            .get(&eco)
+            .is_some_and(|set| set.contains(&name));
         let input = PackageVerdictInput {
             ecosystem: eco_label(eco).to_owned(),
             name: name.clone(),
@@ -189,7 +219,7 @@ fn run_deps_group(
             downloads: verdict.downloads,
             created_at: verdict.created_at,
             typosquat: verdict.typosquat.map(to_typosquat_lite),
-            declared: true,
+            declared,
             imported: import_site.is_some(),
         };
         if let Some(finding) = real::nonexistent_package_finding(&input) {
@@ -218,10 +248,75 @@ fn run_apis_group(
 ) -> anyhow::Result<Vec<getdev_core::scan::ScanError>> {
     let (usages, skipped) = apisurface::collect_usages(root)?;
     let node_modules = root.join("node_modules");
-    let site_packages = root.join("site-packages");
+    let site_packages = resolve_site_packages(root);
     let results: Vec<ApiResult> = apisurface::check(graph, &usages, &node_modules, &site_packages);
     findings.extend(real::api_findings(&results));
     Ok(skipped)
+}
+
+/// A1: resolve the real installed Python `site-packages` directory instead
+/// of the fictional literal `<root>/site-packages` — on every real Python
+/// project (venv-based, which is the overwhelming majority) that literal
+/// path never exists, so every package silently enumerated as
+/// `Unreadable`/`NotInstalled`. Resolution order:
+/// 1. `$VIRTUAL_ENV/lib/python*/site-packages` (Windows: `Lib/site-packages`)
+///    if the `VIRTUAL_ENV` environment variable is set (an activated venv).
+/// 2. `<root>/.venv|venv|env/lib/python*/site-packages` (same Windows
+///    layout checked too) — an unactivated but project-local venv.
+/// 3. `<root>/site-packages` — the literal fallback, kept so the corpus
+///    fixtures (which seed a flat `site-packages/` at project root) keep
+///    passing; on a real project this path simply won't exist, which
+///    resolves every package to `NotInstalled` (A3) rather than fabricating
+///    a `Missing member` wall.
+fn resolve_site_packages(root: &Path) -> std::path::PathBuf {
+    if let Ok(venv) = std::env::var("VIRTUAL_ENV") {
+        let venv_path = std::path::PathBuf::from(venv);
+        if let Some(site_packages) = find_venv_site_packages(&venv_path) {
+            return site_packages;
+        }
+    }
+    for candidate in [".venv", "venv", "env"] {
+        let venv_path = root.join(candidate);
+        if venv_path.is_dir() {
+            if let Some(site_packages) = find_venv_site_packages(&venv_path) {
+                return site_packages;
+            }
+        }
+    }
+    root.join("site-packages")
+}
+
+/// Locate a venv root's `site-packages` directory: the POSIX layout
+/// (`lib/pythonX.Y/site-packages` — the Python minor version directory is
+/// globbed since it varies per interpreter) or the Windows layout
+/// (`Lib/site-packages`, no per-version subdirectory).
+fn find_venv_site_packages(venv_root: &Path) -> Option<std::path::PathBuf> {
+    let windows_layout = venv_root.join("Lib").join("site-packages");
+    if windows_layout.is_dir() {
+        return Some(windows_layout);
+    }
+
+    let lib_dir = venv_root.join("lib");
+    let mut python_dirs: Vec<std::path::PathBuf> = std::fs::read_dir(&lib_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("python"))
+        })
+        .collect();
+    // Deterministic + prefers the newest interpreter directory when a venv
+    // somehow has more than one (shouldn't normally happen, but never
+    // arbitrary iteration-order dependent).
+    python_dirs.sort();
+    python_dirs.into_iter().rev().find_map(|python_dir| {
+        let site_packages = python_dir.join("site-packages");
+        site_packages.is_dir().then_some(site_packages)
+    })
 }
 
 /// `real/unknown-model-string`. Reuses the same string-literal collection
