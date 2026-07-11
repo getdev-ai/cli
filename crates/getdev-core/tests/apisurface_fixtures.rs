@@ -10,7 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
-use getdev_core::apisurface::{self, ApiResultKind};
+use getdev_core::apisurface::{self, ApiResultKind, SurfaceTier};
 use getdev_core::deps;
 use getdev_core::findings::Confidence;
 
@@ -83,14 +83,107 @@ fn dynamic_python_package_never_yields_high_confidence_results() {
         results.iter().all(|r| r.confidence != Confidence::High),
         "dynamic package produced a High-confidence result: {results:?}"
     );
-    let low: Vec<_> = results
+    let downgraded: Vec<_> = results
         .iter()
         .filter(|r| r.package == "dynamic_pkg" && r.member == "anything_at_all")
         .collect();
-    assert_eq!(low.len(), 1);
-    assert_eq!(low[0].confidence, Confidence::Low);
+    assert_eq!(downgraded.len(), 1);
+    // A2: Dynamic-tier confidence is `Medium` (real source was read, just
+    // not fully resolved statically) — never `High` (the FP-budget guard
+    // above), and never silently `Low` either (that tier is reserved for
+    // NotInstalled/Unreadable, audit A2/A3).
+    assert_eq!(downgraded[0].confidence, Confidence::Medium);
     assert!(
-        !low[0].detail.is_empty(),
+        !downgraded[0].detail.is_empty(),
         "detail must explain the reasoning"
+    );
+}
+
+/// A3 — a declared-but-never-installed Python package must never produce
+/// one `NonexistentApi` per usage site (the "not installed" noise wall):
+/// exactly one aggregated, Info-severity/Low-confidence result for the
+/// whole package, regardless of how many usage sites reference it.
+#[test]
+fn not_installed_python_package_aggregates_to_one_low_confidence_result() {
+    let root = fixtures("py/not-installed");
+    let results = run_check(&root);
+
+    let misses: Vec<_> = results
+        .iter()
+        .filter(|r| r.package == "never_installed_pkg")
+        .collect();
+    assert_eq!(
+        misses.len(),
+        1,
+        "expected exactly one aggregated result regardless of 3 usage sites: {results:?}"
+    );
+    assert_eq!(misses[0].confidence, Confidence::Low);
+    assert_eq!(misses[0].tier, SurfaceTier::NotInstalled);
+    assert_eq!(misses[0].usage_count, 3);
+}
+
+/// A3 — same noise-wall guarantee for a declared-but-never-installed JS
+/// package (`node_modules/<pkg>` absent entirely).
+#[test]
+fn not_installed_js_package_aggregates_to_one_low_confidence_result() {
+    let root = fixtures("js/not-installed");
+    let results = run_check(&root);
+
+    let misses: Vec<_> = results
+        .iter()
+        .filter(|r| r.package == "never-installed-pkg")
+        .collect();
+    assert_eq!(
+        misses.len(),
+        1,
+        "expected exactly one aggregated result regardless of 3 usage sites: {results:?}"
+    );
+    assert_eq!(misses[0].confidence, Confidence::Low);
+    assert_eq!(misses[0].tier, SurfaceTier::NotInstalled);
+    assert_eq!(misses[0].usage_count, 3);
+}
+
+/// A8 — `from djangolike import forms` must resolve against the package's
+/// top-level submodule surface (`forms.py`'s stem), not just its
+/// `__init__.py` — a genuinely nonexistent submodule must still miss.
+#[test]
+fn django_style_submodule_import_resolves_no_fp() {
+    let root = fixtures("py/submodules");
+    let results = run_check(&root);
+
+    assert!(
+        !results
+            .iter()
+            .any(|r| r.package == "djangolike" && r.member == "forms"),
+        "a real top-level submodule must never be flagged: {results:?}"
+    );
+    let misses: Vec<_> = results
+        .iter()
+        .filter(|r| r.package == "djangolike" && r.member == "fake_submodule")
+        .collect();
+    assert_eq!(
+        misses.len(),
+        1,
+        "a genuinely nonexistent submodule must still be flagged: {results:?}"
+    );
+    assert_eq!(misses[0].tier, SurfaceTier::Resolved);
+    assert_eq!(misses[0].confidence, Confidence::High);
+}
+
+/// A13 — a JS subpath import (`react-dom-like/server`) must be judged
+/// against its own subpath surface, never the (unrelated) root surface: a
+/// member that is genuinely exported by the subpath's own `.d.ts` must
+/// never be flagged, even though the root surface doesn't have it either.
+#[test]
+fn subpath_import_is_judged_against_its_own_surface_not_root() {
+    let root = fixtures("js/subpath");
+    let results = run_check(&root);
+
+    assert!(
+        !results
+            .iter()
+            .any(|r| r.package == "react-dom-like" && r.member == "renderToString"),
+        "a member exported by the subpath's own surface must never be flagged against root: \
+         {results:?}"
     );
 }

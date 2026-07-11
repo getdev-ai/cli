@@ -17,6 +17,7 @@ use getdev_grammars::tree_sitter::{Node, Parser, Query, QueryCursor};
 use serde::Deserialize;
 use streaming_iterator::StreamingIterator;
 
+use crate::deps::Ecosystem;
 use crate::scan::{Lang, ScanError};
 
 use super::{relative_display, ApiSurface, SurfaceError, SurfaceTier, UsageSite};
@@ -48,12 +49,49 @@ struct ParsedDts {
 /// Enumerate the exported surface of an installed `node_modules/<pkg>`
 /// directory from its `.d.ts` type declarations. Never executes code —
 /// pure tree-sitter parsing of files already on disk (REQ-privacy).
+///
+/// If `pkg_dir` does not exist at all, the package was never installed
+/// (`npm install` never ran) — audit A3's [`SurfaceTier::NotInstalled`],
+/// distinct from [`SurfaceTier::Unreadable`] (the package IS installed but
+/// ships no `.d.ts`, e.g. an untyped JS package), so `real` can word the
+/// finding accurately.
 pub fn enumerate_js(pkg_dir: &Path) -> Result<ApiSurface, SurfaceError> {
+    if !pkg_dir.is_dir() {
+        return Ok(not_installed());
+    }
     let Some(entry) = locate_types_entry(pkg_dir) else {
         return Ok(unreadable());
     };
 
-    let parsed = match parse_dts_file(&entry) {
+    surface_from_entry(&entry)
+}
+
+/// Enumerate the surface of one JS subpath import (`react-dom/server`,
+/// audit A13) — deliberately never validated against the package's root
+/// `.d.ts` (a subpath's exports are frequently a wholly different module
+/// than the root barrel). Resolution order: `package.json`'s `exports`
+/// map's trivially-readable `types` entry for `./<subpath>`, then
+/// `pkg/<subpath>.d.ts`, then `pkg/<subpath>/index.d.ts`. When none of
+/// those resolve, the usage is never judged a high-confidence miss against
+/// the (unrelated) root surface — it downgrades to [`SurfaceTier::Dynamic`]
+/// instead (an info-tier note, never suppressed nor promoted).
+pub fn enumerate_js_subpath(pkg_dir: &Path, subpath: &str) -> Result<ApiSurface, SurfaceError> {
+    let Some(entry) = locate_subpath_types_entry(pkg_dir, subpath) else {
+        return Ok(ApiSurface {
+            exported: BTreeSet::new(),
+            tier: SurfaceTier::Dynamic,
+        });
+    };
+    surface_from_entry(&entry)
+}
+
+/// Shared post-processing for an already-located `.d.ts` entry point: parse
+/// it, then resolve exactly one level of bare `export * from './x'`
+/// (Pitfall 6). Named re-exports (`export { a, b } from './y'`) need no
+/// cross-file work at all — the names are already in the export_clause
+/// itself.
+fn surface_from_entry(entry: &Path) -> Result<ApiSurface, SurfaceError> {
+    let parsed = match parse_dts_file(entry) {
         Ok(parsed) => parsed,
         Err(
             ScanError::Read { .. }
@@ -71,11 +109,8 @@ pub fn enumerate_js(pkg_dir: &Path) -> Result<ApiSurface, SurfaceError> {
         SurfaceTier::Resolved
     };
 
-    // Resolve exactly one level of bare `export * from './x'` (Pitfall 6).
-    // Named re-exports (`export { a, b } from './y'`) need no cross-file
-    // work at all — the names are already in the export_clause itself.
     for spec in &parsed.star_reexports {
-        match resolve_dts_target(&entry, spec) {
+        match resolve_dts_target(entry, spec) {
             Some(target) => match parse_dts_file(&target) {
                 Ok(target_parsed) => {
                     exported.extend(target_parsed.names);
@@ -115,6 +150,13 @@ fn unreadable() -> ApiSurface {
     }
 }
 
+fn not_installed() -> ApiSurface {
+    ApiSurface {
+        exported: BTreeSet::new(),
+        tier: SurfaceTier::NotInstalled,
+    }
+}
+
 /// Locate the package's type declaration entry point: `package.json`'s
 /// `types`/`typings` field, else `index.d.ts`, else the first top-level
 /// `.d.ts` file found (deterministic — sorted by name).
@@ -144,6 +186,65 @@ fn locate_types_entry(pkg_dir: &Path) -> Option<PathBuf> {
         .collect();
     found.sort();
     found.into_iter().next()
+}
+
+/// Locate a JS subpath import's type declaration entry point (audit A13):
+/// `package.json`'s `exports` map's trivially-readable `types` entry for
+/// `./<subpath>` first (no full exports-map resolution — only a plain
+/// string or `{ "types": "..." }`/`{ "import": { "types": "..." } }`
+/// shape is read), then `pkg/<subpath>.d.ts`, then
+/// `pkg/<subpath>/index.d.ts`.
+fn locate_subpath_types_entry(pkg_dir: &Path, subpath: &str) -> Option<PathBuf> {
+    if let Some(types_field) = exports_map_types_field(pkg_dir, subpath) {
+        let candidate = normalize_dts_path(pkg_dir, &types_field);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+
+    let direct = pkg_dir.join(format!("{subpath}.d.ts"));
+    if direct.is_file() {
+        return Some(direct);
+    }
+
+    let index = pkg_dir.join(subpath).join("index.d.ts");
+    if index.is_file() {
+        return Some(index);
+    }
+
+    None
+}
+
+/// Read `package.json`'s `exports["./<subpath>"]` entry and pull out a
+/// `types` field if the shape is trivially readable (a nested string, or a
+/// nested `{"import": {"types": "..."}}`/`{"require": {"types": "..."}}`
+/// conditional layer one level deep) — never a full conditional-exports
+/// resolver (out of scope this pass, per audit A13's fix note).
+fn exports_map_types_field(pkg_dir: &Path, subpath: &str) -> Option<String> {
+    let text = std::fs::read_to_string(pkg_dir.join("package.json")).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let exports = value.get("exports")?.as_object()?;
+    let key = format!("./{subpath}");
+    let entry = exports.get(&key)?;
+    types_field_from_exports_entry(entry)
+}
+
+fn types_field_from_exports_entry(entry: &serde_json::Value) -> Option<String> {
+    if let Some(direct) = entry.get("types").and_then(|t| t.as_str()) {
+        return Some(direct.to_owned());
+    }
+    // One level of `{"import": {...}}`/`{"require": {...}}` conditional
+    // nesting — deliberately not recursive.
+    for condition in ["import", "require", "default"] {
+        if let Some(types) = entry
+            .get(condition)
+            .and_then(|c| c.get("types"))
+            .and_then(|t| t.as_str())
+        {
+            return Some(types.to_owned());
+        }
+    }
+    None
 }
 
 fn is_dts_file(path: &Path) -> bool {
@@ -388,6 +489,20 @@ fn bare_js_module(spec: &str) -> String {
     }
 }
 
+/// Split a JS/TS import specifier into its bare package name and, if
+/// present, its subpath (audit A13): `react-dom/server` -> (`react-dom`,
+/// `Some("server")`); `@scope/name/sub/path` -> (`@scope/name`,
+/// `Some("sub/path")`); `lodash` -> (`lodash`, `None`).
+fn split_js_module(spec: &str) -> (String, Option<String>) {
+    let bare = bare_js_module(spec);
+    let subpath = spec
+        .strip_prefix(bare.as_str())
+        .and_then(|rest| rest.strip_prefix('/'))
+        .filter(|rest| !rest.is_empty())
+        .map(str::to_owned);
+    (bare, subpath)
+}
+
 // ---------------------------------------------------------------------
 // Member-usage extraction (JS/TS/TSX) — shared, used by mod.rs::check.
 // ---------------------------------------------------------------------
@@ -476,7 +591,11 @@ fn usages_in_file(path: &Path, lang: Lang, root: &Path) -> Result<Vec<UsageSite>
     let file_display = relative_display(path, root);
 
     let mut results = Vec::new();
-    let mut bindings: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    // binding -> (bare package, subpath) — A13 carries the subpath forward
+    // from the import site to every member_expression usage resolved
+    // through that binding.
+    let mut bindings: std::collections::HashMap<String, (String, Option<String>)> =
+        std::collections::HashMap::new();
 
     let binding_query = Query::new(&language, import_binding_query(lang))?;
     let src_idx = binding_query.capture_index_for_name("src");
@@ -502,16 +621,18 @@ fn usages_in_file(path: &Path, lang: Lang, root: &Path) -> Result<Vec<UsageSite>
             }
         }
         let Some(src) = src else { continue };
-        let package = bare_js_module(&src);
+        let (package, subpath) = split_js_module(&src);
         if let Some(member) = named_name {
             results.push(UsageSite {
                 package,
                 member,
                 file: file_display.clone(),
                 line: named_line,
+                ecosystem: Ecosystem::Npm,
+                subpath,
             });
         } else if let Some(binding) = binding {
-            bindings.insert(binding, package);
+            bindings.insert(binding, (package, subpath));
         }
     }
 
@@ -537,12 +658,14 @@ fn usages_in_file(path: &Path, lang: Lang, root: &Path) -> Result<Vec<UsageSite>
         let (Some(obj), Some(prop)) = (obj, prop) else {
             continue;
         };
-        if let Some(package) = bindings.get(&obj) {
+        if let Some((package, subpath)) = bindings.get(&obj) {
             results.push(UsageSite {
                 package: package.clone(),
                 member: prop,
                 file: file_display.clone(),
                 line,
+                ecosystem: Ecosystem::Npm,
+                subpath: subpath.clone(),
             });
         }
     }
@@ -642,6 +765,103 @@ mod tests {
     }
 
     #[test]
+    fn nonexistent_package_directory_is_not_installed() {
+        // A3: distinct from `no_dts_at_all_is_unreadable_not_empty_resolved`
+        // above (an installed but untyped package) — here `node_modules/
+        // <pkg>` was never created at all, i.e. `npm install` never ran.
+        let node_modules = tempdir("node-modules-empty");
+        let surface = enumerate_js(&node_modules.join("never-installed-pkg")).unwrap();
+        assert_eq!(surface.tier, SurfaceTier::NotInstalled);
+        assert!(surface.exported.is_empty());
+    }
+
+    #[test]
+    fn split_js_module_extracts_subpaths() {
+        assert_eq!(
+            split_js_module("react-dom/server"),
+            ("react-dom".to_owned(), Some("server".to_owned()))
+        );
+        assert_eq!(split_js_module("lodash"), ("lodash".to_owned(), None));
+        assert_eq!(
+            split_js_module("@scope/name/sub/path"),
+            ("@scope/name".to_owned(), Some("sub/path".to_owned()))
+        );
+        assert_eq!(
+            split_js_module("@scope/name"),
+            ("@scope/name".to_owned(), None)
+        );
+    }
+
+    #[test]
+    fn subpath_import_resolves_its_own_dts_file() {
+        // A13: `react-dom/server` resolves against `react-dom/server.d.ts`,
+        // never against the (unrelated) root surface.
+        let dir = tempdir("subpath-resolved");
+        std::fs::write(dir.join("package.json"), r#"{"types":"index.d.ts"}"#).unwrap();
+        std::fs::write(dir.join("index.d.ts"), "export function root(): void;\n").unwrap();
+        std::fs::write(
+            dir.join("server.d.ts"),
+            "export function renderToString(): string;\n",
+        )
+        .unwrap();
+
+        let surface = enumerate_js_subpath(&dir, "server").unwrap();
+        assert_eq!(surface.tier, SurfaceTier::Resolved);
+        assert!(surface.exported.contains("renderToString"));
+        // The root surface's own export must never leak into the subpath
+        // surface — they are judged independently.
+        assert!(!surface.exported.contains("root"));
+    }
+
+    #[test]
+    fn subpath_import_resolves_via_index_dts_directory() {
+        let dir = tempdir("subpath-index");
+        let sub = dir.join("server");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(
+            sub.join("index.d.ts"),
+            "export function renderToString(): string;\n",
+        )
+        .unwrap();
+
+        let surface = enumerate_js_subpath(&dir, "server").unwrap();
+        assert_eq!(surface.tier, SurfaceTier::Resolved);
+        assert!(surface.exported.contains("renderToString"));
+    }
+
+    #[test]
+    fn unresolvable_subpath_downgrades_to_dynamic_never_validated_against_root() {
+        // A13's core guarantee: an unresolvable subpath is never a High
+        // miss against the root surface — it is Dynamic (info note).
+        let dir = tempdir("subpath-unresolvable");
+        std::fs::write(dir.join("package.json"), r#"{"types":"index.d.ts"}"#).unwrap();
+        std::fs::write(dir.join("index.d.ts"), "export function root(): void;\n").unwrap();
+
+        let surface = enumerate_js_subpath(&dir, "some/deep/subpath").unwrap();
+        assert_eq!(surface.tier, SurfaceTier::Dynamic);
+        assert!(surface.exported.is_empty());
+    }
+
+    #[test]
+    fn subpath_import_resolves_via_exports_map_types_field() {
+        let dir = tempdir("subpath-exports-map");
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"exports":{"./server":{"types":"./server.d.ts"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("server.d.ts"),
+            "export function renderToString(): string;\n",
+        )
+        .unwrap();
+
+        let surface = enumerate_js_subpath(&dir, "server").unwrap();
+        assert_eq!(surface.tier, SurfaceTier::Resolved);
+        assert!(surface.exported.contains("renderToString"));
+    }
+
+    #[test]
     fn unresolvable_star_target_downgrades_to_dynamic() {
         let dir = tempdir("unresolvable-star");
         std::fs::write(dir.join("package.json"), r#"{"types":"index.d.ts"}"#).unwrap();
@@ -686,5 +906,25 @@ mod tests {
         assert!(pairs.contains(&("bar-pkg", "doOther")));
         assert!(pairs.contains(&("baz-pkg", "helper")));
         assert!(pairs.contains(&("qux-pkg", "legacyCall")));
+        assert!(usages.iter().all(|u| u.ecosystem == Ecosystem::Npm));
+    }
+
+    #[test]
+    fn collects_usages_carry_subpath_through_bindings() {
+        let dir = tempdir("subpath-usages");
+        std::fs::write(
+            dir.join("a.ts"),
+            "import * as ReactDOMServer from 'react-dom/server';\n\
+             ReactDOMServer.renderToString();\n",
+        )
+        .unwrap();
+
+        let (usages, skipped) = collect_js_usages(&dir).unwrap();
+        assert!(skipped.is_empty());
+        let hit = usages
+            .iter()
+            .find(|u| u.package == "react-dom" && u.member == "renderToString")
+            .unwrap();
+        assert_eq!(hit.subpath.as_deref(), Some("server"));
     }
 }

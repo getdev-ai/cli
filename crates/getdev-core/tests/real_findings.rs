@@ -6,7 +6,7 @@
 
 #![allow(clippy::unwrap_used)]
 
-use getdev_core::apisurface::{ApiResult, ApiResultKind};
+use getdev_core::apisurface::{ApiResult, ApiResultKind, SurfaceTier};
 use getdev_core::deps::{Ecosystem, ImportRef, ImportResolution};
 use getdev_core::findings::{Confidence, Severity};
 use getdev_core::real::{
@@ -38,6 +38,40 @@ fn missing_existence_yields_a_critical_nonexistent_package_finding() {
     assert_eq!(finding.severity, Severity::Critical);
     assert_eq!(finding.confidence, Confidence::High);
     assert!(!finding.fixable);
+}
+
+/// A15 — a Missing package with a close (distance 1-2) typosquat hit gets
+/// a "did you mean" suggestion attached to the CRITICAL nonexistent-package
+/// finding itself (the SPEC-COMMANDS golden example), independent of
+/// whether `real/typosquat-suspect` also separately fires.
+#[test]
+fn missing_existence_with_near_name_hit_gets_a_did_you_mean_suggestion() {
+    let mut input = package_input(ExistenceLite::Missing);
+    input.typosquat = Some(TyposquatLite {
+        nearest: "requests".to_owned(),
+        distance: 1,
+        reasons: vec!["name closely resembles a popular package".to_owned()],
+    });
+    let finding = nonexistent_package_finding(&input).unwrap();
+    assert_eq!(finding.severity, Severity::Critical);
+    assert_eq!(
+        finding.suggestion.as_deref(),
+        Some("did you mean 'requests'?")
+    );
+}
+
+/// A distant hit (fired only via low-downloads/new-package, not near-name)
+/// must never manufacture a misleading suggestion.
+#[test]
+fn missing_existence_with_distant_hit_gets_no_suggestion() {
+    let mut input = package_input(ExistenceLite::Missing);
+    input.typosquat = Some(TyposquatLite {
+        nearest: "some-unrelated-popular-pkg".to_owned(),
+        distance: 9,
+        reasons: vec!["low download count".to_owned()],
+    });
+    let finding = nonexistent_package_finding(&input).unwrap();
+    assert!(finding.suggestion.is_none());
 }
 
 #[test]
@@ -126,8 +160,10 @@ fn api_findings_preserve_confidence_tier_and_map_kind_to_rule_id() {
             file: "src/a.ts".to_owned(),
             line: 2,
             confidence: Confidence::High,
+            tier: SurfaceTier::Resolved,
             detail: "'fakeFn' is not present in typed-pkg's statically enumerated exports"
                 .to_owned(),
+            usage_count: 1,
         },
         ApiResult {
             kind: ApiResultKind::NonexistentApi,
@@ -135,20 +171,86 @@ fn api_findings_preserve_confidence_tier_and_map_kind_to_rule_id() {
             member: "anything".to_owned(),
             file: "main.py".to_owned(),
             line: 1,
-            confidence: Confidence::Low,
+            confidence: Confidence::Medium,
+            tier: SurfaceTier::Dynamic,
             detail: "dynamic-pkg's surface could not be fully resolved statically".to_owned(),
+            usage_count: 1,
         },
     ];
     let findings = api_findings(&results);
     assert_eq!(findings.len(), 2);
     assert_eq!(findings[0].id, "real/nonexistent-api");
     assert_eq!(findings[0].confidence, Confidence::High);
-    assert_eq!(findings[1].confidence, Confidence::Low);
+    assert_eq!(findings[1].confidence, Confidence::Medium);
     assert!(findings[1]
         .detail
         .as_ref()
         .unwrap()
         .contains("could not be fully resolved"));
+}
+
+/// A2 — severity must follow the surface tier, never stay hardcoded High:
+/// a Resolved-surface exact miss is `high` severity; every other tier
+/// downgrades to `info` (docs/PLAN.md §2.3).
+#[test]
+fn api_finding_severity_follows_surface_tier() {
+    let resolved = ApiResult {
+        kind: ApiResultKind::NonexistentApi,
+        package: "typed-pkg".to_owned(),
+        member: "fakeFn".to_owned(),
+        file: "src/a.ts".to_owned(),
+        line: 2,
+        confidence: Confidence::High,
+        tier: SurfaceTier::Resolved,
+        detail: "miss".to_owned(),
+        usage_count: 1,
+    };
+    assert_eq!(api_findings(&[resolved]).remove(0).severity, Severity::High);
+
+    for tier in [
+        SurfaceTier::Dynamic,
+        SurfaceTier::NotInstalled,
+        SurfaceTier::Unreadable,
+    ] {
+        let result = ApiResult {
+            kind: ApiResultKind::NonexistentApi,
+            package: "some-pkg".to_owned(),
+            member: "member".to_owned(),
+            file: "a.py".to_owned(),
+            line: 1,
+            confidence: Confidence::Low,
+            tier,
+            detail: "note".to_owned(),
+            usage_count: 1,
+        };
+        assert_eq!(
+            api_findings(&[result]).remove(0).severity,
+            Severity::Info,
+            "{tier:?} must downgrade to info severity"
+        );
+    }
+}
+
+/// A3 — an aggregated NotInstalled/Unreadable result (`usage_count > 1`)
+/// must word its message as a rollup, not name a single member.
+#[test]
+fn api_finding_aggregate_message_never_names_a_single_member() {
+    let result = ApiResult {
+        kind: ApiResultKind::NonexistentApi,
+        package: "never-installed-pkg".to_owned(),
+        member: String::new(),
+        file: "src/a.ts".to_owned(),
+        line: 1,
+        confidence: Confidence::Low,
+        tier: SurfaceTier::NotInstalled,
+        detail: "could not verify 3 usage(s) of 'never-installed-pkg' — not installed".to_owned(),
+        usage_count: 3,
+    };
+    let finding = api_findings(&[result]).remove(0);
+    assert_eq!(finding.severity, Severity::Info);
+    assert!(finding.message.contains('3'));
+    assert!(finding.message.contains("never-installed-pkg"));
+    assert!(!finding.message.contains("does not exist"));
 }
 
 #[test]
@@ -160,7 +262,9 @@ fn version_mismatch_kind_maps_to_its_own_rule_id() {
         file: "src/a.ts".to_owned(),
         line: 3,
         confidence: Confidence::High,
+        tier: SurfaceTier::Resolved,
         detail: "exists in another major version".to_owned(),
+        usage_count: 1,
     }];
     let findings = api_findings(&results);
     assert_eq!(findings[0].id, "real/version-mismatch-api");

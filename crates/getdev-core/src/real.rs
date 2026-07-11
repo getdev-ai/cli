@@ -11,7 +11,7 @@
 //! `real/phantom-import`, `real/nonexistent-api`, `real/version-mismatch-api`,
 //! `real/unknown-model-string`.
 
-use crate::apisurface::{ApiResult, ApiResultKind};
+use crate::apisurface::{ApiResult, ApiResultKind, SurfaceTier};
 use crate::deps::{ImportRef, ImportResolution, StackHint};
 use crate::findings::{Confidence, Finding, Severity};
 use crate::models::ModelVerdict;
@@ -92,6 +92,18 @@ pub fn nonexistent_package_finding(input: &PackageVerdictInput) -> Option<Findin
         (false, true) => "imported",
         (false, false) => "referenced",
     };
+    // A15: "did you mean" — the CLI-supplied typosquat hit already carries
+    // the embedded top-N dataset's nearest name; a distance of 1-2 is the
+    // same near-name threshold `typosquat::score` uses to fire its own
+    // `NearName` reason, so any hit with that distance implies a
+    // genuinely close candidate exists (never surfaced for a hit that only
+    // fired on low-downloads/new-package heuristics against a distant
+    // nearest name).
+    let suggestion = input
+        .typosquat
+        .as_ref()
+        .filter(|hit| (1..=2).contains(&hit.distance))
+        .map(|hit| format!("did you mean '{}'?", hit.nearest));
     Some(Finding {
         id: "real/nonexistent-package".to_owned(),
         command: "real".to_owned(),
@@ -109,7 +121,7 @@ pub fn nonexistent_package_finding(input: &PackageVerdictInput) -> Option<Findin
             "{where_found}. No package with this name has ever been published on {}.",
             input.ecosystem
         )),
-        suggestion: None,
+        suggestion,
         remediation: Some(
             "remove the dependency or replace it with a real package providing the needed \
              functionality"
@@ -230,9 +242,13 @@ pub fn unknown_model_finding(
 }
 
 /// `real/nonexistent-api` / `real/version-mismatch-api` — maps every
-/// `apisurface::ApiResult` straight through, preserving the confidence tier
-/// `apisurface::check` already computed (Dynamic/Unreadable surfaces are
-/// `Confidence::Low`, never silently promoted to `High`).
+/// `apisurface::ApiResult` straight through, deriving each finding's
+/// *severity* from the surface tier `apisurface::check` computed (audit A2):
+/// a [`SurfaceTier::Resolved`] exact miss is `high` severity; every other
+/// tier (`Dynamic`/`NotInstalled`/`Unreadable`) downgrades to `info` per
+/// docs/PLAN.md §2.3 ("dynamic/`__getattr__`-style packages downgraded to
+/// `info` with a note") — confidence is carried through unchanged from
+/// `result.confidence`, never re-derived here.
 pub fn api_findings(api_results: &[ApiResult]) -> Vec<Finding> {
     api_results.iter().map(api_finding).collect()
 }
@@ -242,26 +258,54 @@ fn api_finding(result: &ApiResult) -> Finding {
         ApiResultKind::NonexistentApi => "real/nonexistent-api",
         ApiResultKind::VersionMismatchApi => "real/version-mismatch-api",
     };
+    let severity = match result.tier {
+        SurfaceTier::Resolved => Severity::High,
+        SurfaceTier::Dynamic | SurfaceTier::NotInstalled | SurfaceTier::Unreadable => {
+            Severity::Info
+        }
+    };
+    // A3: an aggregated NotInstalled/Unreadable result (`usage_count > 1`)
+    // rolls up every usage site of the package into one finding — it has
+    // no single member to name, so the message/remediation word the
+    // aggregate case distinctly from the normal per-usage-site case.
+    let (message, remediation) = if result.usage_count > 1 {
+        (
+            format!(
+                "could not verify {} usage(s) of '{}' on the installed package's surface",
+                result.usage_count, result.package
+            ),
+            format!(
+                "verify these usages manually, or install/upgrade '{}' so its surface can be \
+                 checked",
+                result.package
+            ),
+        )
+    } else {
+        (
+            format!(
+                "'{}.{}' does not exist on the installed package's surface",
+                result.package, result.member
+            ),
+            format!(
+                "verify '{}' exists in the installed version of '{}', or pin/upgrade to a \
+                 version that has it",
+                result.member, result.package
+            ),
+        )
+    };
     Finding {
         id: id.to_owned(),
         command: "real".to_owned(),
-        severity: Severity::High,
+        severity,
         confidence: result.confidence,
         file: result.file.clone(),
         line: Some(result.line),
         column: None,
         end_line: Some(result.line),
-        message: format!(
-            "'{}.{}' does not exist on the installed package's surface",
-            result.package, result.member
-        ),
+        message,
         detail: Some(result.detail.clone()),
         suggestion: None,
-        remediation: Some(format!(
-            "verify '{}' exists in the installed version of '{}', or pin/upgrade to a version \
-             that has it",
-            result.member, result.package
-        )),
+        remediation: Some(remediation),
         fixable: false,
         refs: vec![format!("https://getdev.ai/rules/{id}")],
         fingerprint: None,

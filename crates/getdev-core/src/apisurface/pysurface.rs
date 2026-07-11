@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use getdev_grammars::tree_sitter::{Node, Parser, Query, QueryCursor};
 use streaming_iterator::StreamingIterator;
 
+use crate::deps::Ecosystem;
 use crate::scan::{Lang, ScanError};
 
 use super::{relative_display, ApiSurface, SurfaceError, SurfaceTier, UsageSite};
@@ -34,9 +35,33 @@ struct ParsedPy {
 }
 
 /// Enumerate the exported surface of an installed `site-packages/<pkg>`
-/// directory from its `__init__.py` AST. Never imports/executes the
+/// directory from its `__init__.py` AST, unioned with its top-level sibling
+/// `.py` module stems and subpackage directory names (audit A8 — this is
+/// what makes `from django import forms` / `pkg.submodule` usage resolve;
+/// PLAN.md §2.3's "(and top-level modules)"). Never imports/executes the
 /// package — pure static parsing of files already on disk (REQ-privacy).
+///
+/// `pkg_dir` may not exist as a directory at all: a single-file
+/// distribution (`site-packages/six.py`, `site-packages/typing_extensions
+/// .py`) has no package directory, only a same-stemmed `.py` file at the
+/// site-packages root — audit A3 treats that as a readable surface too,
+/// not `Unreadable` noise. When neither the directory nor the sibling file
+/// exists at all, the package was never installed (audit A3's
+/// [`SurfaceTier::NotInstalled`]) — distinct from [`SurfaceTier::Unreadable`]
+/// (the directory exists but has no readable source), so `real` can word
+/// the finding accurately.
 pub fn enumerate_py(pkg_dir: &Path) -> Result<ApiSurface, SurfaceError> {
+    if !pkg_dir.is_dir() {
+        let single_file = pkg_dir.with_extension("py");
+        if single_file.is_file() {
+            return enumerate_single_file(&single_file);
+        }
+        if has_compiled_sibling(pkg_dir) {
+            return Ok(dynamic());
+        }
+        return Ok(not_installed());
+    }
+
     let init_path = pkg_dir.join("__init__.py");
     if !init_path.is_file() {
         return Ok(if has_compiled_extension(pkg_dir) {
@@ -97,7 +122,70 @@ pub fn enumerate_py(pkg_dir: &Path) -> Result<ApiSurface, SurfaceError> {
         }
     }
 
+    // A8: union in top-level submodule stems (`forms.py` -> "forms") and
+    // subpackage directory names (a dir containing its own `__init__.py`,
+    // e.g. `contrib/` -> "contrib") — depth 1 only, per the 03-03 plan.
+    exported.extend(top_level_submodule_names(pkg_dir));
+
     Ok(ApiSurface { exported, tier })
+}
+
+/// Parse a single-file distribution module (`site-packages/six.py`) exactly
+/// like a package's `__init__.py` — same top-level AST inspection, no
+/// sibling-module union (a single file has no siblings to enumerate).
+fn enumerate_single_file(path: &Path) -> Result<ApiSurface, SurfaceError> {
+    let parsed = match parse_py_module(path) {
+        Ok(parsed) => parsed,
+        Err(
+            ScanError::Read { .. }
+            | ScanError::Parse { .. }
+            | ScanError::TooLarge { .. }
+            | ScanError::Skipped { .. },
+        ) => return Ok(unreadable()),
+        Err(err @ (ScanError::Grammar(_) | ScanError::Query(_))) => return Err(err.into()),
+    };
+
+    let mut exported = parsed.names;
+    if let Some(all_names) = &parsed.all_names {
+        exported.extend(all_names.iter().cloned());
+    }
+    // A single top-level file cannot resolve a relative wildcard re-export
+    // (there is no package directory to look siblings up in) — any
+    // wildcard target downgrades to Dynamic rather than being silently
+    // dropped, same conservative treatment as an unresolvable package-level
+    // wildcard target above.
+    let tier = if parsed.has_dynamic_getattr || !parsed.wildcard_targets.is_empty() {
+        SurfaceTier::Dynamic
+    } else {
+        SurfaceTier::Resolved
+    };
+
+    Ok(ApiSurface { exported, tier })
+}
+
+/// Top-level `.py` module stems (excluding `__init__`) and subpackage
+/// directory names (dirs containing their own `__init__.py`) directly under
+/// `pkg_dir` — depth 1 (audit A8).
+fn top_level_submodule_names(pkg_dir: &Path) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    let Ok(entries) = std::fs::read_dir(pkg_dir) else {
+        return names;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if path.join("__init__.py").is_file() {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    names.insert(name.to_owned());
+                }
+            }
+        } else if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+            if path.extension().and_then(|e| e.to_str()) == Some("py") && stem != "__init__" {
+                names.insert(stem.to_owned());
+            }
+        }
+    }
+    names
 }
 
 fn unreadable() -> ApiSurface {
@@ -107,11 +195,28 @@ fn unreadable() -> ApiSurface {
     }
 }
 
+fn not_installed() -> ApiSurface {
+    ApiSurface {
+        exported: BTreeSet::new(),
+        tier: SurfaceTier::NotInstalled,
+    }
+}
+
 fn dynamic() -> ApiSurface {
     ApiSurface {
         exported: BTreeSet::new(),
         tier: SurfaceTier::Dynamic,
     }
+}
+
+/// Whether a compiled extension module (`<pkg_dir>.so`/`.pyd`) sits at the
+/// site-packages root as a sibling of the (nonexistent) `pkg_dir` — the
+/// flat-file compiled-module shape (as opposed to [`has_compiled_extension`],
+/// which looks *inside* an existing package directory).
+fn has_compiled_sibling(pkg_dir: &Path) -> bool {
+    COMPILED_EXTENSIONS
+        .iter()
+        .any(|ext| pkg_dir.with_extension(ext).is_file())
 }
 
 /// A package shipping only compiled extensions (`.so`/`.pyd`) with no
@@ -466,6 +571,8 @@ fn usages_in_file(path: &Path, root: &Path) -> Result<Vec<UsageSite>, ScanError>
                 member,
                 file: file_display.clone(),
                 line: member_line,
+                ecosystem: Ecosystem::Pypi,
+                subpath: None,
             });
         } else {
             // plain `import module [as alias]` — binds the (aliased or
@@ -504,6 +611,8 @@ fn usages_in_file(path: &Path, root: &Path) -> Result<Vec<UsageSite>, ScanError>
                 member: attr,
                 file: file_display.clone(),
                 line,
+                ecosystem: Ecosystem::Pypi,
+                subpath: None,
             });
         }
     }
@@ -594,6 +703,56 @@ mod tests {
         let dir = tempdir("empty");
         let surface = enumerate_py(&dir).unwrap();
         assert_eq!(surface.tier, SurfaceTier::Unreadable);
+    }
+
+    #[test]
+    fn nonexistent_package_directory_is_not_installed() {
+        // A3: distinct from `no_readable_source_at_all_is_unreadable` above
+        // (an *existing* empty dir) — here the package directory itself was
+        // never created at all, i.e. `pip install` never ran.
+        let site_packages = tempdir("site-packages-empty");
+        let surface = enumerate_py(&site_packages.join("never_installed_pkg")).unwrap();
+        assert_eq!(surface.tier, SurfaceTier::NotInstalled);
+        assert!(surface.exported.is_empty());
+    }
+
+    #[test]
+    fn single_file_distribution_is_a_readable_resolved_surface() {
+        // A3: `six.py`/`typing_extensions.py`-shaped single-file
+        // distributions live directly at the site-packages root, not
+        // under a `<pkg>/__init__.py` package directory — must still be
+        // treated as a fully readable surface, not Unreadable noise.
+        let site_packages = tempdir("site-packages-single-file");
+        std::fs::write(site_packages.join("six.py"), "def real_fn():\n    pass\n").unwrap();
+
+        let surface = enumerate_py(&site_packages.join("six")).unwrap();
+        assert_eq!(surface.tier, SurfaceTier::Resolved);
+        assert!(surface.exported.contains("real_fn"));
+        assert!(!surface.exported.contains("fake_fn"));
+    }
+
+    #[test]
+    fn top_level_submodules_and_subpackages_join_the_exported_surface() {
+        // A8: `from django import forms` / `django.contrib` must resolve —
+        // the exported surface is `__init__.py` names UNION sibling `.py`
+        // module stems UNION subpackage dir names (depth 1).
+        let dir = tempdir("submodules");
+        std::fs::write(dir.join("__init__.py"), "def top_level_fn():\n    pass\n").unwrap();
+        std::fs::write(dir.join("forms.py"), "class Form:\n    pass\n").unwrap();
+        let contrib = dir.join("contrib");
+        std::fs::create_dir_all(&contrib).unwrap();
+        std::fs::write(contrib.join("__init__.py"), "").unwrap();
+        // A directory with no `__init__.py` is not a real subpackage
+        // (could be a data dir, `__pycache__`, ...) — must not be exported.
+        let not_a_package = dir.join("not_a_package");
+        std::fs::create_dir_all(&not_a_package).unwrap();
+
+        let surface = enumerate_py(&dir).unwrap();
+        assert_eq!(surface.tier, SurfaceTier::Resolved);
+        assert!(surface.exported.contains("top_level_fn"));
+        assert!(surface.exported.contains("forms"));
+        assert!(surface.exported.contains("contrib"));
+        assert!(!surface.exported.contains("not_a_package"));
     }
 
     #[test]

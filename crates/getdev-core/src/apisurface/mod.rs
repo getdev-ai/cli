@@ -5,13 +5,20 @@
 //!
 //! **No project code is ever executed** (REQ-privacy / docs/PLAN.md's core
 //! invariant) — this is pure static tree-sitter parsing, mirroring
-//! `crate::scan`'s parse-once, skip-not-fail contract. Confidence is
-//! tiered per docs/PLAN.md §2.3/§9.2: an exact miss against a fully
-//! resolved surface is `high` confidence; a miss against a package whose
-//! surface could not be fully resolved statically (dynamic `__getattr__`,
-//! compiled-only, ambient wildcard `.d.ts`, unresolvable re-export) is
-//! downgraded to `low` confidence rather than suppressed outright, so the
-//! `real` command can still surface it as an `info`-tier hint.
+//! `crate::scan`'s parse-once, skip-not-fail contract. Severity/confidence
+//! are tiered per docs/PLAN.md §2.3/§9.2 (audit A2/A3):
+//! - [`SurfaceTier::Resolved`]: every export was enumerated with no
+//!   unresolved dynamic construct — an exact miss is `high` severity/`high`
+//!   confidence, one result per usage site.
+//! - [`SurfaceTier::Dynamic`]: the package uses a construct static analysis
+//!   cannot see through — downgraded to `info` severity/`medium`
+//!   confidence, still one result per usage site (real source was read; the
+//!   location is still useful).
+//! - [`SurfaceTier::NotInstalled`]/[`SurfaceTier::Unreadable`]: no readable
+//!   source/types exist at all for the package — never one result per usage
+//!   site (a fresh-clone/untyped-JS noise wall, audit A3); instead a single
+//!   `info`/`low`-confidence result per package summarizing how many usage
+//!   sites could not be verified.
 
 pub mod dts;
 pub mod pysurface;
@@ -32,7 +39,7 @@ pub enum SurfaceError {
 /// How completely a package's public surface could be determined
 /// statically. Only [`SurfaceTier::Resolved`] licenses a high-confidence
 /// "member does not exist" result — Pitfalls 5/6 (03-RESEARCH.md).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SurfaceTier {
     /// Every export was enumerated with no unresolved dynamic construct.
     Resolved,
@@ -40,8 +47,14 @@ pub enum SurfaceTier {
     /// (Python module-level `__getattr__`, TS ambient wildcard module,
     /// an unresolvable re-export target) — the surface may be incomplete.
     Dynamic,
-    /// No readable source/types were found at all (compiled-only package,
-    /// JS package shipping no `.d.ts`).
+    /// The package directory (`node_modules/<pkg>`/`site-packages/<pkg>`)
+    /// does not exist at all — a fresh clone that never ran `npm
+    /// install`/`pip install` (audit A3). Distinct from [`Self::Unreadable`]
+    /// so `real` can word the finding accurately ("not installed" vs.
+    /// "no readable types/source").
+    NotInstalled,
+    /// The package directory exists but ships no readable source/types
+    /// (compiled-only package, untyped JS package with no `.d.ts`).
     Unreadable,
 }
 
@@ -59,6 +72,17 @@ pub struct UsageSite {
     pub member: String,
     pub file: String,
     pub line: u32,
+    /// Which ecosystem extracted this usage (audit A14) — set directly by
+    /// the JS/Python extractor rather than re-derived by guessing which
+    /// declared set the bare name happens to fall into (which could
+    /// misjudge a Python `import yaml` against an npm `node_modules/yaml`
+    /// if a project happens to declare both).
+    pub ecosystem: Ecosystem,
+    /// The subpath of a JS subpath import (`react-dom/server` -> `Some
+    /// ("server")`), if any (audit A13). Always `None` for Python usage
+    /// sites — Python submodule usage is `pkg.submodule` member access
+    /// (A8), not a distinct import specifier shape needing its own surface.
+    pub subpath: Option<String>,
 }
 
 /// The kind of API-surface mismatch found.
@@ -82,13 +106,27 @@ pub enum ApiResultKind {
 pub struct ApiResult {
     pub kind: ApiResultKind,
     pub package: String,
+    /// The missed member name. Empty for an aggregated
+    /// [`SurfaceTier::NotInstalled`]/[`SurfaceTier::Unreadable`] result
+    /// (`usage_count > 1`) — there is no single member to name (audit A3).
     pub member: String,
     pub file: String,
     pub line: u32,
     pub confidence: Confidence,
+    /// The surface tier this result was judged against (audit A2) — `real`
+    /// derives the finding's *severity* from this, never re-deriving it
+    /// from `confidence`.
+    pub tier: SurfaceTier,
     /// Heuristic reasoning surfaced to the user (FP policy, docs/PLAN.md
     /// §9.2) — always populated, explains *why* at low confidence.
     pub detail: String,
+    /// How many usage sites this one result represents. `1` for a normal
+    /// per-usage-site result (`Resolved`/`Dynamic` tiers); `> 1` for an
+    /// aggregated `NotInstalled`/`Unreadable` result rolling up every
+    /// usage site of that package into a single finding (audit A3 — never
+    /// one result per usage site for a package with no readable surface at
+    /// all).
+    pub usage_count: usize,
 }
 
 /// Compare every usage site's `pkg.member` access against the installed
@@ -96,12 +134,13 @@ pub struct ApiResult {
 /// results. Surfaces are cached per package (an installed package is
 /// enumerated at most once per `check` call regardless of usage count).
 ///
-/// `graph` determines which ecosystem (`Npm`/`Pypi`) a used package belongs
-/// to, so `check` knows whether to look under `node_modules` or
-/// `site_packages`; a package usage that matches neither declared set is
-/// skipped (it is `deps`'s job to have already classified it as
-/// `Phantom`/`Builtin`/`Local` — `apisurface` only judges packages that are
-/// genuinely installed dependencies).
+/// Each usage site already carries its own extractor-assigned ecosystem
+/// (`UsageSite::ecosystem`, audit A14), so `check` knows directly whether to
+/// look under `node_modules` or `site_packages` — `graph` is consulted only
+/// to confirm the package is declared under that ecosystem; a usage that
+/// matches no declared set is skipped (it is `deps`'s job to have already
+/// classified it as `Phantom`/`Builtin`/`Local` — `apisurface` only judges
+/// packages that are genuinely installed dependencies).
 ///
 /// `real/version-mismatch-api` is never emitted in v0.1: getdev-core has no
 /// local, network-free evidence source for "this member exists in another
@@ -116,67 +155,141 @@ pub fn check(
     node_modules: &Path,
     site_packages: &Path,
 ) -> Vec<ApiResult> {
-    let mut cache: BTreeMap<String, ApiSurface> = BTreeMap::new();
+    // Keyed by (ecosystem, package, subpath) — a subpath surface (audit
+    // A13) is judged independently of the package's root surface, and
+    // keying by ecosystem too means a same-named npm/pypi package (however
+    // unlikely) never shares a cache entry (audit A14).
+    let mut cache: BTreeMap<(Ecosystem, String, Option<String>), ApiSurface> = BTreeMap::new();
     let mut results = Vec::new();
+    // Rolled-up NotInstalled/Unreadable misses, one entry per package (audit
+    // A3 — never one result per usage site for a package with no readable
+    // surface at all). Keyed by (ecosystem, package) since a package could
+    // in principle appear unreadable under one ecosystem's usage sites and
+    // readable under a wrongly-guessed other one — A14 makes that
+    // impossible now, but the key stays ecosystem-qualified for clarity.
+    let mut aggregated: BTreeMap<(Ecosystem, String), AggregateMiss> = BTreeMap::new();
 
     for usage in usages {
-        let Some(ecosystem) = ecosystem_of(graph, &usage.package) else {
+        if !is_declared(graph, usage) {
             continue;
-        };
+        }
 
-        let surface = cache.entry(usage.package.clone()).or_insert_with(|| {
-            enumerate_installed(ecosystem, &usage.package, node_modules, site_packages)
-        });
+        let surface = cache
+            .entry((
+                usage.ecosystem,
+                usage.package.clone(),
+                usage.subpath.clone(),
+            ))
+            .or_insert_with(|| {
+                enumerate_installed(
+                    usage.ecosystem,
+                    &usage.package,
+                    usage.subpath.as_deref(),
+                    node_modules,
+                    site_packages,
+                )
+            });
 
         if surface.exported.contains(&usage.member) {
             continue; // confirmed present — never a finding, regardless of tier
         }
 
-        let (confidence, detail) = match surface.tier {
-            SurfaceTier::Resolved => (
-                Confidence::High,
-                format!(
-                    "'{}' is not present in {}'s statically enumerated exports",
-                    usage.member, usage.package
-                ),
-            ),
-            SurfaceTier::Dynamic => (
-                Confidence::Low,
-                format!(
-                    "{}'s surface could not be fully resolved statically (dynamic export, \
-                     ambient wildcard, or unresolvable re-export) — '{}' may exist but was \
-                     not discoverable without executing code",
-                    usage.package, usage.member
-                ),
+        match surface.tier {
+            SurfaceTier::Resolved => {
+                results.push(ApiResult {
+                    kind: ApiResultKind::NonexistentApi,
+                    package: usage.package.clone(),
+                    member: usage.member.clone(),
+                    file: usage.file.clone(),
+                    line: usage.line,
+                    confidence: Confidence::High,
+                    tier: SurfaceTier::Resolved,
+                    detail: format!(
+                        "'{}' is not present in {}'s statically enumerated exports",
+                        usage.member, usage.package
+                    ),
+                    usage_count: 1,
+                });
+            }
+            SurfaceTier::Dynamic => {
+                results.push(ApiResult {
+                    kind: ApiResultKind::NonexistentApi,
+                    package: usage.package.clone(),
+                    member: usage.member.clone(),
+                    file: usage.file.clone(),
+                    line: usage.line,
+                    confidence: Confidence::Medium,
+                    tier: SurfaceTier::Dynamic,
+                    detail: format!(
+                        "{}'s surface could not be fully resolved statically (dynamic export, \
+                         ambient wildcard, or unresolvable re-export) — '{}' may exist but was \
+                         not discoverable without executing code",
+                        usage.package, usage.member
+                    ),
+                    usage_count: 1,
+                });
+            }
+            SurfaceTier::NotInstalled | SurfaceTier::Unreadable => {
+                let miss = aggregated
+                    .entry((usage.ecosystem, usage.package.clone()))
+                    .or_insert_with(|| AggregateMiss {
+                        file: usage.file.clone(),
+                        line: usage.line,
+                        tier: surface.tier,
+                        count: 0,
+                    });
+                miss.count += 1;
+            }
+        }
+    }
+
+    for ((_, package), miss) in aggregated {
+        let (reason, remediation_hint) = match miss.tier {
+            SurfaceTier::NotInstalled => (
+                "not installed",
+                "install it (e.g. `npm install`/`pip install`) so its surface can be verified",
             ),
             SurfaceTier::Unreadable => (
-                Confidence::Low,
-                format!(
-                    "no readable source/types were found for {} — '{}' could not be verified \
-                     without executing code",
-                    usage.package, usage.member
-                ),
+                "no readable types/source",
+                "check that it ships type declarations (`.d.ts`) or readable Python source",
+            ),
+            SurfaceTier::Resolved | SurfaceTier::Dynamic => unreachable!(
+                "aggregated only ever holds NotInstalled/Unreadable misses (see match above)"
             ),
         };
-
         results.push(ApiResult {
             kind: ApiResultKind::NonexistentApi,
-            package: usage.package.clone(),
-            member: usage.member.clone(),
-            file: usage.file.clone(),
-            line: usage.line,
-            confidence,
-            detail,
+            package: package.clone(),
+            member: String::new(),
+            file: miss.file,
+            line: miss.line,
+            confidence: Confidence::Low,
+            tier: miss.tier,
+            detail: format!(
+                "could not verify {} usage(s) of '{package}' — {reason}; {remediation_hint}",
+                miss.count
+            ),
+            usage_count: miss.count,
         });
     }
 
     results
 }
 
-/// Determine which ecosystem a used package name belongs to from the
-/// dependency graph's declared sets. A name declared in neither set is not
-/// a package `apisurface` should judge (that's `deps::ImportResolution`'s
-/// job upstream).
+struct AggregateMiss {
+    file: String,
+    line: u32,
+    tier: SurfaceTier,
+    count: usize,
+}
+
+/// Whether `usage`'s package is declared under its own extractor-assigned
+/// ecosystem ([`UsageSite::ecosystem`], audit A14) — no more guessing by
+/// trying `Npm` first and falling back to `Pypi` (which could wrongly judge
+/// a Python `import yaml` usage against a coincidentally-declared npm
+/// `yaml` package). A name declared in neither set is not a package
+/// `apisurface` should judge (that's `deps::ImportResolution`'s job
+/// upstream).
 ///
 /// The `Pypi` declared set is PEP 503-normalized at graph-construction time
 /// (`deps::normalize_pep503`: lowercase, runs of `-`/`_`/`.` collapse to a
@@ -185,33 +298,33 @@ pub fn check(
 /// directory name, e.g. `typed_pkg`) — so the usage-side name must be
 /// normalized the same way before membership is checked, or every
 /// underscore-named PyPI package would silently never match.
-fn ecosystem_of(graph: &DependencyGraph, package: &str) -> Option<Ecosystem> {
-    if graph
-        .declared
-        .get(&Ecosystem::Npm)
-        .is_some_and(|set| set.contains(package))
-    {
-        return Some(Ecosystem::Npm);
+fn is_declared(graph: &DependencyGraph, usage: &UsageSite) -> bool {
+    match usage.ecosystem {
+        Ecosystem::Npm => graph
+            .declared
+            .get(&Ecosystem::Npm)
+            .is_some_and(|set| set.contains(&usage.package)),
+        Ecosystem::Pypi => graph
+            .declared
+            .get(&Ecosystem::Pypi)
+            .is_some_and(|set| set.contains(&normalize_pep503(&usage.package))),
     }
-    if graph
-        .declared
-        .get(&Ecosystem::Pypi)
-        .is_some_and(|set| set.contains(&normalize_pep503(package)))
-    {
-        return Some(Ecosystem::Pypi);
-    }
-    None
 }
 
 fn enumerate_installed(
     ecosystem: Ecosystem,
     package: &str,
+    subpath: Option<&str>,
     node_modules: &Path,
     site_packages: &Path,
 ) -> ApiSurface {
-    let outcome = match ecosystem {
-        Ecosystem::Npm => dts::enumerate_js(&node_modules.join(package)),
-        Ecosystem::Pypi => pysurface::enumerate_py(&site_packages.join(package)),
+    let outcome = match (ecosystem, subpath) {
+        (Ecosystem::Npm, Some(sub)) => dts::enumerate_js_subpath(&node_modules.join(package), sub),
+        (Ecosystem::Npm, None) => dts::enumerate_js(&node_modules.join(package)),
+        // Python usage sites never carry a subpath (A8 handles submodule
+        // usage as ordinary member access against the root surface
+        // instead) — `subpath` is always `None` here.
+        (Ecosystem::Pypi, _) => pysurface::enumerate_py(&site_packages.join(package)),
     };
     // A hard parse/grammar failure (a programming bug, never expected from
     // hostile third-party input — see SurfaceError's #[from] ScanError) is
@@ -324,22 +437,50 @@ mod tests {
         assert!(pairs.contains(&("json", "dumps")));
     }
 
-    #[test]
-    fn ecosystem_of_prefers_declared_set_membership() {
-        let graph = graph_with(&["left-pad"], &["requests"]);
-        assert_eq!(ecosystem_of(&graph, "left-pad"), Some(Ecosystem::Npm));
-        assert_eq!(ecosystem_of(&graph, "requests"), Some(Ecosystem::Pypi));
-        assert_eq!(ecosystem_of(&graph, "unknown-pkg"), None);
+    fn npm_usage(package: &str, member: &str, file: &str, line: u32) -> UsageSite {
+        UsageSite {
+            package: package.to_owned(),
+            member: member.to_owned(),
+            file: file.to_owned(),
+            line,
+            ecosystem: Ecosystem::Npm,
+            subpath: None,
+        }
+    }
+
+    fn py_usage(package: &str, member: &str, file: &str, line: u32) -> UsageSite {
+        UsageSite {
+            package: package.to_owned(),
+            member: member.to_owned(),
+            file: file.to_owned(),
+            line,
+            ecosystem: Ecosystem::Pypi,
+            subpath: None,
+        }
     }
 
     #[test]
-    fn ecosystem_of_normalizes_pep503_for_pypi_lookup() {
+    fn is_declared_checks_the_usages_own_ecosystem() {
+        let graph = graph_with(&["left-pad"], &["requests"]);
+        assert!(is_declared(&graph, &npm_usage("left-pad", "x", "a.js", 1)));
+        assert!(is_declared(&graph, &py_usage("requests", "x", "a.py", 1)));
+        assert!(!is_declared(
+            &graph,
+            &npm_usage("unknown-pkg", "x", "a.js", 1)
+        ));
+        // A14: a Python usage must never resolve against the npm declared
+        // set, even if a same-named npm package happens to be declared too.
+        assert!(!is_declared(&graph, &py_usage("left-pad", "x", "a.py", 1)));
+    }
+
+    #[test]
+    fn is_declared_normalizes_pep503_for_pypi_lookup() {
         // declared_pypi is PEP 503-normalized ("typed-pkg"), but a Python
         // import statement uses the raw underscore module name
         // ("typed_pkg", matching the site-packages directory) — this must
-        // still resolve to Pypi, not silently fail to match.
+        // still resolve as declared, not silently fail to match.
         let graph = graph_with(&[], &["typed-pkg"]);
-        assert_eq!(ecosystem_of(&graph, "typed_pkg"), Some(Ecosystem::Pypi));
+        assert!(is_declared(&graph, &py_usage("typed_pkg", "x", "a.py", 1)));
     }
 
     #[test]
@@ -357,25 +498,17 @@ mod tests {
 
         let graph = graph_with(&["typed-pkg"], &[]);
         let usages = vec![
-            UsageSite {
-                package: "typed-pkg".to_owned(),
-                member: "realFn".to_owned(),
-                file: "src/a.ts".to_owned(),
-                line: 1,
-            },
-            UsageSite {
-                package: "typed-pkg".to_owned(),
-                member: "fakeFn".to_owned(),
-                file: "src/a.ts".to_owned(),
-                line: 2,
-            },
+            npm_usage("typed-pkg", "realFn", "src/a.ts", 1),
+            npm_usage("typed-pkg", "fakeFn", "src/a.ts", 2),
         ];
 
         let results = check(&graph, &usages, &node_modules, &dir.join("site-packages"));
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].member, "fakeFn");
         assert_eq!(results[0].confidence, Confidence::High);
+        assert_eq!(results[0].tier, SurfaceTier::Resolved);
         assert_eq!(results[0].kind, ApiResultKind::NonexistentApi);
+        assert_eq!(results[0].usage_count, 1);
     }
 
     #[test]
@@ -391,31 +524,22 @@ mod tests {
         .unwrap();
 
         let graph = graph_with(&[], &["dynamic_pkg"]);
-        let usages = vec![UsageSite {
-            package: "dynamic_pkg".to_owned(),
-            member: "anything".to_owned(),
-            file: "main.py".to_owned(),
-            line: 1,
-        }];
+        let usages = vec![py_usage("dynamic_pkg", "anything", "main.py", 1)];
 
         let results = check(&graph, &usages, &dir.join("node_modules"), &site_packages);
         assert!(results.iter().all(|r| r.confidence != Confidence::High));
         // FP-budget guard: identical access pattern on a dynamic package
         // must never produce a High-confidence result at all.
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].confidence, Confidence::Low);
+        assert_eq!(results[0].confidence, Confidence::Medium);
+        assert_eq!(results[0].tier, SurfaceTier::Dynamic);
     }
 
     #[test]
     fn check_skips_undeclared_packages() {
         let dir = tempdir("undeclared");
         let graph = graph_with(&[], &[]);
-        let usages = vec![UsageSite {
-            package: "not-declared".to_owned(),
-            member: "x".to_owned(),
-            file: "a.js".to_owned(),
-            line: 1,
-        }];
+        let usages = vec![npm_usage("not-declared", "x", "a.js", 1)];
         let results = check(
             &graph,
             &usages,
@@ -423,6 +547,33 @@ mod tests {
             &dir.join("site-packages"),
         );
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn check_not_installed_package_aggregates_to_a_single_low_confidence_result() {
+        // A3: a package with no directory at all under node_modules (a
+        // fresh clone that never ran `npm install`) must never produce one
+        // NonexistentApi per usage site — exactly one Info/Low result for
+        // the whole package, regardless of how many usage sites exist.
+        let dir = tempdir("not-installed");
+        let node_modules = dir.join("node_modules"); // deliberately never created
+        let graph = graph_with(&["never-installed-pkg"], &[]);
+        let usages = vec![
+            npm_usage("never-installed-pkg", "a", "src/a.ts", 1),
+            npm_usage("never-installed-pkg", "b", "src/a.ts", 2),
+            npm_usage("never-installed-pkg", "c", "src/b.ts", 1),
+        ];
+
+        let results = check(&graph, &usages, &node_modules, &dir.join("site-packages"));
+        assert_eq!(
+            results.len(),
+            1,
+            "expected exactly one aggregated result, got: {results:?}"
+        );
+        assert_eq!(results[0].confidence, Confidence::Low);
+        assert_eq!(results[0].tier, SurfaceTier::NotInstalled);
+        assert_eq!(results[0].usage_count, 3);
+        assert!(results[0].detail.contains("not installed"));
     }
 
     // Sanity that ImportResolution import used in doc examples elsewhere
