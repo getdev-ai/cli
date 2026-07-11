@@ -28,15 +28,15 @@ fn tmp_dir(label: &str) -> PathBuf {
     dir
 }
 
-fn assert_contract_exit_code(code: i32) {
-    assert!(
-        (0..=3).contains(&code),
-        "exit code {code} is outside the docs/PLAN.md §2.2 contract (0/1/2/3)"
-    );
-}
+/// D1: every test in this file asserts its EXACT expected exit code —
+/// `assert_contract_exit_code(0..=3)` (deleted) used to accept the entire
+/// docs/PLAN.md §2.2 contract range, so a test using it would still pass
+/// with the flag it claims to cover deleted outright (clap's unknown-flag
+/// parse error is exit 2, inside the same accepted range). Each helper
+/// below pins the one code that scenario must produce.
 
 #[test]
-fn doctor_offline_parses_and_exits_in_contract_range() {
+fn doctor_offline_on_a_healthy_scratch_dir_exits_0() {
     let dir = tmp_dir("doctor-offline");
     let assert = getdev()
         .current_dir(&dir)
@@ -44,34 +44,49 @@ fn doctor_offline_parses_and_exits_in_contract_range() {
         .arg("doctor")
         .arg("--offline")
         .assert();
-    assert_contract_exit_code(assert.get_output().status.code().unwrap_or(-1));
+    let code = assert.get_output().status.code().unwrap();
+    assert_eq!(code, 0, "a healthy offline doctor run must exit exactly 0");
 }
 
 #[test]
-fn env_quiet_long_and_short_flag_both_parse() {
+fn env_quiet_long_and_short_flag_both_exit_0_on_a_clean_scratch_dir() {
     let dir = tmp_dir("env-quiet");
     for flag in ["--quiet", "-q"] {
-        let assert = getdev().current_dir(&dir).arg("env").arg(flag).assert();
-        assert_contract_exit_code(assert.get_output().status.code().unwrap_or(-1));
+        let assert = getdev()
+            .current_dir(&dir)
+            .env("GETDEV_CACHE_DIR", dir.join("cache"))
+            .arg("env")
+            .arg(flag)
+            .assert();
+        let code = assert.get_output().status.code().unwrap();
+        assert_eq!(
+            code, 0,
+            "env {flag} on a clean scratch dir (no findings, no --fail-on) must exit exactly 0"
+        );
     }
 }
 
 #[test]
-fn env_config_flag_with_explicit_path_parses() {
+fn env_config_flag_with_explicit_valid_path_exits_0() {
     let dir = tmp_dir("env-config");
     let config_path = dir.join("custom.toml");
     std::fs::write(&config_path, "").unwrap();
     let assert = getdev()
         .current_dir(&dir)
+        .env("GETDEV_CACHE_DIR", dir.join("cache"))
         .arg("env")
         .arg("--config")
         .arg(&config_path)
         .assert();
-    assert_contract_exit_code(assert.get_output().status.code().unwrap_or(-1));
+    let code = assert.get_output().status.code().unwrap();
+    assert_eq!(
+        code, 0,
+        "env --config <valid empty toml> on a clean scratch dir must exit exactly 0"
+    );
 }
 
 #[test]
-fn verbose_flag_is_repeatable_and_parses_on_doctor() {
+fn verbose_flag_is_repeatable_and_exits_0_on_doctor() {
     let dir = tmp_dir("doctor-verbose");
     let assert = getdev()
         .current_dir(&dir)
@@ -80,7 +95,167 @@ fn verbose_flag_is_repeatable_and_parses_on_doctor() {
         .arg("--offline")
         .arg("-vv")
         .assert();
-    assert_contract_exit_code(assert.get_output().status.code().unwrap_or(-1));
+    let code = assert.get_output().status.code().unwrap();
+    assert_eq!(
+        code, 0,
+        "doctor --offline -vv on a healthy env must exit exactly 0"
+    );
+}
+
+/// D1: `--config` pointing at a file that does not exist on disk must hit
+/// the config-resolution hard exit (3), not silently fall through to a
+/// clean run.
+#[test]
+fn config_flag_pointing_at_a_missing_file_exits_3() {
+    let dir = tmp_dir("config-missing");
+    let assert = getdev()
+        .current_dir(&dir)
+        .env("GETDEV_CACHE_DIR", dir.join("cache"))
+        .arg("env")
+        .arg("--config")
+        .arg(dir.join("does-not-exist.toml"))
+        .assert()
+        .failure();
+    let code = assert.get_output().status.code().unwrap();
+    assert_eq!(
+        code, 3,
+        "a --config path that does not exist must be a config-resolution error (exit 3)"
+    );
+}
+
+/// D1: `--config` pointing at a syntactically malformed TOML file must also
+/// hit the config-resolution hard exit (3).
+#[test]
+fn config_flag_pointing_at_a_malformed_file_exits_3() {
+    let dir = tmp_dir("config-malformed");
+    let config_path = dir.join("bad.toml");
+    std::fs::write(&config_path, "not = [valid\n").unwrap();
+    let assert = getdev()
+        .current_dir(&dir)
+        .env("GETDEV_CACHE_DIR", dir.join("cache"))
+        .arg("env")
+        .arg("--config")
+        .arg(&config_path)
+        .assert()
+        .failure();
+    let code = assert.get_output().status.code().unwrap();
+    assert_eq!(
+        code, 3,
+        "a syntactically malformed --config file must be a config-resolution error (exit 3)"
+    );
+}
+
+/// D1: a `--fail-on` threshold that a real finding actually meets/exceeds
+/// must exit exactly 1 — the finding-threshold-hit exit code, distinct from
+/// both a clean run (0) and any error path (2/3).
+#[test]
+fn fail_on_hit_on_env_exits_1() {
+    let dir = tmp_dir("fail-on-hit");
+    std::fs::write(
+        dir.join("pay.js"),
+        "const stripeKey = \"sk_live_FAKEFAKEFAKE1234\";\n",
+    )
+    .unwrap();
+
+    let assert = getdev()
+        .current_dir(&dir)
+        .env("GETDEV_CACHE_DIR", dir.join("cache"))
+        .arg("env")
+        .arg("--fail-on")
+        .arg("low")
+        .assert()
+        .failure();
+    let code = assert.get_output().status.code().unwrap();
+    assert_eq!(
+        code, 1,
+        "a --fail-on threshold met by a real finding (critical secret >= low) must exit exactly 1"
+    );
+}
+
+/// D1: `--quiet` must actually suppress doctor's `getdev {version}` banner
+/// line — not just happen to still return a passing exit code. Assert on
+/// stdout content, not code alone.
+#[test]
+fn quiet_flag_suppresses_the_doctor_banner_in_stdout() {
+    let dir = tmp_dir("quiet-suppresses-banner");
+
+    let loud = getdev()
+        .current_dir(&dir)
+        .env("GETDEV_CACHE_DIR", dir.join("cache-loud"))
+        .arg("doctor")
+        .arg("--offline")
+        .assert()
+        .success();
+    let loud_stdout = String::from_utf8_lossy(&loud.get_output().stdout).to_string();
+    assert!(
+        loud_stdout.starts_with("getdev "),
+        "expected the default (non-quiet) run to print the version banner first, got:\n{loud_stdout}"
+    );
+
+    let quiet = getdev()
+        .current_dir(&dir)
+        .env("GETDEV_CACHE_DIR", dir.join("cache-quiet"))
+        .arg("doctor")
+        .arg("--offline")
+        .arg("--quiet")
+        .assert()
+        .success();
+    let quiet_stdout = String::from_utf8_lossy(&quiet.get_output().stdout).to_string();
+    assert!(
+        !quiet_stdout.contains("getdev 0.") && !quiet_stdout.starts_with("getdev "),
+        "expected --quiet to suppress the 'getdev {{version}}' banner line, got:\n{quiet_stdout}"
+    );
+    assert!(
+        quiet_stdout.contains("all checks passed"),
+        "expected --quiet to still print the check rows/summary, got:\n{quiet_stdout}"
+    );
+}
+
+/// D1: `--verbose` must add real per-file skip detail to env's terminal
+/// output, not just a bare count — assert the exact unreadable-file reason
+/// text appears only under `-v`.
+#[cfg(unix)]
+#[test]
+fn verbose_flag_adds_skip_detail_to_env_terminal_output() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tmp_dir("verbose-skip-detail");
+    let unreadable = dir.join("broken.js");
+    std::fs::write(&unreadable, "const x = 1;\n").unwrap();
+    std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let quiet_run = getdev()
+        .current_dir(&dir)
+        .env("GETDEV_CACHE_DIR", dir.join("cache-no-v"))
+        .arg("env")
+        .assert()
+        .success();
+    let quiet_stdout = String::from_utf8_lossy(&quiet_run.get_output().stdout).to_string();
+    assert!(
+        quiet_stdout.contains("1 unreadable file(s) skipped (-v for details)"),
+        "expected the bare skip count without -v, got:\n{quiet_stdout}"
+    );
+    assert!(!quiet_stdout.contains("broken.js"));
+
+    let verbose_run = getdev()
+        .current_dir(&dir)
+        .env("GETDEV_CACHE_DIR", dir.join("cache-v"))
+        .arg("env")
+        .arg("-v")
+        .assert()
+        .success();
+
+    let _ = std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o644));
+
+    let verbose_stdout = String::from_utf8_lossy(&verbose_run.get_output().stdout).to_string();
+    assert!(
+        verbose_stdout.contains("1 unreadable file(s) skipped:"),
+        "expected the detailed skip header under -v, got:\n{verbose_stdout}"
+    );
+    assert!(
+        verbose_stdout.contains("broken.js"),
+        "expected -v to name the actual skipped file, got:\n{verbose_stdout}"
+    );
 }
 
 #[test]
@@ -96,7 +271,7 @@ fn getdev_offline_env_var_makes_doctor_networkless_and_it_succeeds() {
 }
 
 #[test]
-fn fix_flag_parses_on_every_command() {
+fn fix_flag_on_doctor_with_no_cache_yet_exits_0() {
     let dir = tmp_dir("fix-flag");
     let assert = getdev()
         .current_dir(&dir)
@@ -105,18 +280,29 @@ fn fix_flag_parses_on_every_command() {
         .arg("--offline")
         .arg("--fix")
         .assert();
-    assert_contract_exit_code(assert.get_output().status.code().unwrap_or(-1));
+    let code = assert.get_output().status.code().unwrap();
+    assert_eq!(
+        code, 0,
+        "doctor --offline --fix against a not-yet-created cache must exit exactly 0"
+    );
 }
 
+/// D1: an unrecognized flag is a clap usage error — exit exactly 2, not
+/// merely "some failure code in 1..=3".
 #[test]
-fn unknown_global_flag_is_a_parse_error() {
+fn unknown_global_flag_is_a_parse_error_exit_2() {
     let dir = tmp_dir("unknown-flag");
-    getdev()
+    let assert = getdev()
         .current_dir(&dir)
         .arg("env")
         .arg("--not-a-real-flag")
         .assert()
         .failure();
+    let code = assert.get_output().status.code().unwrap();
+    assert_eq!(
+        code, 2,
+        "an unrecognized flag must be a clap parse error (exit 2)"
+    );
 }
 
 /// B4: `--json`/`--no-color`/`--path`/`--fail-on` are now true globals, not
