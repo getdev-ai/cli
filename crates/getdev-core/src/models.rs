@@ -64,11 +64,18 @@ impl ModelMatcher {
     /// Classify a string literal found at `identifier_context` (the
     /// variable/property/parameter name it is assigned to). Returns `Some`
     /// only when ALL of: `identifier_context` is a known model call-site
-    /// name, `literal` looks like a model id, and `literal` starts with
-    /// none of the known vendor family prefixes — deliberately
-    /// freshness-tolerant (03-RESEARCH.md Pitfall 1): a brand-new dated ID
-    /// from a *known* family never fires, only a whole unrecognized family
-    /// or a garbled string does.
+    /// name, `literal` looks like a model id, and `literal` matches none of
+    /// the known vendor family entries — deliberately freshness-tolerant
+    /// (03-RESEARCH.md Pitfall 1): a brand-new dated ID from a *known*
+    /// family never fires, only a whole unrecognized family or a garbled
+    /// string does.
+    ///
+    /// A family entry matches a literal when the literal EQUALS the entry
+    /// exactly OR the literal starts with it (A9, 03-REVIEW.md). Entries may
+    /// or may not carry a trailing hyphen: hyphenated entries (`"o1-"`) only
+    /// match dashed continuations, while bare stems (`"o1"`) also cover the
+    /// bare id itself (`model: "o1"`) — `starts_with` already subsumes the
+    /// equality case, so both are checked via one `starts_with` scan.
     pub fn classify_model(&self, literal: &str, identifier_context: &str) -> Option<ModelVerdict> {
         let at_call_site = self
             .call_sites
@@ -80,7 +87,7 @@ impl ModelMatcher {
         let known_family = self
             .families
             .iter()
-            .any(|family| literal.starts_with(family.as_str()));
+            .any(|family| literal == family.as_str() || literal.starts_with(family.as_str()));
         if known_family {
             return None;
         }
@@ -91,17 +98,22 @@ impl ModelMatcher {
     }
 }
 
-/// Heuristic model-id shape: lowercase ASCII alphanumerics plus `-`/`.`,
+/// Heuristic model-id shape: lowercase ASCII alphanumerics plus `-`/`.`/`:`,
 /// containing at least one hyphen or digit. Rules out plain English words
 /// at a model call site (e.g. `"production"`) from firing a wall of false
 /// positives — the literal must actually *look* like a model identifier.
+///
+/// `:` is tolerated alongside `.` (A9) so Bedrock-form ids
+/// (`"anthropic.claude-3-5-sonnet-20241022-v2:0"`) reach the known-family
+/// check instead of being rejected on shape alone — the family gate, not
+/// the charset, is what must decide whether such a literal is flagged.
 fn looks_like_model_id(literal: &str) -> bool {
     if literal.is_empty() {
         return false;
     }
     let valid_chars = literal
         .chars()
-        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.');
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.' || c == ':');
     valid_chars && (literal.contains('-') || literal.chars().any(|c| c.is_ascii_digit()))
 }
 
@@ -165,4 +177,45 @@ mod tests {
         assert!(m.classify_model("claude-mythos-7", "model_name").is_some());
         assert!(!m.families.iter().any(|f| f.contains("mythos")));
     }
+
+    /// A9 — bare (non-hyphenated) ids from a known family must never flag,
+    /// but a numerically adjacent *unrelated* family (o9, no matching
+    /// entry) still must.
+    #[test]
+    fn bare_family_stems_are_recognized_without_a_trailing_hyphen() {
+        let m = matcher();
+        assert!(m.classify_model("o1", "model").is_none());
+        assert!(m.classify_model("o1-preview", "model").is_none());
+        assert!(m.classify_model("o3", "model_id").is_none());
+        assert!(m.classify_model("o4", "modelId").is_none());
+        assert!(m.classify_model("o9-mini", "model").is_some());
+    }
+
+    /// A9 — families added by the freshness-gated checkpoint update
+    /// (03-REVIEW.md): non-chat model families (embeddings/audio/image) and
+    /// newer vendor lines must never flag.
+    #[test]
+    fn newly_added_families_are_recognized() {
+        let m = matcher();
+        assert!(m
+            .classify_model("text-embedding-3-large", "model")
+            .is_none());
+        assert!(m.classify_model("whisper-1", "model").is_none());
+        assert!(m.classify_model("chatgpt-4o-latest", "model").is_none());
+        assert!(m.classify_model("gemma-2-27b", "model").is_none());
+        assert!(m.classify_model("qwen-2.5-72b", "model").is_none());
+    }
+
+    /// A9 — Bedrock-form ids (`vendor.family-...:version`) must reach the
+    /// known-family check rather than being rejected on charset alone; the
+    /// dotted/colon-suffixed form of a known Anthropic family must never
+    /// flag.
+    #[test]
+    fn bedrock_form_known_family_id_is_never_flagged() {
+        let m = matcher();
+        assert!(m
+            .classify_model("anthropic.claude-3-5-sonnet-20241022-v2:0", "model_id")
+            .is_none());
+    }
+
 }
