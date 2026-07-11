@@ -1,7 +1,12 @@
+use std::io::IsTerminal;
 use std::path::Path;
 use std::process::Command;
 
+use owo_colors::OwoColorize;
+use serde::Serialize;
+
 use getdev_core::config::Config;
+use getdev_core::report::ColorMode;
 use getdev_grammars::tree_sitter::Parser;
 use getdev_registry::{cache, Cache, Ecosystem, Existence, RegistryClient};
 
@@ -13,34 +18,62 @@ use crate::update::{self, ReleaseCheck};
 /// to do, docs/PLAN.md §2.3).
 const CACHE_HEALTH_PROBE_NAME: &str = "__getdev_doctor_health_probe__";
 
-pub fn run(offline: bool, fix: bool) -> anyhow::Result<()> {
-    let mut failures = 0;
+/// Schema version of the `--json` doctor report — versioned independently
+/// of `getdev-core`'s findings schema (doctor is a pass/fail table, not a
+/// findings report).
+const DOCTOR_SCHEMA_VERSION: &str = "1";
 
-    println!("getdev {}", env!("CARGO_PKG_VERSION"));
-    println!();
+pub struct DoctorArgs {
+    pub offline: bool,
+    pub fix: bool,
+    /// B4: machine-readable pass/fail table (global flag, docs/PLAN.md §2.2).
+    pub json: bool,
+    /// B4: suppress the banner (global flag).
+    pub quiet: bool,
+    /// B4: disable ANSI colors on the ok/FAIL markers (global flag).
+    pub no_color: bool,
+}
 
-    // config validity (.getdev.toml in CWD; missing file is fine)
+/// One row of the check table. This is the stable `--json` shape: `name` +
+/// `ok`, nothing else — kept intentionally small so it stays stable as more
+/// checks are added over time.
+#[derive(Debug, Serialize)]
+struct DoctorCheck {
+    name: String,
+    ok: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct DoctorReport {
+    schema_version: &'static str,
+    tool_version: &'static str,
+    checks: Vec<DoctorCheck>,
+    ok: bool,
+}
+
+pub fn run(args: &DoctorArgs) -> anyhow::Result<()> {
+    let mut checks: Vec<DoctorCheck> = Vec::new();
+
+    // config validity (.getdev.toml in CWD; missing file is fine). B3: a
+    // malformed config must never kill doctor before it can diagnose
+    // anything — doctor resolves config leniently here (a ConfigError
+    // becomes a failed row, not a process exit) while every other command
+    // keeps the hard exit-3 in main.rs.
     match Config::load(Path::new(".")) {
-        Ok(_) => report(true, "config (.getdev.toml valid or absent)"),
-        Err(err) => {
-            failures += 1;
-            report(false, &format!("config: {err}"));
-        }
+        Ok(_) => checks.push(row(true, "config (.getdev.toml valid or absent)")),
+        Err(err) => checks.push(row(false, &format!("config: {err}"))),
     }
 
     // git availability (required for snap/back/review)
     match Command::new("git").arg("--version").output() {
         Ok(out) if out.status.success() => {
             let version = String::from_utf8_lossy(&out.stdout);
-            report(true, version.trim());
+            checks.push(row(true, version.trim()));
         }
-        _ => {
-            failures += 1;
-            report(
-                false,
-                "git not found on PATH — snap/back/review require it (https://git-scm.com/downloads)",
-            );
-        }
+        _ => checks.push(row(
+            false,
+            "git not found on PATH — snap/back/review require it (https://git-scm.com/downloads)",
+        )),
     }
 
     // grammar integrity: every embedded grammar must load and parse a snippet
@@ -61,10 +94,9 @@ pub fn run(offline: bool, fix: bool) -> anyhow::Result<()> {
                 .parse(snippet, None)
                 .is_some_and(|t| !t.root_node().has_error());
         if healthy {
-            report(true, &format!("grammar {name}"));
+            checks.push(row(true, &format!("grammar {name}")));
         } else {
-            failures += 1;
-            report(false, &format!("grammar {name} failed to load/parse"));
+            checks.push(row(false, &format!("grammar {name} failed to load/parse")));
         }
     }
 
@@ -72,24 +104,28 @@ pub fn run(offline: bool, fix: bool) -> anyhow::Result<()> {
     // yet (pre-launch) is expected state, not a failure; an unreachable
     // GitHub is a soft note, never a hard fail (03-RESEARCH.md "Environment
     // Availability").
-    match update::latest_release_version(offline) {
-        ReleaseCheck::Skipped => report(true, "version check skipped (--offline)"),
-        ReleaseCheck::UpToDate => report(
+    match update::latest_release_version(args.offline) {
+        ReleaseCheck::Skipped => checks.push(row(true, "version check skipped (--offline)")),
+        ReleaseCheck::UpToDate => checks.push(row(
             true,
             &format!("version {} (up to date)", env!("CARGO_PKG_VERSION")),
-        ),
-        ReleaseCheck::Outdated { latest } => report(
+        )),
+        ReleaseCheck::Outdated { latest } => checks.push(row(
             true,
             &format!(
-                "version {} (latest: {latest} — see https://github.com/getdev-ai/cli/releases)",
-                env!("CARGO_PKG_VERSION")
+                "version {} (latest: {latest} — see {})",
+                env!("CARGO_PKG_VERSION"),
+                update::releases_page_url()
             ),
-        ),
+        )),
         ReleaseCheck::NoReleasesYet => {
-            report(true, "version check: no releases published yet");
+            checks.push(row(true, "version check: no releases published yet"));
         }
         ReleaseCheck::Unreachable => {
-            report(true, "version check: github releases unreachable (skipped)");
+            checks.push(row(
+                true,
+                "version check: github releases unreachable (skipped)",
+            ));
         }
     }
 
@@ -98,42 +134,41 @@ pub fn run(offline: bool, fix: bool) -> anyhow::Result<()> {
     let cache_dir = cache::cache_dir();
     match cache_health(&cache_dir) {
         CacheHealth::Absent => {
-            report(true, "cache: not yet created (first run will create it)");
+            checks.push(row(
+                true,
+                "cache: not yet created (first run will create it)",
+            ));
         }
         CacheHealth::Healthy { size_bytes } => {
-            report(
+            checks.push(row(
                 true,
                 &format!(
                     "cache ({}) healthy, {}",
                     cache_dir.display(),
                     human_size(size_bytes)
                 ),
-            );
+            ));
         }
         CacheHealth::Corrupt { reason } => {
-            if fix {
+            if args.fix {
                 match std::fs::remove_dir_all(&cache_dir) {
-                    Ok(()) => report(
+                    Ok(()) => checks.push(row(
                         true,
                         &format!("cache: corrupt cache cleared (--fix): {reason}"),
-                    ),
-                    Err(err) => {
-                        failures += 1;
-                        report(
-                            false,
-                            &format!(
-                                "cache: --fix failed to clear {}: {err}",
-                                cache_dir.display()
-                            ),
-                        );
-                    }
+                    )),
+                    Err(err) => checks.push(row(
+                        false,
+                        &format!(
+                            "cache: --fix failed to clear {}: {err}",
+                            cache_dir.display()
+                        ),
+                    )),
                 }
             } else {
-                failures += 1;
-                report(
+                checks.push(row(
                     false,
                     &format!("cache: {reason} (run `getdev doctor --fix` to clear it)"),
-                );
+                ));
             }
         }
     }
@@ -143,24 +178,59 @@ pub fn run(offline: bool, fix: bool) -> anyhow::Result<()> {
     // network access). Inconclusive/unreachable is a soft note, never a
     // hard fail — the registries themselves being briefly unreachable is
     // not a getdev problem.
-    if offline {
-        report(true, "registry reachability skipped (--offline)");
+    if args.offline {
+        checks.push(row(true, "registry reachability skipped (--offline)"));
     } else {
-        report(true, &registry_reachability_message());
+        checks.push(row(true, &registry_reachability_message()));
     }
 
-    println!();
+    let failures = checks.iter().filter(|c| !c.ok).count();
+
+    if args.json {
+        let report = DoctorReport {
+            schema_version: DOCTOR_SCHEMA_VERSION,
+            tool_version: env!("CARGO_PKG_VERSION"),
+            ok: failures == 0,
+            checks,
+        };
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        if !args.quiet {
+            println!("getdev {}", env!("CARGO_PKG_VERSION"));
+            println!();
+        }
+        let color = ColorMode::resolve(args.no_color, std::io::stdout().is_terminal());
+        for check in &checks {
+            print_row(check, color);
+        }
+        println!();
+        if failures == 0 {
+            println!("all checks passed");
+        }
+    }
+
     if failures == 0 {
-        println!("all checks passed");
         Ok(())
     } else {
         anyhow::bail!("{failures} check(s) failed");
     }
 }
 
-fn report(ok: bool, message: &str) {
-    let mark = if ok { "ok  " } else { "FAIL" };
-    println!("  [{mark}] {message}");
+fn row(ok: bool, message: &str) -> DoctorCheck {
+    DoctorCheck {
+        name: message.to_owned(),
+        ok,
+    }
+}
+
+fn print_row(check: &DoctorCheck, color: ColorMode) {
+    let mark = if check.ok { "ok  " } else { "FAIL" };
+    let mark = match (check.ok, color) {
+        (_, ColorMode::Off) => mark.to_owned(),
+        (true, ColorMode::On) => mark.green().to_string(),
+        (false, ColorMode::On) => mark.red().bold().to_string(),
+    };
+    println!("  [{mark}] {}", check.name);
 }
 
 enum CacheHealth {

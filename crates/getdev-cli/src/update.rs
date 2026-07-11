@@ -10,8 +10,21 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-const RELEASES_URL: &str = "https://api.github.com/repos/getdev-ai/cli/releases/latest";
+/// Single source of truth for the CLI repo slug (audit F2) — `doctor.rs`
+/// calls [`releases_page_url`] rather than hardcoding its own copy, so a
+/// future repo move only ever needs one edit. Verified against `git remote
+/// -v` at fix time: matches the actual origin.
+const REPO_SLUG: &str = "getdev-ai/cli";
 const REQUEST_TIMEOUT_SECS: u64 = 5;
+
+fn releases_api_url() -> String {
+    format!("https://api.github.com/repos/{REPO_SLUG}/releases/latest")
+}
+
+/// Human-facing releases page, shared with `doctor.rs`'s "outdated" row.
+pub fn releases_page_url() -> String {
+    format!("https://github.com/{REPO_SLUG}/releases")
+}
 
 /// Outcome of a version-vs-latest probe. `NoReleasesYet` (GitHub's 404 for a
 /// repo with no published release) is distinct from `Unreachable` — the
@@ -57,7 +70,7 @@ pub fn latest_release_version(offline: bool) -> ReleaseCheck {
         Err(_) => return ReleaseCheck::Unreachable,
     };
 
-    let response = match client.get(RELEASES_URL).send() {
+    let response = match client.get(releases_api_url()).send() {
         Ok(response) => response,
         Err(_) => return ReleaseCheck::Unreachable,
     };

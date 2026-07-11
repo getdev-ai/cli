@@ -26,9 +26,11 @@ getdev-core = { workspace = true }
 getdev-gitx = { workspace = true }
 getdev-grammars = { workspace = true }
 getdev-registry = { workspace = true }
+owo-colors = { workspace = true }
 rayon = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = "2.2.2"

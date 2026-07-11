@@ -27,42 +27,80 @@ struct Cli {
 /// True global flags (docs/PLAN.md §2.2): accepted after any subcommand
 /// thanks to clap's `global = true`, resolved once in `main` and threaded
 /// explicitly to each command — no hidden global state, consistent with
-/// `scan.rs`'s parse-once design.
-#[derive(Args, Debug, Clone, Default)]
+/// `scan.rs`'s parse-once design. B4 audit fix: `--json`/`--no-color`/
+/// `--path`/`--fail-on` moved here from being per-command duplicates on
+/// `env`/`real` only — every command now genuinely shares one flag surface.
+#[derive(Args, Debug, Clone)]
 struct GlobalArgs {
+    /// Machine-readable output (findings schema, docs/SPEC-FINDINGS.md)
+    #[arg(long, global = true)]
+    json: bool,
     /// Suppress banner/progress; findings only
-    #[arg(long, short = 'q', global = true)]
+    #[arg(long, short = 'q', global = true, conflicts_with = "verbose")]
     quiet: bool,
     /// Debug-level detail (repeatable: -vv)
-    #[arg(long, short = 'v', global = true, action = clap::ArgAction::Count)]
+    #[arg(
+        long,
+        short = 'v',
+        global = true,
+        action = clap::ArgAction::Count,
+        conflicts_with = "quiet"
+    )]
     verbose: u8,
+    /// Disable ANSI colors (NO_COLOR is also honored)
+    #[arg(long, global = true)]
+    no_color: bool,
     /// Alternate config file (default: ./.getdev.toml)
     #[arg(long, global = true, value_name = "PATH")]
     config: Option<PathBuf>,
-    /// Never hit the network; use cache only
-    #[arg(long, global = true)]
-    offline: bool,
+    /// Run against a directory other than CWD
+    #[arg(long, global = true, default_value = ".", value_name = "DIR")]
+    path: PathBuf,
+    /// Exit code 1 if any finding is at or above this severity
+    /// (critical|high|medium|low)
+    #[arg(long, global = true, value_name = "SEVERITY", value_parser = parse_fail_on)]
+    fail_on: Option<Severity>,
     /// Apply auto-fixes where the command supports them
     #[arg(long, global = true)]
     fix: bool,
+    /// Never hit the network; use cache only
+    #[arg(long, global = true)]
+    offline: bool,
+}
+
+impl Default for GlobalArgs {
+    fn default() -> Self {
+        Self {
+            json: false,
+            quiet: false,
+            verbose: 0,
+            no_color: false,
+            config: None,
+            path: PathBuf::from("."),
+            fail_on: None,
+            fix: false,
+            offline: false,
+        }
+    }
+}
+
+/// `--fail-on` accepts `critical|high|medium|low` only — `info` is rejected
+/// at parse time (docs/PLAN.md §2.2; info-level findings never fail a run).
+fn parse_fail_on(raw: &str) -> Result<Severity, String> {
+    if raw == "info" {
+        return Err(
+            "info is not a valid --fail-on threshold (must be critical|high|medium|low — \
+             info-level findings never fail a run per docs/PLAN.md §2.2)"
+                .to_owned(),
+        );
+    }
+    raw.parse::<Severity>()
 }
 
 #[derive(Subcommand)]
 enum Command {
     /// Extract hardcoded secrets to .env (dry-run by default)
     Env {
-        /// Directory to scan
-        #[arg(long, default_value = ".")]
-        path: PathBuf,
-        /// Machine-readable output (findings schema)
-        #[arg(long)]
-        json: bool,
-        /// Disable ANSI colors (NO_COLOR is also honored)
-        #[arg(long)]
-        no_color: bool,
-        /// Exit 1 if any finding is at or above this severity
-        #[arg(long, value_name = "SEVERITY")]
-        fail_on: Option<Severity>,
         /// Target env file
         #[arg(long, default_value = ".env", value_name = "PATH")]
         env_file: String,
@@ -72,18 +110,6 @@ enum Command {
     },
     /// Verify packages / APIs / model strings actually exist
     Real {
-        /// Directory to scan
-        #[arg(long, default_value = ".")]
-        path: PathBuf,
-        /// Machine-readable output (findings schema)
-        #[arg(long)]
-        json: bool,
-        /// Disable ANSI colors (NO_COLOR is also honored)
-        #[arg(long)]
-        no_color: bool,
-        /// Exit 1 if any finding is at or above this severity
-        #[arg(long, value_name = "SEVERITY")]
-        fail_on: Option<Severity>,
         /// Only run the dependency/package existence checks
         #[arg(long, conflicts_with_all = ["apis_only", "models_only"])]
         deps_only: bool,
@@ -101,7 +127,7 @@ enum Command {
     Spike {
         /// Directory to scan
         #[arg(default_value = ".")]
-        path: PathBuf,
+        dir: PathBuf,
     },
 }
 
@@ -135,29 +161,32 @@ fn run(cli: Cli) -> anyhow::Result<u8> {
     // must never kill the process before doctor's own checks even run.
     // Every other command keeps the hard exit-3 via `Config::resolve`'s `?`
     // below (docs/PLAN.md §2.2 exit-code contract); doctor resolves config
-    // leniently (falling back to defaults) and separately reports the same
+    // leniently (falls back to defaults) and separately reports the same
     // parse failure as a failed row via its own `Config::load` check.
     if matches!(cli.command, Command::Doctor) {
         let cfg = Config::resolve(cli.global.config.as_deref(), Path::new(".")).unwrap_or_default();
         let offline = config::offline_resolved(cli.global.offline, &cfg);
-        return commands::doctor::run(offline, cli.global.fix).map(|()| 0);
+        return commands::doctor::run(&commands::doctor::DoctorArgs {
+            offline,
+            fix: cli.global.fix,
+            json: cli.global.json,
+            quiet: cli.global.quiet,
+            no_color: cli.global.no_color,
+        })
+        .map(|()| 0);
     }
 
-    let path = command_path(&cli.command);
-    let cfg = Config::resolve(cli.global.config.as_deref(), &path)?;
+    let cfg = Config::resolve(cli.global.config.as_deref(), &cli.global.path)?;
     let offline = config::offline_resolved(cli.global.offline, &cfg);
     let quiet = cli.global.quiet;
     let verbose = cli.global.verbose;
+    let json = cli.global.json;
+    let no_color = cli.global.no_color;
+    let fail_on = cli.global.fail_on;
+    let path = cli.global.path.clone();
 
     match cli.command {
-        Command::Env {
-            path,
-            json,
-            no_color,
-            fail_on,
-            env_file,
-            write,
-        } => commands::env::run(&commands::env::EnvArgs {
+        Command::Env { env_file, write } => commands::env::run(&commands::env::EnvArgs {
             path,
             json,
             no_color,
@@ -168,10 +197,6 @@ fn run(cli: Cli) -> anyhow::Result<u8> {
             verbose,
         }),
         Command::Real {
-            path,
-            json,
-            no_color,
-            fail_on,
             deps_only,
             apis_only,
             models_only,
@@ -190,19 +215,6 @@ fn run(cli: Cli) -> anyhow::Result<u8> {
         Command::Doctor => {
             unreachable!("Command::Doctor is handled before config resolution above")
         }
-        Command::Spike { path } => commands::spike::run(&path).map(|()| 0),
-    }
-}
-
-/// The directory config resolution and (where applicable) the command
-/// itself operate against. `doctor` is self-diagnostic and has no `--path`
-/// of its own (docs/PLAN.md §2.3 doesn't list one) — it resolves config
-/// against `.`, matching its pre-existing behavior.
-fn command_path(command: &Command) -> PathBuf {
-    match command {
-        Command::Env { path, .. } | Command::Real { path, .. } | Command::Spike { path } => {
-            path.clone()
-        }
-        Command::Doctor => PathBuf::from("."),
+        Command::Spike { dir } => commands::spike::run(&dir).map(|()| 0),
     }
 }

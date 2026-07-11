@@ -118,3 +118,114 @@ fn unknown_global_flag_is_a_parse_error() {
         .assert()
         .failure();
 }
+
+/// B4: `--json`/`--no-color`/`--path`/`--fail-on` are now true globals, not
+/// per-command duplicates on `env`/`real` — `doctor` must accept them too.
+#[test]
+fn doctor_accepts_the_flags_that_used_to_be_env_real_only() {
+    let dir = tmp_dir("doctor-lifted-flags");
+    let assert = getdev()
+        .current_dir(&dir)
+        .env("GETDEV_CACHE_DIR", dir.join("cache"))
+        .arg("doctor")
+        .arg("--offline")
+        .arg("--json")
+        .arg("--no-color")
+        .arg("--path")
+        .arg(&dir)
+        .assert();
+    let code = assert.get_output().status.code().unwrap();
+    assert_eq!(code, 0, "a healthy offline doctor run must exit 0");
+}
+
+/// B4: doctor's `--json` output is a small stable pass/fail shape, not the
+/// findings schema (doctor has no findings).
+#[test]
+fn doctor_json_is_valid_json_with_the_stable_check_table_shape() {
+    let dir = tmp_dir("doctor-json-shape");
+    let assert = getdev()
+        .current_dir(&dir)
+        .env("GETDEV_CACHE_DIR", dir.join("cache"))
+        .arg("doctor")
+        .arg("--offline")
+        .arg("--json")
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    let value: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|err| panic!("doctor --json did not print valid JSON: {err}\n{stdout}"));
+    assert!(value["ok"].as_bool().unwrap());
+    assert!(value["checks"].as_array().unwrap().iter().any(|c| c["name"]
+        .as_str()
+        .unwrap()
+        .starts_with("version check skipped")));
+    for check in value["checks"].as_array().unwrap() {
+        assert!(check["name"].is_string());
+        assert!(check["ok"].is_boolean());
+    }
+}
+
+/// B4: `--quiet`/`-q` and `--verbose`/`-v` are mutually exclusive.
+#[test]
+fn quiet_and_verbose_together_is_rejected_with_exact_clap_usage_exit_code() {
+    let dir = tmp_dir("quiet-verbose-conflict");
+    let assert = getdev()
+        .current_dir(&dir)
+        .arg("doctor")
+        .arg("--offline")
+        .arg("--quiet")
+        .arg("--verbose")
+        .assert()
+        .failure();
+    let code = assert.get_output().status.code().unwrap();
+    assert_eq!(
+        code, 2,
+        "clap usage errors (arg conflicts) exit 2, matching the docs/PLAN.md §2.2 \
+         'execution error' code — got {code}"
+    );
+}
+
+/// B4: `--fail-on` accepts `critical|high|medium|low` only; `info` is
+/// rejected at parse time (info-level findings never fail a run).
+#[test]
+fn fail_on_info_is_rejected_at_parse_time_with_exact_clap_usage_exit_code() {
+    let dir = tmp_dir("fail-on-info-rejected");
+    let assert = getdev()
+        .current_dir(&dir)
+        .arg("env")
+        .arg("--fail-on")
+        .arg("info")
+        .assert()
+        .failure();
+    let code = assert.get_output().status.code().unwrap();
+    assert_eq!(
+        code, 2,
+        "a rejected --fail-on value is a clap usage error, exit 2 — got {code}"
+    );
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("info"),
+        "expected the rejection message to name the rejected value, got:\n{stderr}"
+    );
+}
+
+/// B4: `--fail-on` still accepts every value the spec allows.
+#[test]
+fn fail_on_accepts_every_contractual_severity() {
+    for severity in ["critical", "high", "medium", "low"] {
+        let dir = tmp_dir(&format!("fail-on-{severity}"));
+        let assert = getdev()
+            .current_dir(&dir)
+            .env("GETDEV_CACHE_DIR", dir.join("cache"))
+            .arg("env")
+            .arg("--fail-on")
+            .arg(severity)
+            .assert();
+        let code = assert.get_output().status.code().unwrap();
+        assert!(
+            (0..=1).contains(&code),
+            "a valid --fail-on={severity} on a clean scratch dir should parse and run \
+             (exit 0 or 1), got {code}"
+        );
+    }
+}

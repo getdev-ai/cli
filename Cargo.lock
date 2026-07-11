@@ -470,6 +470,7 @@ dependencies = [
  "getdev-grammars",
  "getdev-registry",
  "insta",
+ "owo-colors",
  "rayon",
  "reqwest",
  "serde",
