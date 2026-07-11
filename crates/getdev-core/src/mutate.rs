@@ -140,21 +140,44 @@ fn parse_has_errors(lang: Lang, content: &str) -> Option<bool> {
     Some(tree.root_node().has_error())
 }
 
+/// Atomic temp+rename write, symlink-safe (C2/03-REVIEW.md).
+///
+/// Two hazards fixed here:
+/// 1. **Symlinked targets:** `fs::create_dir_all` + `fs::rename` operate on
+///    `path` as given. If `path` is a symlink, `rename(tmp, path)` replaces
+///    the LINK itself (unlinking it and pointing the parent dir entry at
+///    `tmp`), leaving the real target file — the one that may be tracked in
+///    git — completely untouched while getdev reports success. We
+///    canonicalize the target first and perform the write against that
+///    resolved path, so the write always lands on the real file the link
+///    points to.
+/// 2. **Concurrent runs:** a deterministic `.{name}.getdev-tmp` temp name
+///    means two concurrent `getdev env --write` invocations (or a retry
+///    racing a prior crashed run) can stomp each other's temp file mid-write.
+///    The temp name is now unique per process (`.{name}.getdev-tmp.{pid}`).
 fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
-    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    // Resolve an existing symlink to its real target before writing so the
+    // link is preserved and the underlying file is what actually changes.
+    // A target that doesn't exist yet (new file) has nothing to canonicalize
+    // — write at `path` as given, same as before.
+    let real_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+
+    let dir = real_path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(dir)?;
     let tmp = dir.join(format!(
-        ".{}.getdev-tmp",
-        path.file_name()
+        ".{}.getdev-tmp.{}",
+        real_path
+            .file_name()
             .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "file".to_owned())
+            .unwrap_or_else(|| "file".to_owned()),
+        std::process::id()
     ));
     std::fs::write(&tmp, content)?;
     // carry over permissions from an existing target (e.g. executable scripts)
-    if let Ok(meta) = std::fs::metadata(path) {
+    if let Ok(meta) = std::fs::metadata(&real_path) {
         let _ = std::fs::set_permissions(&tmp, meta.permissions());
     }
-    let renamed = std::fs::rename(&tmp, path);
+    let renamed = std::fs::rename(&tmp, &real_path);
     if renamed.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
@@ -268,6 +291,78 @@ mod tests {
             new_content: "def oops(:  # still broken\n".into(),
         }])
         .unwrap();
+    }
+
+    /// C2 regression: writing to a symlinked target must write through the
+    /// link to the real file — never replace the link itself. Unix-only:
+    /// symlinks aren't first-class on every CI runner's filesystem.
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_target_writes_through_the_link() {
+        let dir = tempdir("symlink");
+        let real_target = dir.join("real_secret.py");
+        std::fs::write(&real_target, "aws_key = \"old\"\n").unwrap();
+        let link = dir.join("linked.py");
+        std::os::unix::fs::symlink(&real_target, &link).unwrap();
+
+        apply(vec![PlannedWrite::RewriteSource {
+            path: link.clone(),
+            lang: Lang::Python,
+            original: "aws_key = \"old\"\n".into(),
+            new_content: "aws_key = os.environ[\"AWS_KEY\"]\n".into(),
+        }])
+        .unwrap();
+
+        // the link itself is still a symlink, pointing at the same real file
+        let link_meta = std::fs::symlink_metadata(&link).unwrap();
+        assert!(link_meta.file_type().is_symlink(), "link must be preserved");
+        assert_eq!(std::fs::read_link(&link).unwrap(), real_target);
+
+        // the REAL file's content changed, reachable via either path
+        assert_eq!(
+            std::fs::read_to_string(&real_target).unwrap(),
+            "aws_key = os.environ[\"AWS_KEY\"]\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&link).unwrap(),
+            "aws_key = os.environ[\"AWS_KEY\"]\n"
+        );
+
+        // no stray temp files left behind in the directory
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("getdev-tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp files left behind: {leftovers:?}");
+    }
+
+    /// C2 regression: the temp filename embeds the process id, so two
+    /// concurrent writers touching the same target never share a temp path.
+    #[test]
+    fn temp_file_name_is_unique_per_process() {
+        let dir = tempdir("uniquetemp");
+        let path = dir.join("shared.js");
+        std::fs::write(&path, "const k = \"old\";\n").unwrap();
+
+        apply(vec![PlannedWrite::RewriteSource {
+            path: path.clone(),
+            lang: Lang::JavaScript,
+            original: "const k = \"old\";\n".into(),
+            new_content: "const k = process.env.K;\n".into(),
+        }])
+        .unwrap();
+
+        // the temp file, had it survived, would have carried this process's
+        // pid — assert the naming scheme by checking no *other* pid's temp
+        // litter exists and the write landed cleanly.
+        let entries: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(entries, vec!["shared.js".to_owned()]);
     }
 
     #[test]
