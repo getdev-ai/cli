@@ -129,6 +129,49 @@ fn apply_appends_without_clobbering_existing_env_files() {
     assert_eq!(gitignore.matches(".env").count(), 1);
 }
 
+/// C9 regression: a key can appear in `.env` between `plan()` and `apply()`
+/// — edited externally, or a second `getdev env --write` racing this one.
+/// The planned var must be skipped (not duplicated), reported in
+/// `vars_skipped_stale`, and every other planned var still applied normally.
+#[test]
+fn env_key_added_between_plan_and_apply_is_not_duplicated() {
+    let dir = project("staleenv");
+    let options = EnvOptions::default();
+
+    let plan = env::plan(&dir, &options).unwrap();
+    assert_eq!(plan.entries.len(), 3);
+    assert!(plan
+        .entries
+        .iter()
+        .any(|e| e.var_name == "STRIPE_SECRET_KEY"));
+
+    // simulate the race: STRIPE_SECRET_KEY lands in .env, with a DIFFERENT
+    // value than getdev's plan, after plan() already ran.
+    std::fs::write(
+        dir.join(".env"),
+        "STRIPE_SECRET_KEY=already-set-by-someone-else\n",
+    )
+    .unwrap();
+
+    let summary = env::apply(&dir, &plan, &options).unwrap();
+    assert_eq!(
+        summary.vars_skipped_stale,
+        vec!["STRIPE_SECRET_KEY".to_owned()]
+    );
+    assert_eq!(summary.vars_written.len(), 2);
+
+    let env_file = std::fs::read_to_string(dir.join(".env")).unwrap();
+    assert_eq!(
+        env_file.matches("STRIPE_SECRET_KEY=").count(),
+        1,
+        "STRIPE_SECRET_KEY must not be duplicated:\n{env_file}"
+    );
+    assert!(env_file.contains("STRIPE_SECRET_KEY=already-set-by-someone-else"));
+    // the other two planned vars still got appended normally
+    assert!(env_file.contains("ANTHROPIC_API_KEY="));
+    assert!(env_file.contains("AWS_ACCESS_KEY_ID="));
+}
+
 #[test]
 fn stale_plan_is_rejected_and_nothing_is_written() {
     let dir = project("stale");

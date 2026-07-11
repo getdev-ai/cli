@@ -191,6 +191,12 @@ pub struct ProjectInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppliedInfo {
     pub vars_written: usize,
+    /// C9 audit fix: planned vars whose `.env` line was skipped because a
+    /// same-named key already existed there at apply time (the file may
+    /// have changed since `plan()` ran). Additive field, always present but
+    /// `0` when nothing was skipped — never a silent duplicate.
+    #[serde(default)]
+    pub vars_skipped_stale: usize,
     pub files_rewritten: usize,
     pub env_file: String,
     pub env_file_created: bool,

@@ -76,6 +76,7 @@ pub fn run(args: &EnvArgs) -> anyhow::Result<u8> {
     if let Some(summary) = applied_ok {
         report.applied = Some(AppliedInfo {
             vars_written: summary.vars_written.len(),
+            vars_skipped_stale: summary.vars_skipped_stale.len(),
             files_rewritten: summary.files_rewritten.len(),
             env_file: options.env_file.clone(),
             env_file_created: summary.env_file_created,
@@ -113,6 +114,14 @@ pub fn run(args: &EnvArgs) -> anyhow::Result<u8> {
                         "keys documented in {} — commit that file, never {}",
                         summary.example_file, options.env_file
                     );
+                    if !summary.vars_skipped_stale.is_empty() {
+                        println!(
+                            "{} var(s) already present in {} — not duplicated: {}",
+                            summary.vars_skipped_stale.len(),
+                            options.env_file,
+                            summary.vars_skipped_stale.join(", ")
+                        );
+                    }
                 }
                 // F4: apply failed — say nothing extra here, the findings
                 // above already printed; the error itself surfaces after

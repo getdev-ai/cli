@@ -254,6 +254,13 @@ pub fn max_severity(plan: &EnvPlan) -> Option<Severity> {
 #[derive(Debug)]
 pub struct AppliedSummary {
     pub vars_written: Vec<String>,
+    /// C9/03-REVIEW.md: planned var names that were NOT appended to the env
+    /// file because a same-named key already existed there at apply time
+    /// (the `.env` may have changed since `plan()` ran — edited externally,
+    /// or a second `getdev env --write` raced this one). Source files were
+    /// still rewritten to reference these var names; only the duplicate
+    /// `.env` line was skipped.
+    pub vars_skipped_stale: Vec<String>,
     pub files_rewritten: Vec<String>,
     pub env_file_created: bool,
     pub example_file: String,
@@ -315,18 +322,37 @@ pub fn apply(
         });
     }
 
-    // .env — append values, never rewrite existing lines
+    // .env — append values, never rewrite existing lines. `env_original` is
+    // re-read from disk right here, at apply time — not whatever `.env`
+    // looked like when `plan()` computed dedupe suffixes. C9/03-REVIEW.md:
+    // if a planned key has since appeared in the file (edited externally
+    // between plan and apply, or a second `getdev env --write` raced this
+    // one), appending it again would duplicate the key — dotenv parsers
+    // silently last-wins-shadow duplicate keys, hiding whichever line came
+    // first. Skip those instead of duplicating, and report the skip.
     let env_path = root.join(&options.env_file);
     let env_original = read_optional(&env_path);
+    let existing_env_keys = keys_of(env_original.as_deref().unwrap_or(""));
     let mut env_content = env_original.clone().unwrap_or_default();
     ensure_trailing_newline(&mut env_content);
-    env_content.push_str("# added by getdev env\n");
+    let mut vars_written = Vec::new();
+    let mut vars_skipped_stale = Vec::new();
+    let mut new_lines = String::new();
     for entry in &plan.entries {
-        env_content.push_str(&format!(
+        if existing_env_keys.contains(&entry.var_name) {
+            vars_skipped_stale.push(entry.var_name.clone());
+            continue;
+        }
+        new_lines.push_str(&format!(
             "{}={}\n",
             entry.var_name,
             dotenv_quote(&entry.value)
         ));
+        vars_written.push(entry.var_name.clone());
+    }
+    if !new_lines.is_empty() {
+        env_content.push_str("# added by getdev env\n");
+        env_content.push_str(&new_lines);
     }
     writes.push(PlannedWrite::WriteFile {
         path: env_path,
@@ -374,7 +400,8 @@ pub fn apply(
     mutate::apply(writes)?;
 
     Ok(AppliedSummary {
-        vars_written: plan.entries.iter().map(|e| e.var_name.clone()).collect(),
+        vars_written,
+        vars_skipped_stale,
         files_rewritten,
         env_file_created: env_original.is_none(),
         example_file,
