@@ -205,12 +205,20 @@ fn run_deps_group(
     // that: undeclared but still worth a nonexistent-package/typosquat
     // registry check ("did you mean the package you forgot to
     // declare?"), not just a `real/phantom-import` finding.
-    let mut names: Vec<(CoreEco, String)> = Vec::new();
+    //
+    // F5: `bool` tracks whether the name is direct/manifest-declared (or
+    // came from an import — a bare import IS the direct signal of use) as
+    // opposed to a lockfile-only transitive. EXISTENCE checks below always
+    // run for every name in this list; typosquat SCORING is scoped to
+    // direct names only by forcing `Sensitivity::Off` for transitives.
+    let mut names: Vec<(CoreEco, String, bool)> = Vec::new();
     let mut seen: std::collections::HashSet<(CoreEco, String)> = std::collections::HashSet::new();
     for (eco, set) in &graph.declared {
+        let direct_set = graph.direct.get(eco);
         for name in set {
             if seen.insert((*eco, name.clone())) {
-                names.push((*eco, name.clone()));
+                let is_direct = direct_set.is_some_and(|d| d.contains(name));
+                names.push((*eco, name.clone(), is_direct));
             }
         }
     }
@@ -223,7 +231,9 @@ fn run_deps_group(
             CoreEco::Pypi => deps::normalize_pep503(&import_ref.module),
         };
         if seen.insert((import_ref.ecosystem, key.clone())) {
-            names.push((import_ref.ecosystem, key));
+            // An import site is itself the direct signal of use — always
+            // scored regardless of manifest/lockfile membership.
+            names.push((import_ref.ecosystem, key, true));
         }
     }
 
@@ -232,14 +242,23 @@ fn run_deps_group(
     // (03-RESEARCH.md Pitfall 4).
     let verdicts: Vec<(CoreEco, String, RegistryVerdict)> = names
         .par_iter()
-        .map(|(eco, name)| {
+        .map(|(eco, name, is_direct)| {
+            // F5: a lockfile-only transitive never gets typosquat-scored,
+            // regardless of the configured `[real].typosquat_sensitivity`
+            // — only its existence is checked. Reuses the existing `Off`
+            // semantics rather than adding a second code path.
+            let name_sensitivity = if *is_direct {
+                sensitivity
+            } else {
+                Sensitivity::Off
+            };
             let verdict = client
                 .verify_full_with_sensitivity(
                     &cache,
                     &datasets,
                     to_registry_eco(*eco),
                     name,
-                    sensitivity,
+                    name_sensitivity,
                 )
                 .unwrap_or(RegistryVerdict {
                     existence: Existence::Inconclusive,

@@ -21,6 +21,13 @@ use crate::scan::{project_walker, Lang, ScanError};
 pub use manifest_js::declared_npm;
 pub use manifest_py::{declared_pypi, normalize_pep503};
 
+/// `(all declared names, direct/manifest-only subset, skip list)` — shared
+/// return shape for `manifest_js::declared_npm`/`manifest_py::declared_pypi`
+/// (F5). A named alias rather than an inline 3-tuple-in-a-Result to keep
+/// clippy's `type_complexity` lint happy.
+pub(crate) type DeclaredNamesResult =
+    Result<(BTreeSet<String>, BTreeSet<String>, Vec<ScanError>), DepsError>;
+
 /// Bound on recursive manifest/lockfile discovery (A4): deep enough to find
 /// a realistic monorepo/service layout (`backend/requirements.txt`,
 /// `apps/web/package.json`, ...) without walking into pathological depth on
@@ -164,6 +171,14 @@ pub struct StackHint {
 #[derive(Debug, Default)]
 pub struct DependencyGraph {
     pub declared: BTreeMap<Ecosystem, BTreeSet<String>>,
+    /// F5: the subset of `declared` that came directly from a manifest
+    /// (`package.json` / `requirements.txt` / `pyproject.toml`) rather than
+    /// only from a lockfile. Lockfile-only entries are transitive
+    /// dependencies the project never asked for by name — existence checks
+    /// still cover them (via `declared`), but typosquat scoring is scoped
+    /// to `direct` (plus imported names) to avoid scoring thousands of
+    /// transitives on every run (F5, interacts with E1's DoS guard).
+    pub direct: BTreeMap<Ecosystem, BTreeSet<String>>,
     pub imports: Vec<ImportRef>,
     pub unsupported_stack: Option<StackHint>,
 }
@@ -211,8 +226,8 @@ const OTHER_LANG_EXTENSIONS: &[(&str, &str)] = &[
 /// while reading a manifest that the walker already found on disk (e.g.
 /// permission denied) is still fatal (`DepsError::Read`).
 pub fn build_graph(root: &Path) -> Result<(DependencyGraph, Vec<ScanError>), DepsError> {
-    let (declared_npm_set, npm_skipped) = manifest_js::declared_npm(root)?;
-    let (declared_pypi_set, pypi_skipped) = manifest_py::declared_pypi(root)?;
+    let (declared_npm_set, direct_npm_set, npm_skipped) = manifest_js::declared_npm(root)?;
+    let (declared_pypi_set, direct_pypi_set, pypi_skipped) = manifest_py::declared_pypi(root)?;
 
     let node_builtins = imports_js::node_builtins()?;
     let python_stdlib = imports_py::python_stdlib()?;
@@ -297,9 +312,14 @@ pub fn build_graph(root: &Path) -> Result<(DependencyGraph, Vec<ScanError>), Dep
     declared.insert(Ecosystem::Npm, declared_npm_set);
     declared.insert(Ecosystem::Pypi, declared_pypi_set);
 
+    let mut direct = BTreeMap::new();
+    direct.insert(Ecosystem::Npm, direct_npm_set);
+    direct.insert(Ecosystem::Pypi, direct_pypi_set);
+
     Ok((
         DependencyGraph {
             declared,
+            direct,
             imports,
             unsupported_stack,
         },

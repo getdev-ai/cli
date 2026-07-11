@@ -2,11 +2,10 @@
 //! normalized (Pitfall 3 — `Django`/`django`/`DJANGO` must collapse to one
 //! entry, or downstream registry lookups triple their work for nothing).
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use super::{discover_manifests, record_or_fail, DepsError};
-use crate::scan::ScanError;
+use super::{discover_manifests, record_or_fail, DeclaredNamesResult, DepsError};
 
 /// Depth cap on `-r`/`--requirement` include resolution (F8): deep enough
 /// for a realistic split (`requirements.txt` -> `base.txt` -> `common.txt`)
@@ -17,11 +16,15 @@ const MAX_REQUIREMENTS_INCLUDE_DEPTH: usize = 3;
 
 /// Parse every Python manifest/lockfile dialect present anywhere under
 /// `root` (bounded-depth recursive discovery — A4) and return the union of
-/// declared PyPI package names, PEP 503 normalized. A manifest that fails to
-/// *parse* is folded into the returned skip list rather than aborting the
-/// whole graph build (A10) — see [`super::record_or_fail`].
-pub fn declared_pypi(root: &Path) -> Result<(BTreeSet<String>, Vec<ScanError>), DepsError> {
+/// declared PyPI package names (PEP 503 normalized), plus the subset of
+/// those names declared directly in `requirements.txt`/`pyproject.toml`
+/// (F5: `direct` — `poetry.lock`/`uv.lock`-only names are transitive
+/// dependencies the project never asked for by name). A manifest that fails
+/// to *parse* is folded into the returned skip list rather than aborting
+/// the whole graph build (A10) — see [`super::record_or_fail`].
+pub fn declared_pypi(root: &Path) -> DeclaredNamesResult {
     let mut raw = Vec::new();
+    let mut direct_raw = Vec::new();
     let mut skipped = Vec::new();
 
     for path in discover_manifests(root, "requirements.txt") {
@@ -29,12 +32,14 @@ pub fn declared_pypi(root: &Path) -> Result<(BTreeSet<String>, Vec<ScanError>), 
             Ok(text) => {
                 let mut visited = HashSet::new();
                 visited.insert(canonical_or_self(&path));
-                raw.extend(requirements_txt_deps(
+                let found = requirements_txt_deps(
                     &text,
                     &path,
                     &mut visited,
                     MAX_REQUIREMENTS_INCLUDE_DEPTH,
-                ));
+                );
+                direct_raw.extend(found.iter().cloned());
+                raw.extend(found);
             }
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
             Err(source) => return Err(DepsError::Read { path, source }),
@@ -44,7 +49,10 @@ pub fn declared_pypi(root: &Path) -> Result<(BTreeSet<String>, Vec<ScanError>), 
     for path in discover_manifests(root, "pyproject.toml") {
         match read_optional(&path) {
             Ok(Some(text)) => match pyproject_deps(&text, &path) {
-                Ok(found) => raw.extend(found),
+                Ok(found) => {
+                    direct_raw.extend(found.iter().cloned());
+                    raw.extend(found);
+                }
                 Err(err) => record_or_fail(err, &path, &mut skipped)?,
             },
             Ok(None) => {}
@@ -76,6 +84,10 @@ pub fn declared_pypi(root: &Path) -> Result<(BTreeSet<String>, Vec<ScanError>), 
 
     Ok((
         raw.iter().map(|name| normalize_pep503(name)).collect(),
+        direct_raw
+            .iter()
+            .map(|name| normalize_pep503(name))
+            .collect(),
         skipped,
     ))
 }
@@ -339,6 +351,8 @@ fn toml_lock_package_names(text: &str, path: &Path) -> Result<Vec<String>, DepsE
 mod tests {
     #![allow(clippy::unwrap_used)]
 
+    use std::collections::BTreeSet;
+
     use super::*;
 
     fn tempdir(name: &str) -> std::path::PathBuf {
@@ -376,7 +390,7 @@ mod tests {
         )
         .unwrap();
 
-        let (names, skipped) = declared_pypi(&dir).unwrap();
+        let (names, _direct, skipped) = declared_pypi(&dir).unwrap();
         assert!(skipped.is_empty());
         assert_eq!(
             names,
@@ -399,7 +413,7 @@ mod tests {
         )
         .unwrap();
 
-        let (names, skipped) = declared_pypi(&dir).unwrap();
+        let (names, _direct, skipped) = declared_pypi(&dir).unwrap();
         assert!(skipped.is_empty());
         assert_eq!(
             names,
@@ -422,7 +436,7 @@ mod tests {
         )
         .unwrap();
 
-        let (names, skipped) = declared_pypi(&dir).unwrap();
+        let (names, _direct, skipped) = declared_pypi(&dir).unwrap();
         assert!(skipped.is_empty());
         assert_eq!(names, BTreeSet::from(["django".to_owned()]));
     }
@@ -439,7 +453,7 @@ mod tests {
         )
         .unwrap();
 
-        let (names, skipped) = declared_pypi(&dir).unwrap();
+        let (names, _direct, skipped) = declared_pypi(&dir).unwrap();
         assert!(skipped.is_empty());
         assert_eq!(names, BTreeSet::from(["flask".to_owned()]));
     }
@@ -459,7 +473,7 @@ mod tests {
         )
         .unwrap();
 
-        let (names, skipped) = declared_pypi(&dir).unwrap();
+        let (names, _direct, skipped) = declared_pypi(&dir).unwrap();
         assert!(skipped.is_empty());
         assert_eq!(
             names,
@@ -468,9 +482,43 @@ mod tests {
     }
 
     #[test]
+    fn direct_set_is_manifest_only_lock_only_transitives_are_excluded() {
+        // F5: `direct` must contain only what requirements.txt/pyproject.toml
+        // itself declares ("requests") — poetry.lock-only transitives
+        // ("certifi", "charset-normalizer") show up in `names` (still
+        // checked for existence) but NOT in `direct` (exempt from
+        // typosquat scoring).
+        let dir = tempdir("direct-vs-transitive");
+        std::fs::write(dir.join("requirements.txt"), "requests==2.31.0\n").unwrap();
+        std::fs::write(
+            dir.join("poetry.lock"),
+            "[[package]]\n\
+             name = \"certifi\"\n\
+             version = \"2024.2.2\"\n\
+             \n\
+             [[package]]\n\
+             name = \"charset-normalizer\"\n\
+             version = \"3.3.2\"\n",
+        )
+        .unwrap();
+
+        let (names, direct, skipped) = declared_pypi(&dir).unwrap();
+        assert!(skipped.is_empty());
+        assert_eq!(
+            names,
+            BTreeSet::from([
+                "requests".to_owned(),
+                "certifi".to_owned(),
+                "charset-normalizer".to_owned(),
+            ])
+        );
+        assert_eq!(direct, BTreeSet::from(["requests".to_owned()]));
+    }
+
+    #[test]
     fn absent_project_yields_empty_set_not_an_error() {
         let dir = tempdir("empty");
-        let (names, skipped) = declared_pypi(&dir).unwrap();
+        let (names, _direct, skipped) = declared_pypi(&dir).unwrap();
         assert!(skipped.is_empty());
         assert!(names.is_empty());
     }

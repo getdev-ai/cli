@@ -375,6 +375,58 @@ fn phantom_import_of_a_near_name_typo_gets_nonexistent_package_and_suggestion() 
     );
 }
 
+/// F5: typosquat SCORING is scoped to direct/manifest-declared names (plus
+/// imports) — a lockfile-only transitive near-name must not be scored, even
+/// though existence checks still cover it. `reqeusts` (requirements.txt,
+/// direct, distance-1 near-name of "requests") must fire
+/// `real/typosquat-suspect`; `reqeustz` (poetry.lock-only, distance-2
+/// near-name of "requests") must not.
+#[test]
+fn typosquat_scoring_is_scoped_to_direct_names_lockfile_only_transitives_are_exempt() {
+    let dir = tmp_dir("f5-direct-vs-transitive");
+    std::fs::write(dir.join("requirements.txt"), "reqeusts==1.0.0\n").unwrap();
+    std::fs::write(
+        dir.join("poetry.lock"),
+        "[[package]]\n\
+         name = \"reqeustz\"\n\
+         version = \"1.0.0\"\n",
+    )
+    .unwrap();
+
+    let assert = getdev()
+        .current_dir(&dir)
+        .env("GETDEV_OFFLINE", "1")
+        .env("GETDEV_CACHE_DIR", dir.join("cache"))
+        .arg("real")
+        .arg("--deps-only")
+        .arg("--offline")
+        .arg("--json")
+        .assert();
+
+    let output = assert.get_output();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let report: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|err| panic!("stdout was not valid JSON ({err}): {stdout}"));
+    let findings = report["findings"].as_array().unwrap();
+
+    assert!(
+        findings.iter().any(|f| f["id"] == "real/typosquat-suspect"
+            && f["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("reqeusts")),
+        "expected a typosquat-suspect finding for the direct near-name 'reqeusts', got: {stdout}"
+    );
+    assert!(
+        findings.iter().all(|f| !(f["id"] == "real/typosquat-suspect"
+            && f["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("reqeustz"))),
+        "F5: a lockfile-only transitive near-name ('reqeustz') must not be typosquat-scored, got: {stdout}"
+    );
+}
+
 #[test]
 fn more_than_one_only_flag_is_rejected() {
     let dir = tmp_dir("conflicting-flags");

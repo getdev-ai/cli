@@ -10,21 +10,28 @@ use std::path::Path;
 
 use serde_json::{Map, Value};
 
-use super::{discover_manifests, record_or_fail, DepsError};
-use crate::scan::ScanError;
+use super::{discover_manifests, record_or_fail, DeclaredNamesResult, DepsError};
 
 /// Parse every JS/TS manifest/lockfile dialect present anywhere under `root`
 /// (bounded-depth recursive discovery — A4) and return the union of
-/// declared npm package names. A manifest that fails to *parse* is folded
-/// into the returned skip list rather than aborting the whole graph build
-/// (A10) — see [`super::record_or_fail`].
-pub fn declared_npm(root: &Path) -> Result<(BTreeSet<String>, Vec<ScanError>), DepsError> {
+/// declared npm package names, plus the subset of those names declared
+/// directly in `package.json` (F5: `direct` — everything else came from a
+/// lockfile and is a transitive dependency the project never asked for by
+/// name). A manifest that fails to *parse* is folded into the returned skip
+/// list rather than aborting the whole graph build (A10) — see
+/// [`super::record_or_fail`].
+pub fn declared_npm(root: &Path) -> DeclaredNamesResult {
     let mut names = BTreeSet::new();
+    let mut direct = BTreeSet::new();
     let mut skipped = Vec::new();
 
     for path in discover_manifests(root, "package.json") {
         match read_json(&path) {
-            Ok(Some(pkg)) => names.extend(package_json_deps(&pkg)),
+            Ok(Some(pkg)) => {
+                let found = package_json_deps(&pkg);
+                direct.extend(found.iter().cloned());
+                names.extend(found);
+            }
             Ok(None) => {}
             Err(err) => record_or_fail(err, &path, &mut skipped)?,
         }
@@ -60,7 +67,7 @@ pub fn declared_npm(root: &Path) -> Result<(BTreeSet<String>, Vec<ScanError>), D
         }
     }
 
-    Ok((names, skipped))
+    Ok((names, direct, skipped))
 }
 
 fn read_optional(path: &Path) -> Result<Option<String>, DepsError> {
@@ -251,7 +258,7 @@ mod tests {
         )
         .unwrap();
 
-        let (names, skipped) = declared_npm(&dir).unwrap();
+        let (names, _direct, skipped) = declared_npm(&dir).unwrap();
         assert!(skipped.is_empty());
         assert_eq!(
             names,
@@ -279,7 +286,7 @@ mod tests {
         )
         .unwrap();
 
-        let (names, skipped) = declared_npm(&dir).unwrap();
+        let (names, _direct, skipped) = declared_npm(&dir).unwrap();
         assert!(skipped.is_empty());
         assert!(!names.is_empty(), "Pitfall 8: must not silently empty out");
         assert_eq!(names, BTreeSet::from(["left-pad".to_owned()]));
@@ -308,7 +315,7 @@ mod tests {
         )
         .unwrap();
 
-        let (names, skipped) = declared_npm(&dir).unwrap();
+        let (names, _direct, skipped) = declared_npm(&dir).unwrap();
         assert!(skipped.is_empty());
         assert!(!names.is_empty());
         assert_eq!(
@@ -343,7 +350,7 @@ mod tests {
         )
         .unwrap();
 
-        let (names, skipped) = declared_npm(&dir).unwrap();
+        let (names, _direct, skipped) = declared_npm(&dir).unwrap();
         assert!(skipped.is_empty());
         assert!(!names.is_empty());
         assert_eq!(
@@ -354,6 +361,45 @@ mod tests {
                 "semver".to_owned(),
             ])
         );
+    }
+
+    #[test]
+    fn direct_set_is_manifest_only_lockfile_transitives_are_excluded() {
+        // F5: `direct` must contain only what package.json itself declares
+        // ("lodash") — the lockfile-only transitives ("@babel/core",
+        // "semver") show up in `names` (still checked for existence) but
+        // NOT in `direct` (exempt from typosquat scoring).
+        let dir = tempdir("direct-vs-transitive");
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"dependencies": {"lodash": "^4.17.21"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("package-lock.json"),
+            r#"{
+                "lockfileVersion": 3,
+                "packages": {
+                    "": {"name": "fixture", "dependencies": {"lodash": "^4.17.21"}},
+                    "node_modules/lodash": {"version": "4.17.21"},
+                    "node_modules/@babel/core": {"version": "7.24.0"},
+                    "node_modules/@babel/core/node_modules/semver": {"version": "6.3.1"}
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let (names, direct, skipped) = declared_npm(&dir).unwrap();
+        assert!(skipped.is_empty());
+        assert_eq!(
+            names,
+            BTreeSet::from([
+                "lodash".to_owned(),
+                "@babel/core".to_owned(),
+                "semver".to_owned(),
+            ])
+        );
+        assert_eq!(direct, BTreeSet::from(["lodash".to_owned()]));
     }
 
     #[test]
@@ -381,7 +427,7 @@ mod tests {
         )
         .unwrap();
 
-        let (names, skipped) = declared_npm(&dir).unwrap();
+        let (names, _direct, skipped) = declared_npm(&dir).unwrap();
         assert!(skipped.is_empty());
         assert_eq!(
             names,
@@ -417,7 +463,7 @@ mod tests {
         )
         .unwrap();
 
-        let (names, skipped) = declared_npm(&dir).unwrap();
+        let (names, _direct, skipped) = declared_npm(&dir).unwrap();
         assert!(skipped.is_empty());
         assert_eq!(
             names,
@@ -428,7 +474,7 @@ mod tests {
     #[test]
     fn absent_project_yields_empty_set_not_an_error() {
         let dir = tempdir("empty");
-        let (names, skipped) = declared_npm(&dir).unwrap();
+        let (names, _direct, skipped) = declared_npm(&dir).unwrap();
         assert!(skipped.is_empty());
         assert!(names.is_empty());
     }
