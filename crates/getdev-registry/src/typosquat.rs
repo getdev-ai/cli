@@ -8,23 +8,24 @@
 //! - `rules/real/npm-top-10k.json`: `wooorm/npm-high-impact`
 //!   (<https://github.com/wooorm/npm-high-impact>), MIT license. Confirmed
 //!   directly against the repo's `license` file at implementation time.
-//! - `rules/real/pypi-top-15k.json`: `Robert-96/top-pypi-packages`
+//! - `rules/real/pypi-top-5k.json`: `Robert-96/top-pypi-packages`
 //!   (<https://github.com/Robert-96/top-pypi-packages>), MIT license,
 //!   confirmed via the GitHub Licenses API. This wraps (and re-publishes
 //!   under its own MIT grant) `hugovk/top-pypi-packages`' monthly PyPI
 //!   download ranking; `hugovk/top-pypi-packages` itself carries no
 //!   explicit LICENSE file, so the un-licensed upstream repo was not vendored
 //!   directly (03-RESEARCH.md Assumption A3) — Robert-96's MIT-licensed,
-//!   API-enriched republish (~5k packages) was used instead. See the plan
-//!   SUMMARY for the full licensing note, including the resulting package
-//!   count being smaller than the `-15k` filename suggests.
+//!   API-enriched republish was used instead. It contains 4,999 entries
+//!   (audit E5) — the file is named `-5k`, not `-15k`, to match that count
+//!   honestly rather than overstate typosquat recall. See the plan SUMMARY
+//!   for the full licensing note.
 
 use serde::Deserialize;
 
 use crate::client::Ecosystem;
 
 const NPM_DATASET_JSON: &str = include_str!("../../../rules/real/npm-top-10k.json");
-const PYPI_DATASET_JSON: &str = include_str!("../../../rules/real/pypi-top-15k.json");
+const PYPI_DATASET_JSON: &str = include_str!("../../../rules/real/pypi-top-5k.json");
 
 /// Near-name reason fires when the Damerau-Levenshtein distance to the
 /// nearest top-N package is in `1..=NEAR_NAME_MAX_DISTANCE`.

@@ -42,7 +42,7 @@ contractual `real/*` rule IDs):
 | Rule ID | Mechanism | Ecosystem coverage |
 |---|---|---|
 | `real/nonexistent-package` | declared dependency cache-seeded `false` (`Existence::Missing`) | npm + pypi |
-| `real/typosquat-suspect` | declared dependency name is a 1–2 edit-distance near-name of an embedded top-N package (`rules/real/npm-top-10k.json` / `pypi-top-15k.json`), cache-seeded `true` so it does not *also* fire `nonexistent-package` — the near-name reason fires from the name alone, no metadata cache row needed | npm + pypi |
+| `real/typosquat-suspect` | declared dependency name is a 1–2 edit-distance near-name of an embedded top-N package (`rules/real/npm-top-10k.json` / `pypi-top-5k.json`), cache-seeded `true` so it does not *also* fire `nonexistent-package` — the near-name reason fires from the name alone, no metadata cache row needed | npm + pypi |
 | `real/phantom-import` | an import/require that resolves to no declared dependency, builtin, or local module — computed purely from `deps::build_graph`, no registry/cache involvement at all | npm + pypi |
 | `real/nonexistent-api` | a declared, cache-seeded-`true` package ships a tiny bundled `node_modules/<pkg>` (`package.json` + `index.d.ts`) or `site-packages/<pkg>` (`__init__.py`) surface stub; the seeded app imports/uses a member the stub does not export | npm + pypi |
 | `real/unknown-model-string` | a string literal at a model call-site identifier (`model`/`model_name`/`modelId`/`model_id`/`deployment`, `rules/models.json`) that matches no known vendor-family prefix | JS + Python |
