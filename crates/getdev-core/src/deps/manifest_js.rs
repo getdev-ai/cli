@@ -10,30 +10,57 @@ use std::path::Path;
 
 use serde_json::{Map, Value};
 
-use super::DepsError;
+use super::{discover_manifests, record_or_fail, DepsError};
+use crate::scan::ScanError;
 
-/// Parse every JS/TS manifest/lockfile dialect present under `root` and
-/// return the union of declared npm package names.
-pub fn declared_npm(root: &Path) -> Result<BTreeSet<String>, DepsError> {
+/// Parse every JS/TS manifest/lockfile dialect present anywhere under `root`
+/// (bounded-depth recursive discovery — A4) and return the union of
+/// declared npm package names. A manifest that fails to *parse* is folded
+/// into the returned skip list rather than aborting the whole graph build
+/// (A10) — see [`super::record_or_fail`].
+pub fn declared_npm(root: &Path) -> Result<(BTreeSet<String>, Vec<ScanError>), DepsError> {
     let mut names = BTreeSet::new();
+    let mut skipped = Vec::new();
 
-    if let Some(pkg) = read_json(&root.join("package.json"))? {
-        names.extend(package_json_deps(&pkg));
+    for path in discover_manifests(root, "package.json") {
+        match read_json(&path) {
+            Ok(Some(pkg)) => names.extend(package_json_deps(&pkg)),
+            Ok(None) => {}
+            Err(err) => record_or_fail(err, &path, &mut skipped)?,
+        }
     }
 
-    if let Some(lock) = read_json(&root.join("package-lock.json"))? {
-        names.extend(package_lock_deps(&lock));
+    for path in discover_manifests(root, "package-lock.json") {
+        match read_json(&path) {
+            Ok(Some(lock)) => names.extend(package_lock_deps(&lock)),
+            Ok(None) => {}
+            Err(err) => record_or_fail(err, &path, &mut skipped)?,
+        }
     }
 
-    if let Some(text) = read_optional(&root.join("pnpm-lock.yaml"))? {
-        names.extend(pnpm_lock_deps(&text, &root.join("pnpm-lock.yaml"))?);
+    for path in discover_manifests(root, "pnpm-lock.yaml") {
+        match read_optional(&path) {
+            Ok(Some(text)) => match pnpm_lock_deps(&text, &path) {
+                Ok(found) => names.extend(found),
+                Err(err) => record_or_fail(err, &path, &mut skipped)?,
+            },
+            Ok(None) => {}
+            Err(err) => record_or_fail(err, &path, &mut skipped)?,
+        }
     }
 
-    if let Some(text) = read_optional(&root.join("yarn.lock"))? {
-        names.extend(yarn_lock_deps(&text, &root.join("yarn.lock"))?);
+    for path in discover_manifests(root, "yarn.lock") {
+        match read_optional(&path) {
+            Ok(Some(text)) => match yarn_lock_deps(&text, &path) {
+                Ok(found) => names.extend(found),
+                Err(err) => record_or_fail(err, &path, &mut skipped)?,
+            },
+            Ok(None) => {}
+            Err(err) => record_or_fail(err, &path, &mut skipped)?,
+        }
     }
 
-    Ok(names)
+    Ok((names, skipped))
 }
 
 fn read_optional(path: &Path) -> Result<Option<String>, DepsError> {
@@ -224,7 +251,8 @@ mod tests {
         )
         .unwrap();
 
-        let names = declared_npm(&dir).unwrap();
+        let (names, skipped) = declared_npm(&dir).unwrap();
+        assert!(skipped.is_empty());
         assert_eq!(
             names,
             BTreeSet::from([
@@ -251,7 +279,8 @@ mod tests {
         )
         .unwrap();
 
-        let names = declared_npm(&dir).unwrap();
+        let (names, skipped) = declared_npm(&dir).unwrap();
+        assert!(skipped.is_empty());
         assert!(!names.is_empty(), "Pitfall 8: must not silently empty out");
         assert_eq!(names, BTreeSet::from(["left-pad".to_owned()]));
     }
@@ -279,7 +308,8 @@ mod tests {
         )
         .unwrap();
 
-        let names = declared_npm(&dir).unwrap();
+        let (names, skipped) = declared_npm(&dir).unwrap();
+        assert!(skipped.is_empty());
         assert!(!names.is_empty());
         assert_eq!(
             names,
@@ -313,7 +343,8 @@ mod tests {
         )
         .unwrap();
 
-        let names = declared_npm(&dir).unwrap();
+        let (names, skipped) = declared_npm(&dir).unwrap();
+        assert!(skipped.is_empty());
         assert!(!names.is_empty());
         assert_eq!(
             names,
@@ -350,7 +381,8 @@ mod tests {
         )
         .unwrap();
 
-        let names = declared_npm(&dir).unwrap();
+        let (names, skipped) = declared_npm(&dir).unwrap();
+        assert!(skipped.is_empty());
         assert_eq!(
             names,
             BTreeSet::from(["fastify".to_owned(), "@fastify/error".to_owned()])
@@ -385,7 +417,8 @@ mod tests {
         )
         .unwrap();
 
-        let names = declared_npm(&dir).unwrap();
+        let (names, skipped) = declared_npm(&dir).unwrap();
+        assert!(skipped.is_empty());
         assert_eq!(
             names,
             BTreeSet::from(["is-odd".to_owned(), "is-number".to_owned()])
@@ -395,7 +428,8 @@ mod tests {
     #[test]
     fn absent_project_yields_empty_set_not_an_error() {
         let dir = tempdir("empty");
-        let names = declared_npm(&dir).unwrap();
+        let (names, skipped) = declared_npm(&dir).unwrap();
+        assert!(skipped.is_empty());
         assert!(names.is_empty());
     }
 }

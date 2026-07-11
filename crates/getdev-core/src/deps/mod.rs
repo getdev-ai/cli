@@ -16,12 +16,61 @@ mod manifest_py;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
-use ignore::WalkBuilder;
-
-use crate::scan::{Lang, ScanError};
+use crate::scan::{project_walker, Lang, ScanError};
 
 pub use manifest_js::declared_npm;
 pub use manifest_py::{declared_pypi, normalize_pep503};
+
+/// Bound on recursive manifest/lockfile discovery (A4): deep enough to find
+/// a realistic monorepo/service layout (`backend/requirements.txt`,
+/// `apps/web/package.json`, ...) without walking into pathological depth on
+/// a hostile or degenerate tree. Depth is measured from `root` (`root`
+/// itself is depth 0; `root/package.json` is depth 1).
+pub(crate) const MANIFEST_DISCOVERY_DEPTH: usize = 6;
+
+/// Recursively discover every occurrence of `filename` anywhere under
+/// `root`, bounded to [`MANIFEST_DISCOVERY_DEPTH`] and built on
+/// [`project_walker`] — so the same `node_modules`/`.venv`/`.git`/etc.
+/// exclusions and non-git `.gitignore` handling that cover import extraction
+/// (A7) also cover manifest discovery (A4). A manifest previously only
+/// looked for at `root` (e.g. `backend/requirements.txt` in a
+/// service-per-directory layout) is now found regardless of nesting.
+pub(crate) fn discover_manifests(root: &Path, filename: &str) -> Vec<PathBuf> {
+    let mut builder = project_walker(root);
+    builder.max_depth(Some(MANIFEST_DISCOVERY_DEPTH));
+    builder
+        .build()
+        .flatten()
+        .filter(|entry| entry.file_type().is_some_and(|t| t.is_file()))
+        .filter(|entry| entry.file_name().to_str() == Some(filename))
+        .map(ignore::DirEntry::into_path)
+        .collect()
+}
+
+/// A10: classify a manifest-related [`DepsError`] encountered while parsing
+/// one discovered manifest instance as either a recoverable skip (malformed
+/// JSON/YAML/TOML content — folded into `skipped` via
+/// [`ScanError::Skipped`], the caller continues to the next manifest) or a
+/// genuine I/O catastrophe (`DepsError::Read` — the walker already
+/// confirmed the file exists, so a read failure past that point means
+/// something is structurally wrong, e.g. permission denied mid-run — still
+/// fatal). Shared by `manifest_js`/`manifest_py`'s per-instance parse loops.
+pub(crate) fn record_or_fail(
+    err: DepsError,
+    path: &Path,
+    skipped: &mut Vec<ScanError>,
+) -> Result<(), DepsError> {
+    match err {
+        DepsError::Read { .. } => Err(err),
+        other => {
+            skipped.push(ScanError::Skipped {
+                path: path.to_path_buf(),
+                reason: other.to_string(),
+            });
+            Ok(())
+        }
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum DepsError {
@@ -152,23 +201,28 @@ const OTHER_LANG_EXTENSIONS: &[(&str, &str)] = &[
 ];
 
 /// Build the dependency graph for `root`: parse every JS/TS + Python
-/// manifest/lockfile dialect present, extract every import, and classify
-/// each one as declared / builtin / local / phantom.
+/// manifest/lockfile dialect present anywhere under `root` (A4), extract
+/// every import, and classify each one as declared / builtin / local /
+/// phantom.
 ///
-/// File read/parse errors during the import walk are collected in the
-/// second return value rather than aborting (same skip-not-fail contract as
-/// [`crate::scan::collect_string_assignments`]); manifest parse failures are
-/// fatal (`DepsError`) — see `DepsError::PyProjectToml`/`Json`/`Yaml`/`Toml`.
+/// File read/parse errors during the import walk, AND a manifest that fails
+/// to *parse* (malformed JSON/YAML/TOML), are collected in the second return
+/// value rather than aborting the run (A10) — only a genuine I/O catastrophe
+/// while reading a manifest that the walker already found on disk (e.g.
+/// permission denied) is still fatal (`DepsError::Read`).
 pub fn build_graph(root: &Path) -> Result<(DependencyGraph, Vec<ScanError>), DepsError> {
-    let declared_npm_set = manifest_js::declared_npm(root)?;
-    let declared_pypi_set = manifest_py::declared_pypi(root)?;
+    let (declared_npm_set, npm_skipped) = manifest_js::declared_npm(root)?;
+    let (declared_pypi_set, pypi_skipped) = manifest_py::declared_pypi(root)?;
 
     let node_builtins = imports_js::node_builtins()?;
     let python_stdlib = imports_py::python_stdlib()?;
+    let python_import_aliases = imports_py::python_import_aliases()?;
 
     let (js_raw, mut skipped) = imports_js::collect_imports(root)?;
     let (py_raw, py_skipped) = imports_py::collect_imports(root)?;
     skipped.extend(py_skipped);
+    skipped.extend(npm_skipped);
+    skipped.extend(pypi_skipped);
 
     let locals = local_module_names(root);
 
@@ -204,7 +258,22 @@ pub fn build_graph(root: &Path) -> Result<(DependencyGraph, Vec<ScanError>), Dep
         // deliberately checked against the UNNORMALIZED `raw.module` below
         // (via `classify`) since those sets are raw filesystem/stdlib names,
         // not PEP 503 identifiers.
-        let declared_key = normalize_pep503(&raw.module);
+        let mut declared_key = normalize_pep503(&raw.module);
+        // A5: the import's own normalized spelling isn't declared, but a
+        // known alias target is (`import yaml` declares as `pyyaml`) — swap
+        // in whichever alias target is actually present in the declared set
+        // so `classify` resolves it to `Declared` rather than `Phantom`.
+        if !declared_pypi_set.contains(&declared_key) {
+            if let Some(targets) = python_import_aliases.get(raw.module.as_str()) {
+                if let Some(matched) = targets
+                    .iter()
+                    .map(|target| normalize_pep503(target))
+                    .find(|target| declared_pypi_set.contains(target))
+                {
+                    declared_key = matched;
+                }
+            }
+        }
         let resolution = classify(
             &raw,
             &declared_pypi_set,
@@ -221,9 +290,7 @@ pub fn build_graph(root: &Path) -> Result<(DependencyGraph, Vec<ScanError>), Dep
         });
     }
 
-    let has_supported_manifest = SUPPORTED_MANIFESTS
-        .iter()
-        .any(|name| root.join(name).is_file());
+    let has_supported_manifest = has_any_supported_manifest(root);
     let unsupported_stack = detect_unsupported_stack(root, has_supported_manifest);
 
     let mut declared = BTreeMap::new();
@@ -268,6 +335,23 @@ fn classify(
     ImportResolution::Phantom
 }
 
+/// Single bounded-depth walk (A4) checking whether ANY [`SUPPORTED_MANIFESTS`]
+/// filename exists anywhere under `root`, short-circuiting on the first hit
+/// — replaces the old root-only `root.join(name).is_file()` check, which
+/// missed every nested-manifest layout (`backend/requirements.txt`, a
+/// monorepo `apps/*/package.json`, ...).
+fn has_any_supported_manifest(root: &Path) -> bool {
+    let mut builder = project_walker(root);
+    builder.max_depth(Some(MANIFEST_DISCOVERY_DEPTH));
+    builder.build().flatten().any(|entry| {
+        entry.file_type().is_some_and(|t| t.is_file())
+            && entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| SUPPORTED_MANIFESTS.contains(&name))
+    })
+}
+
 /// Walk `root` once: if any JS/TS/Python source file exists, the stack is
 /// supported (regardless of manifest presence — a fresh clone may not have
 /// installed deps yet). Otherwise, if no supported manifest is present
@@ -278,7 +362,7 @@ fn detect_unsupported_stack(root: &Path, has_supported_manifest: bool) -> Option
         return None;
     }
     let mut other_lang: Option<&'static str> = None;
-    for entry in WalkBuilder::new(root).build().flatten() {
+    for entry in project_walker(root).build().flatten() {
         if !entry.file_type().is_some_and(|t| t.is_file()) {
             continue;
         }
