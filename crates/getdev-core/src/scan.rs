@@ -246,7 +246,15 @@ pub fn scan_path(root: &Path) -> Result<(Vec<FileScan>, Vec<ScanError>), ScanErr
 }
 
 /// A string literal assigned to a named identifier or object key.
-#[derive(Debug, Clone)]
+///
+/// `value` stays `pub` (an API break here would ripple through every caller
+/// that reads matched literals — models.rs, env.rs — for no correctness
+/// gain), but `Debug` is hand-rolled to redact it (C6/03-REVIEW.md): this
+/// type flows every string literal in a scanned project through it,
+/// including ones that later turn out to be secrets, before `env::classify`
+/// has had a chance to judge them. A derived `Debug`/`dbg!` would print the
+/// raw literal.
+#[derive(Clone)]
 pub struct StringAssignment {
     pub path: PathBuf,
     pub lang: Lang,
@@ -260,6 +268,20 @@ pub struct StringAssignment {
     /// byte span of the whole literal node (incl. quotes) — used by the
     /// rewrite engine to replace the literal with an env accessor
     pub value_span: (usize, usize),
+}
+
+impl fmt::Debug for StringAssignment {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StringAssignment")
+            .field("path", &self.path)
+            .field("lang", &self.lang)
+            .field("name", &self.name)
+            .field("value", &"«redacted»")
+            .field("line", &self.line)
+            .field("column", &self.column)
+            .field("value_span", &self.value_span)
+            .finish()
+    }
 }
 
 /// Walk `root` and collect every `name = "literal"` shape in supported
@@ -417,6 +439,24 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+
+    /// C6 regression: `{:?}` on a `StringAssignment` must never print the
+    /// raw `value` field, even though it stays `pub` for API stability.
+    #[test]
+    fn string_assignment_debug_redacts_value() {
+        let assignment = StringAssignment {
+            path: PathBuf::from("a.js"),
+            lang: Lang::JavaScript,
+            name: "stripeKey".to_owned(),
+            value: "sk_live_FAKEFAKEFAKE1234".to_owned(),
+            line: 1,
+            column: 1,
+            value_span: (0, 10),
+        };
+        let debug_output = format!("{assignment:?}");
+        assert!(!debug_output.contains("sk_live_FAKEFAKEFAKE1234"));
+        assert!(debug_output.contains("«redacted»"));
+    }
 
     #[test]
     fn detects_language_from_extension() {

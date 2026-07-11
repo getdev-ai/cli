@@ -48,7 +48,11 @@ impl Default for EnvOptions {
 }
 
 /// One planned extraction: a detected secret plus the env var it becomes.
-#[derive(Debug)]
+///
+/// `Debug` is hand-rolled (C6/03-REVIEW.md) rather than derived: the derive
+/// would print `value` (the raw secret) verbatim, and nothing today stops a
+/// future `dbg!(entry)` or `format!("{entry:?}")` from leaking it. Every
+/// other field is unchanged from the derived output.
 pub struct PlanEntry {
     pub var_name: String,
     /// project-relative path, forward slashes
@@ -62,6 +66,22 @@ pub struct PlanEntry {
     pub value_span: (usize, usize),
     /// the raw secret — crate-private; only apply may read it
     pub(crate) value: String,
+}
+
+impl std::fmt::Debug for PlanEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PlanEntry")
+            .field("var_name", &self.var_name)
+            .field("file", &self.file)
+            .field("lang", &self.lang)
+            .field("line", &self.line)
+            .field("column", &self.column)
+            .field("identifier", &self.identifier)
+            .field("secret", &self.secret)
+            .field("value_span", &self.value_span)
+            .field("value", &"«redacted»")
+            .finish()
+    }
 }
 
 #[derive(Debug)]
@@ -540,6 +560,29 @@ mod tests {
         parser.set_language(&Lang::Python.language()).unwrap();
         let tree = parser.parse(&out, None).unwrap();
         assert!(!tree.root_node().has_error());
+    }
+
+    /// C6 regression: `{:?}` on a `PlanEntry` must never print the raw
+    /// secret value, even though the field carries it internally.
+    #[test]
+    fn plan_entry_debug_redacts_value() {
+        let entry = PlanEntry {
+            var_name: "STRIPE_SECRET_KEY".to_owned(),
+            file: "pay.js".to_owned(),
+            lang: Lang::JavaScript,
+            line: 1,
+            column: 1,
+            identifier: "stripeKey".to_owned(),
+            secret: crate::secrets::SecretPatterns::embedded()
+                .unwrap()
+                .classify("sk_live_FAKEFAKEFAKE1234", "stripeKey")
+                .unwrap(),
+            value_span: (0, 10),
+            value: "sk_live_FAKEFAKEFAKE1234".to_owned(),
+        };
+        let debug_output = format!("{entry:?}");
+        assert!(!debug_output.contains("sk_live_FAKEFAKEFAKE1234"));
+        assert!(debug_output.contains("«redacted»"));
     }
 
     #[test]

@@ -40,7 +40,13 @@ pub enum MutateError {
 /// One planned file mutation. `RewriteSource` is reparse-verified; plain
 /// `WriteFile` (dotfiles, generated configs) is not parseable source and
 /// only gets atomicity.
-#[derive(Debug)]
+///
+/// `Debug` is hand-rolled (C6/03-REVIEW.md): both variants' `original`/
+/// `new_content` can hold raw secret values — `RewriteSource` mid-rewrite
+/// source, and `WriteFile` for the `.env` write itself (values, not just
+/// keys). A derived `Debug` would print them verbatim; nothing today calls
+/// `dbg!`/`{:?}` on a `PlannedWrite` in a production path, but that's an
+/// invariant this type should hold structurally, not by convention.
 pub enum PlannedWrite {
     RewriteSource {
         path: PathBuf,
@@ -55,6 +61,26 @@ pub enum PlannedWrite {
         original: Option<String>,
         new_content: String,
     },
+}
+
+impl std::fmt::Debug for PlannedWrite {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RewriteSource { path, lang, .. } => f
+                .debug_struct("RewriteSource")
+                .field("path", path)
+                .field("lang", lang)
+                .field("original", &"«redacted»")
+                .field("new_content", &"«redacted»")
+                .finish(),
+            Self::WriteFile { path, original, .. } => f
+                .debug_struct("WriteFile")
+                .field("path", path)
+                .field("original", &original.as_ref().map(|_| "«redacted»"))
+                .field("new_content", &"«redacted»")
+                .finish(),
+        }
+    }
 }
 
 impl PlannedWrite {
@@ -224,6 +250,31 @@ mod tests {
         dir
     }
 
+    /// C6 regression: `{:?}` on a `PlannedWrite` must never print raw
+    /// `original`/`new_content` — both variants can hold secret values.
+    #[test]
+    fn planned_write_debug_redacts_content() {
+        let rewrite = PlannedWrite::RewriteSource {
+            path: PathBuf::from("a.js"),
+            lang: Lang::JavaScript,
+            original: "const k = \"sk_live_FAKEFAKEFAKE1234\";\n".into(),
+            new_content: "const k = process.env.K;\n".into(),
+        };
+        let debug_output = format!("{rewrite:?}");
+        assert!(!debug_output.contains("sk_live_FAKEFAKEFAKE1234"));
+        assert!(debug_output.contains("«redacted»"));
+
+        let write_file = PlannedWrite::WriteFile {
+            path: PathBuf::from(".env"),
+            original: Some("OLD=sk_live_FAKEFAKEFAKE1234\n".into()),
+            new_content: "OLD=sk_live_FAKEFAKEFAKE1234\nNEW=sk_live_OTHERFAKE5678\n".into(),
+        };
+        let debug_output = format!("{write_file:?}");
+        assert!(!debug_output.contains("sk_live_FAKEFAKEFAKE1234"));
+        assert!(!debug_output.contains("sk_live_OTHERFAKE5678"));
+        assert!(debug_output.contains("«redacted»"));
+    }
+
     #[test]
     fn applies_verified_rewrite_atomically() {
         let dir = tempdir("ok");
@@ -335,7 +386,10 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .filter(|n| n.contains("getdev-tmp"))
             .collect();
-        assert!(leftovers.is_empty(), "temp files left behind: {leftovers:?}");
+        assert!(
+            leftovers.is_empty(),
+            "temp files left behind: {leftovers:?}"
+        );
     }
 
     /// C2 regression: the temp filename embeds the process id, so two
