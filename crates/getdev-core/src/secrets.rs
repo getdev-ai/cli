@@ -95,6 +95,14 @@ impl SecretPatterns {
         Self::parse(EMBEDDED_PATTERNS)
     }
 
+    /// The loaded pattern set, in file order (the order `classify` tries
+    /// them — see the first-match-wins note above). Exposed read-only so
+    /// callers (the C5 fixture-coverage test) can enumerate every shipped
+    /// pattern id without duplicating the YAML.
+    pub fn patterns(&self) -> &[SecretPattern] {
+        &self.patterns
+    }
+
     pub fn parse(yaml: &str) -> Result<Self, PatternError> {
         let file: PatternFile = serde_yaml::from_str(yaml)?;
         let mut patterns = Vec::with_capacity(file.patterns.len());
