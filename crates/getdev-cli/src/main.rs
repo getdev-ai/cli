@@ -4,7 +4,7 @@ mod commands;
 mod update;
 
 use clap::{Args, Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use getdev_core::config::{self, Config};
 use getdev_core::findings::Severity;
@@ -130,6 +130,19 @@ fn main() -> std::process::ExitCode {
 /// doc-comment for why this stays explicit rather than becoming hidden
 /// global state.
 fn run(cli: Cli) -> anyhow::Result<u8> {
+    // B3: doctor must survive a malformed config — it exists specifically to
+    // diagnose things like a broken `.getdev.toml`, so a `ConfigError` here
+    // must never kill the process before doctor's own checks even run.
+    // Every other command keeps the hard exit-3 via `Config::resolve`'s `?`
+    // below (docs/PLAN.md §2.2 exit-code contract); doctor resolves config
+    // leniently (falling back to defaults) and separately reports the same
+    // parse failure as a failed row via its own `Config::load` check.
+    if matches!(cli.command, Command::Doctor) {
+        let cfg = Config::resolve(cli.global.config.as_deref(), Path::new(".")).unwrap_or_default();
+        let offline = config::offline_resolved(cli.global.offline, &cfg);
+        return commands::doctor::run(offline, cli.global.fix).map(|()| 0);
+    }
+
     let path = command_path(&cli.command);
     let cfg = Config::resolve(cli.global.config.as_deref(), &path)?;
     let offline = config::offline_resolved(cli.global.offline, &cfg);
@@ -174,7 +187,9 @@ fn run(cli: Cli) -> anyhow::Result<u8> {
             quiet,
             verbose,
         }),
-        Command::Doctor => commands::doctor::run(offline, cli.global.fix).map(|()| 0),
+        Command::Doctor => {
+            unreachable!("Command::Doctor is handled before config resolution above")
+        }
         Command::Spike { path } => commands::spike::run(&path).map(|()| 0),
     }
 }

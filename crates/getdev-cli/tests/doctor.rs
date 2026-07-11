@@ -124,6 +124,42 @@ fn fix_with_an_already_healthy_cache_is_a_no_op_and_still_passes() {
         .success();
 }
 
+#[test]
+fn doctor_survives_a_malformed_config_and_reports_it_as_a_failed_row() {
+    // B3 regression: a malformed `.getdev.toml` must not kill doctor before
+    // it can diagnose anything — every other command exits 3 on a
+    // ConfigError, but doctor resolves config leniently and continues its
+    // other checks, reporting the parse failure as a failed row instead.
+    let dir = tmp_dir("malformed-config");
+    std::fs::create_dir_all(&dir).unwrap();
+    let cache_dir = dir.join("cache");
+    std::fs::write(dir.join(".getdev.toml"), "[check]\nfail_onn = \"high\"\n").unwrap();
+
+    let assert = getdev()
+        .current_dir(&dir)
+        .env("GETDEV_CACHE_DIR", &cache_dir)
+        .arg("doctor")
+        .arg("--offline")
+        .assert()
+        .failure();
+    let code = assert.get_output().status.code().unwrap();
+    assert_eq!(
+        code, 2,
+        "a malformed config surfaced during doctor's own checks is an execution failure (2), \
+         not the config-resolution hard exit (3) — doctor never dies before reporting it"
+    );
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    assert!(
+        stdout.contains("FAIL") && stdout.contains("config:"),
+        "expected a failed config row in doctor's output, got:\n{stdout}"
+    );
+    // doctor still ran its other checks (grammar rows) despite the broken config.
+    assert!(
+        stdout.contains("grammar javascript"),
+        "expected doctor to continue past the config check, got:\n{stdout}"
+    );
+}
+
 fn getdev_registry_precreate(dir: &std::path::Path) {
     // Exercise the same public API doctor.rs itself uses to open/create the
     // cache, keeping this test decoupled from getdev-registry's private
