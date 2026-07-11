@@ -4,19 +4,21 @@
 //! Same parse-once, skip-not-fail walker contract as
 //! `deps::imports_js::collect_imports`.
 
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use getdev_grammars::tree_sitter::{Parser, Query, QueryCursor};
-use ignore::WalkBuilder;
 use serde::Deserialize;
 use streaming_iterator::StreamingIterator;
 
-use crate::scan::{Lang, ScanError};
+use crate::scan::{project_walker, read_source_capped, Lang, ScanError};
 
 use super::{relative_display, DepsError, RawImport};
 
 const EMBEDDED_PYTHON_STDLIB: &str = include_str!("../../../../rules/real/python-stdlib.json");
+const EMBEDDED_PY_IMPORT_ALIASES: &str =
+    include_str!("../../../../rules/real/py-import-aliases.json");
 
 #[derive(Debug, Deserialize)]
 struct ModuleListFile {
@@ -32,6 +34,30 @@ pub fn python_stdlib() -> Result<HashSet<String>, DepsError> {
             source,
         })?;
     Ok(file.modules.into_iter().collect())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImportAliasFile {
+    #[allow(dead_code)]
+    version: u32,
+    #[allow(dead_code)]
+    source: String,
+    aliases: HashMap<String, Vec<String>>,
+}
+
+/// The embedded PyPI import-name -> distribution-name alias dataset (A5):
+/// `import yaml` declares as `pyyaml`, `import PIL` declares as `pillow`,
+/// etc. Values are lists — `psycopg2` accepts either the `psycopg2` or
+/// `psycopg2-binary` distribution — never a single string, so callers never
+/// need a separate multi-value special case.
+pub fn python_import_aliases() -> Result<HashMap<String, Vec<String>>, DepsError> {
+    let file: ImportAliasFile =
+        serde_json::from_str(EMBEDDED_PY_IMPORT_ALIASES).map_err(|source| DepsError::Json {
+            path: PathBuf::from("rules/real/py-import-aliases.json"),
+            source,
+        })?;
+    Ok(file.aliases)
 }
 
 /// Per-language import query, mirroring `scan.rs`'s `string_assignment_query`
@@ -59,7 +85,7 @@ pub fn collect_imports(root: &Path) -> Result<(Vec<RawImport>, Vec<ScanError>), 
     let mut results = Vec::new();
     let mut skipped = Vec::new();
 
-    for entry in WalkBuilder::new(root).build().flatten() {
+    for entry in project_walker(root).build().flatten() {
         if !entry.file_type().is_some_and(|t| t.is_file()) {
             continue;
         }
@@ -81,10 +107,7 @@ pub fn collect_imports(root: &Path) -> Result<(Vec<RawImport>, Vec<ScanError>), 
 }
 
 fn imports_in_file(path: &Path, root: &Path) -> Result<Vec<RawImport>, ScanError> {
-    let source = std::fs::read_to_string(path).map_err(|source| ScanError::Read {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let source = read_source_capped(path)?;
 
     let language = Lang::Python.language();
     let mut parser = Parser::new();
@@ -147,6 +170,22 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+
+    #[test]
+    fn embedded_python_import_aliases_load() {
+        let aliases = python_import_aliases().unwrap();
+        assert_eq!(
+            aliases.get("yaml").map(Vec::as_slice),
+            Some(["pyyaml".to_owned()].as_slice())
+        );
+        assert_eq!(
+            aliases.get("PIL").map(Vec::as_slice),
+            Some(["pillow".to_owned()].as_slice())
+        );
+        let psycopg2 = aliases.get("psycopg2").unwrap();
+        assert!(psycopg2.contains(&"psycopg2".to_owned()));
+        assert!(psycopg2.contains(&"psycopg2-binary".to_owned()));
+    }
 
     #[test]
     fn embedded_python_stdlib_loads() {
