@@ -440,27 +440,80 @@ fn more_than_one_only_flag_is_rejected() {
         .failure();
 }
 
+/// D2 — a genuine offline canary. The old version of this test only
+/// asserted the exit code fell somewhere in the docs/PLAN.md §2.2 0..=3
+/// range, which a silently-broken `--offline` (one that quietly makes live
+/// registry calls) would satisfy just as happily as a correct one — an
+/// exit-code-only check cannot tell "resolved offline" from "resolved via
+/// a live lookup that happened to succeed". This version makes network
+/// leakage observable in both directions, in one `real --deps-only` pass
+/// over a project that declares both packages, with NO cache seed at all
+/// for either:
+///
+/// 1. `requests` — a real, well-known PyPI package. A live lookup would
+///    resolve it `Found`; a correct offline resolution (cache miss, no
+///    fetch attempted) resolves `Inconclusive` instead. Both states emit no
+///    `real/nonexistent-package` finding, so this direction is a weaker,
+///    process-behavior-only backstop (a broken offline path hitting a real
+///    socket in a network-sandboxed CI runner hangs or errors instead of
+///    the clean, fast exit asserted below) — but it also guards against an
+///    offline path that special-cases "this looks like a real package
+///    name" instead of genuinely never fetching.
+/// 2. `totally-nonexistent-canary-pkg-zzz` — guaranteed not to exist on
+///    PyPI. A live lookup would 404 -> `Existence::Missing` -> a
+///    `real/nonexistent-package` finding. A correct offline resolution
+///    (cache miss, never confirmed) must stay `Inconclusive` and emit NO
+///    finding. This direction is the deterministic one: it fails loudly on
+///    any network leak regardless of whether the test environment happens
+///    to have egress.
 #[test]
 fn offline_run_never_touches_the_network() {
-    // No live fetcher/mock server exists anywhere in this test binary —
-    // if `real` attempted a real network call under --offline, the process
-    // would either hang (no timeout set for a real socket outside the
-    // client's own 5s cap) or the test environment's network sandboxing
-    // would fail it. A clean, fast exit in the docs/PLAN.md §2.2 exit-code
-    // contract range is the executable proof.
     let dir = tmp_dir("no-network");
-    std::fs::write(dir.join("requirements.txt"), "requests==2.31.0\n").unwrap();
+    std::fs::write(
+        dir.join("requirements.txt"),
+        "requests==2.31.0\ntotally-nonexistent-canary-pkg-zzz==1.0.0\n",
+    )
+    .unwrap();
+
     let assert = getdev()
         .current_dir(&dir)
         .env("GETDEV_OFFLINE", "1")
         .env("GETDEV_CACHE_DIR", dir.join("cache"))
         .arg("real")
+        .arg("--offline")
+        .arg("--deps-only")
         .arg("--json")
         .timeout(std::time::Duration::from_secs(10))
-        .assert();
-    let code = assert.get_output().status.code().unwrap_or(-1);
+        .assert()
+        .success();
+
+    let output = assert.get_output();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let report: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|err| panic!("stdout was not valid JSON ({err}): {stdout}"));
+    let findings = report["findings"].as_array().unwrap();
+
     assert!(
-        (0..=3).contains(&code),
-        "exit code {code} outside the docs/PLAN.md §2.2 contract"
+        findings.iter().all(|f| {
+            !(f["id"] == "real/nonexistent-package"
+                && f["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("requests"))
+        }),
+        "a well-known real package with no cache seed must never resolve to a fabricated \
+         'does not exist' verdict under --offline, got: {stdout}"
+    );
+    assert!(
+        findings.iter().all(|f| {
+            !(f["id"] == "real/nonexistent-package"
+                && f["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("totally-nonexistent-canary-pkg-zzz"))
+        }),
+        "an uncached, unseeded package must resolve Inconclusive under --offline, never \
+         Missing from a live lookup this test never seeded — a network leak would 404 it \
+         into a fabricated real/nonexistent-package finding, got: {stdout}"
     );
 }
