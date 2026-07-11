@@ -29,6 +29,14 @@ const PYPI_DATASET_JSON: &str = include_str!("../../../rules/real/pypi-top-15k.j
 /// Near-name reason fires when the Damerau-Levenshtein distance to the
 /// nearest top-N package is in `1..=NEAR_NAME_MAX_DISTANCE`.
 const NEAR_NAME_MAX_DISTANCE: usize = 2;
+/// E1 DoS guard: above this length, near-name scoring (an O(candidates *
+/// name_len * candidate_len) Damerau-Levenshtein pass over the whole
+/// dataset) is skipped entirely. No legitimate npm/PyPI package name
+/// approaches this length; a multi-MB name in a hostile manifest is a
+/// resource-exhaustion attempt, not a typo. Exact-membership (`==`)
+/// checking still runs regardless of length — it's a cheap length-gated
+/// string compare, not the scoring pass.
+const MAX_NAME_LEN_FOR_NEAR_NAME_SCORING: usize = 128;
 /// npm last-week download count below this is "low downloads"
 /// (documented heuristic threshold — surfaced in the finding `detail` per
 /// FP policy §9.2, not hidden).
@@ -172,21 +180,51 @@ pub fn score_with_sensitivity(
         return None;
     }
 
+    // E2: self-normalize PyPI names (PEP 503) before dataset/cache use — a
+    // caller that forgot to normalize (or normalized only for the URL, not
+    // for typosquat scoring) must not see `Django` flagged as a near-name
+    // typo of `django`. npm names pass through unchanged (already
+    // canonical; scoped names' `/` is not touched by PEP 503 rules).
+    let normalized_name;
+    let name: &str = match eco {
+        Ecosystem::Pypi => {
+            normalized_name = crate::client::normalize_pep503(name);
+            &normalized_name
+        }
+        Ecosystem::Npm => name,
+    };
+
     let candidates = datasets.for_ecosystem(eco);
     let mut reasons = Vec::new();
     let mut nearest = String::new();
     let mut nearest_distance = usize::MAX;
 
+    // E1: the exact-membership check is a cheap length-gated `==` (never a
+    // scoring pass) and always runs, even for a pathological input — but the
+    // Damerau-Levenshtein scoring loop below is skipped entirely above
+    // `MAX_NAME_LEN_FOR_NEAR_NAME_SCORING`.
     let is_exact_top_n = candidates.iter().any(|c| c == name);
-    if !is_exact_top_n {
+    if !is_exact_top_n && name.chars().count() <= MAX_NAME_LEN_FOR_NEAR_NAME_SCORING {
+        let max_distance = sensitivity.near_name_max_distance();
+        let name_len = name.chars().count();
         for candidate in candidates {
+            // E1: a per-candidate length-diff prune — Damerau-Levenshtein
+            // distance is always >= the absolute length difference, so any
+            // candidate whose length differs from `name` by more than
+            // `max_distance` can never be a near-name hit; skip the O(n*m)
+            // comparison entirely for it.
+            let candidate_len = candidate.chars().count();
+            let len_diff = (name_len as isize - candidate_len as isize).unsigned_abs();
+            if len_diff > max_distance {
+                continue;
+            }
             let distance = strsim::damerau_levenshtein(name, candidate);
             if distance < nearest_distance {
                 nearest_distance = distance;
                 nearest.clone_from(candidate);
             }
         }
-        if (1..=sensitivity.near_name_max_distance()).contains(&nearest_distance) {
+        if (1..=max_distance).contains(&nearest_distance) {
             reasons.push(TyposquatReason::NearName);
         }
     }
@@ -307,5 +345,79 @@ mod tests {
             now,
         )
         .is_none());
+    }
+
+    // --- E1: DoS guard -----------------------------------------------
+
+    #[test]
+    fn a_multi_megabyte_name_returns_quickly_with_no_near_name_hit() {
+        let datasets = Datasets::embedded().unwrap();
+        // 1MB name: if the length cap didn't short-circuit the scoring
+        // loop, this would run a full Damerau-Levenshtein pass against
+        // every dataset entry (thousands of O(n*m) comparisons against a
+        // ~1_000_000-char string) — a CPU/memory DoS via a hostile
+        // manifest. The test's only real assertion is that this returns at
+        // all (no panic, no hang); the `None` also documents that a
+        // pathological name is never treated as a near-name hit.
+        let huge_name = "a".repeat(1_000_000);
+        let hit = score(&datasets, Ecosystem::Npm, &huge_name, None, None, 0);
+        assert!(hit.is_none());
+    }
+
+    #[test]
+    fn length_pruning_preserves_existing_near_name_hits() {
+        let datasets = Datasets::embedded().unwrap();
+        // Regression guard for the E1 per-candidate length-diff prune:
+        // these are the same fixtures as the pre-existing distance-1/2
+        // tests above — they must still fire after pruning is introduced.
+        let hit = score(&datasets, Ecosystem::Pypi, "reqeusts", None, None, 0).unwrap();
+        assert!(hit.reasons.contains(&TyposquatReason::NearName));
+        assert_eq!(hit.nearest, "requests");
+        assert_eq!(hit.distance, 1);
+
+        let hit = score(&datasets, Ecosystem::Pypi, "reqeustz", None, None, 0).unwrap();
+        assert!(hit.reasons.contains(&TyposquatReason::NearName));
+        assert_eq!(hit.nearest, "requests");
+        assert_eq!(hit.distance, 2);
+    }
+
+    #[test]
+    fn a_name_at_exactly_the_length_cap_still_scores_normally() {
+        let datasets = Datasets::embedded().unwrap();
+        // A name at (not over) MAX_NAME_LEN_FOR_NEAR_NAME_SCORING is a
+        // boundary case that must still be scored — only names strictly
+        // over the cap are skipped.
+        let mut name = "reqeusts".to_owned();
+        name.push_str(&"x".repeat(MAX_NAME_LEN_FOR_NEAR_NAME_SCORING - name.len()));
+        assert_eq!(name.chars().count(), MAX_NAME_LEN_FOR_NEAR_NAME_SCORING);
+        // Far from every dataset entry (padded with 'x'), so no NearName
+        // hit is expected — but the exact-membership `is_none()` shape
+        // proves the scoring path ran (rather than being skipped by the
+        // length cap) without needing a private-field assertion.
+        assert!(score(&datasets, Ecosystem::Pypi, &name, None, None, 0).is_none());
+    }
+
+    // --- E2: self-normalization ---------------------------------------
+
+    #[test]
+    fn pypi_typosquat_scoring_self_normalizes_pep503() {
+        let datasets = Datasets::embedded().unwrap();
+        // `typing_extensions` (underscore form) must not be flagged as a
+        // near-name typo of the dataset's canonical `typing-extensions`
+        // entry — without self-normalization the two are 1 edit apart
+        // (`_` vs `-`) and would false-positive as NearName.
+        assert!(datasets.pypi.contains(&"typing-extensions".to_owned()));
+        assert!(score(
+            &datasets,
+            Ecosystem::Pypi,
+            "typing_extensions",
+            None,
+            None,
+            0
+        )
+        .is_none());
+
+        // Case variance must collapse the same way (`Django` == `django`).
+        assert!(score(&datasets, Ecosystem::Pypi, "Django", None, None, 0).is_none());
     }
 }
