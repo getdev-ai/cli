@@ -144,9 +144,11 @@ fn doctor_survives_a_malformed_config_and_reports_it_as_a_failed_row() {
         .failure();
     let code = assert.get_output().status.code().unwrap();
     assert_eq!(
-        code, 2,
-        "a malformed config surfaced during doctor's own checks is an execution failure (2), \
-         not the config-resolution hard exit (3) — doctor never dies before reporting it"
+        code, 1,
+        "F3(c): a malformed config surfaced as a failed doctor check row is an unhealthy-\
+         environment exit (1), not the config-resolution hard exit (3) — doctor never dies \
+         before reporting it, and a health-check failure is distinct from a genuine execution \
+         error (2)"
     );
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
     assert!(
@@ -157,6 +159,44 @@ fn doctor_survives_a_malformed_config_and_reports_it_as_a_failed_row() {
     assert!(
         stdout.contains("grammar javascript"),
         "expected doctor to continue past the config check, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn fix_refuses_to_delete_a_cache_dir_with_unexpected_contents() {
+    // F3(b): --fix must only ever delete a directory that actually looks
+    // like a getdev cache — a misconfigured GETDEV_CACHE_DIR pointing at an
+    // unrelated directory (that also happens to contain a corrupt/garbage
+    // "cache.sqlite3") must be refused, not silently wiped.
+    let dir = tmp_dir("unexpected-contents");
+    let cache_dir = dir.join("cache");
+    std::fs::create_dir_all(&cache_dir).unwrap();
+    std::fs::write(cache_dir.join("cache.sqlite3"), b"not a real sqlite file").unwrap();
+    std::fs::write(
+        cache_dir.join("important-user-data.txt"),
+        b"do not delete me",
+    )
+    .unwrap();
+
+    let assert = getdev()
+        .env("GETDEV_CACHE_DIR", &cache_dir)
+        .arg("doctor")
+        .arg("--offline")
+        .arg("--fix")
+        .assert()
+        .failure();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    assert!(
+        stdout.contains("refusing"),
+        "expected doctor to refuse the --fix, got:\n{stdout}"
+    );
+    assert!(
+        cache_dir.join("important-user-data.txt").exists(),
+        "doctor must never delete a directory with unexpected contents"
+    );
+    assert!(
+        cache_dir.join("cache.sqlite3").exists(),
+        "doctor must never delete a directory with unexpected contents"
     );
 }
 

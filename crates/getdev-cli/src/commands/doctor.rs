@@ -51,7 +51,7 @@ struct DoctorReport {
     ok: bool,
 }
 
-pub fn run(args: &DoctorArgs) -> anyhow::Result<()> {
+pub fn run(args: &DoctorArgs) -> anyhow::Result<u8> {
     let mut checks: Vec<DoctorCheck> = Vec::new();
 
     // config validity (.getdev.toml in CWD; missing file is fine). B3: a
@@ -151,18 +151,33 @@ pub fn run(args: &DoctorArgs) -> anyhow::Result<()> {
         }
         CacheHealth::Corrupt { reason } => {
             if args.fix {
-                match std::fs::remove_dir_all(&cache_dir) {
-                    Ok(()) => checks.push(row(
-                        true,
-                        &format!("cache: corrupt cache cleared (--fix): {reason}"),
-                    )),
-                    Err(err) => checks.push(row(
+                // F3(b): --fix must only ever delete a directory that
+                // actually looks like a getdev registry cache — refuse
+                // (rather than silently wiping it) if `GETDEV_CACHE_DIR`
+                // was misconfigured to point somewhere else entirely.
+                if looks_like_getdev_cache(&cache_dir) {
+                    match std::fs::remove_dir_all(&cache_dir) {
+                        Ok(()) => checks.push(row(
+                            true,
+                            &format!("cache: corrupt cache cleared (--fix): {reason}"),
+                        )),
+                        Err(err) => checks.push(row(
+                            false,
+                            &format!(
+                                "cache: --fix failed to clear {}: {err}",
+                                cache_dir.display()
+                            ),
+                        )),
+                    }
+                } else {
+                    checks.push(row(
                         false,
                         &format!(
-                            "cache: --fix failed to clear {}: {err}",
+                            "cache: refusing to --fix — {} does not look like a getdev cache \
+                             directory (unexpected contents); check GETDEV_CACHE_DIR",
                             cache_dir.display()
                         ),
-                    )),
+                    ));
                 }
             } else {
                 checks.push(row(
@@ -209,11 +224,14 @@ pub fn run(args: &DoctorArgs) -> anyhow::Result<()> {
         }
     }
 
-    if failures == 0 {
-        Ok(())
-    } else {
-        anyhow::bail!("{failures} check(s) failed");
-    }
+    // F3(c): a health-check failure (corrupt cache, missing git, a bad
+    // grammar, ...) means the environment is unhealthy — exit 1, distinct
+    // from a genuine execution error (exit 2), which is reserved for
+    // doctor itself failing to run (e.g. the `?` above on JSON
+    // serialization). Every check above already recovered from its own
+    // failure into a failed row rather than propagating an `Err`, so this
+    // function only ever returns `Err` for a real execution fault.
+    Ok(u8::from(failures > 0))
 }
 
 fn row(ok: bool, message: &str) -> DoctorCheck {
@@ -262,6 +280,43 @@ fn cache_health(dir: &Path) -> CacheHealth {
             },
         },
     }
+}
+
+/// The set of file names a genuine getdev registry cache directory may
+/// contain (mirrors `getdev_registry::cache`'s `cache.sqlite3` plus
+/// SQLite's own WAL/journal side-files).
+const KNOWN_CACHE_ENTRIES: &[&str] = &[
+    "cache.sqlite3",
+    "cache.sqlite3-wal",
+    "cache.sqlite3-shm",
+    "cache.sqlite3-journal",
+];
+
+/// F3(b): sanity-checks that `dir` actually looks like a getdev registry
+/// cache before `--fix` is allowed to `remove_dir_all` it — a misconfigured
+/// `GETDEV_CACHE_DIR` pointing at an unrelated directory (a user's home
+/// directory, a project directory, ...) must never be silently wiped just
+/// because it happens to contain SOME failure `Cache::open_at` reads as
+/// corrupt. Refuses (returns `false`) on any entry that isn't one of
+/// [`KNOWN_CACHE_ENTRIES`], and requires at least the primary DB file to be
+/// present at all.
+fn looks_like_getdev_cache(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    let mut saw_db_file = false;
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            return false; // non-UTF8 entry name — surprising, refuse
+        };
+        if !KNOWN_CACHE_ENTRIES.contains(&name.as_str()) {
+            return false;
+        }
+        if name == "cache.sqlite3" {
+            saw_db_file = true;
+        }
+    }
+    saw_db_file
 }
 
 /// Flat, non-recursive sum — the registry cache directory holds at most a

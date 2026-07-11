@@ -172,8 +172,7 @@ fn run(cli: Cli) -> anyhow::Result<u8> {
             json: cli.global.json,
             quiet: cli.global.quiet,
             no_color: cli.global.no_color,
-        })
-        .map(|()| 0);
+        });
     }
 
     let cfg = Config::resolve(cli.global.config.as_deref(), &cli.global.path)?;
