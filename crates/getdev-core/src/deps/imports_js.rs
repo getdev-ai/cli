@@ -12,11 +12,10 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use getdev_grammars::tree_sitter::{Parser, Query, QueryCursor};
-use ignore::WalkBuilder;
 use serde::Deserialize;
 use streaming_iterator::StreamingIterator;
 
-use crate::scan::{Lang, ScanError};
+use crate::scan::{project_walker, read_source_capped, Lang, ScanError};
 
 use super::{relative_display, DepsError, RawImport};
 
@@ -44,19 +43,33 @@ pub fn node_builtins() -> Result<HashSet<String>, DepsError> {
 /// Per-language import query, mirroring `scan.rs`'s `string_assignment_query`
 /// shape. Only ever invoked for `JavaScript`/`TypeScript`/`Tsx` — the walker
 /// filters by extension first, so the `Python` arm is never reached.
+///
+/// `(call_expression function: (import) ...)` is the dynamic `import("pkg")`
+/// form (a distinct grammar node from a named-identifier `require(...)`
+/// call); `(export_statement source: (string) ...)` covers every re-export
+/// shape with a `from` clause (`export { x } from "pkg"`,
+/// `export * from "pkg"`, `export * as ns from "pkg"`) — A16.
 fn import_query(lang: Lang) -> &'static str {
     match lang {
         Lang::JavaScript => {
             "(import_statement source: (string) @source)\n\
+             (export_statement source: (string) @source)\n\
              (call_expression\n\
                  function: (identifier) @fn (#eq? @fn \"require\")\n\
+                 arguments: (arguments (string) @source))\n\
+             (call_expression\n\
+                 function: (import)\n\
                  arguments: (arguments (string) @source))"
         }
         Lang::TypeScript | Lang::Tsx => {
             "(import_statement source: (string) @source)\n\
              (import_require_clause source: (string) @source)\n\
+             (export_statement source: (string) @source)\n\
              (call_expression\n\
                  function: (identifier) @fn (#eq? @fn \"require\")\n\
+                 arguments: (arguments (string) @source))\n\
+             (call_expression\n\
+                 function: (import)\n\
                  arguments: (arguments (string) @source))"
         }
         Lang::Python => "",
@@ -69,7 +82,7 @@ pub fn collect_imports(root: &Path) -> Result<(Vec<RawImport>, Vec<ScanError>), 
     let mut results = Vec::new();
     let mut skipped = Vec::new();
 
-    for entry in WalkBuilder::new(root).build().flatten() {
+    for entry in project_walker(root).build().flatten() {
         if !entry.file_type().is_some_and(|t| t.is_file()) {
             continue;
         }
@@ -91,10 +104,7 @@ pub fn collect_imports(root: &Path) -> Result<(Vec<RawImport>, Vec<ScanError>), 
 }
 
 fn imports_in_file(path: &Path, lang: Lang, root: &Path) -> Result<Vec<RawImport>, ScanError> {
-    let source = std::fs::read_to_string(path).map_err(|source| ScanError::Read {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let source = read_source_capped(path)?;
 
     let language = lang.language();
     let mut parser = Parser::new();
@@ -217,5 +227,46 @@ mod tests {
         assert!(specs.contains(&("node:fs", false)));
         assert!(specs.contains(&("path", false)));
         assert!(specs.contains(&("./helper", true)));
+    }
+
+    /// A16: dynamic `import("pkg")` and `export ... from "pkg"` sources were
+    /// previously never extracted, so a phantom package only ever reached
+    /// via one of these two shapes produced no `real/phantom-import`
+    /// finding at all (silent false negative).
+    #[test]
+    fn collects_dynamic_import_and_export_from_specifiers() {
+        let dir = std::env::temp_dir().join(format!(
+            "getdev-imports-js-dynamic-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("a.js"),
+            "async function load() {\n\
+             \x20\x20const mod = await import(\"totally-fake-dynamic-pkg\");\n\
+             \x20\x20return mod;\n\
+             }\n\
+             export { helper } from \"totally-fake-reexport-pkg\";\n\
+             export * from \"totally-fake-star-reexport-pkg\";\n",
+        )
+        .unwrap();
+
+        let (imports, skipped) = collect_imports(&dir).unwrap();
+        assert!(skipped.is_empty());
+        let specs: Vec<&str> = imports.iter().map(|i| i.module.as_str()).collect();
+        assert!(
+            specs.contains(&"totally-fake-dynamic-pkg"),
+            "dynamic import(\"pkg\") must be extracted: {specs:?}"
+        );
+        assert!(
+            specs.contains(&"totally-fake-reexport-pkg"),
+            "export {{ x }} from \"pkg\" must be extracted: {specs:?}"
+        );
+        assert!(
+            specs.contains(&"totally-fake-star-reexport-pkg"),
+            "export * from \"pkg\" must be extracted: {specs:?}"
+        );
     }
 }
