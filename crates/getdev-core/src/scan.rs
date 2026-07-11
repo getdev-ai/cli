@@ -53,17 +53,29 @@ impl Lang {
     }
 
     /// Query for `identifier = "string literal"` shapes — the raw material
-    /// for secret detection (`env`, later `audit`). Template strings and
-    /// f-strings are deliberately excluded: interpolated values are not
-    /// literal secrets.
+    /// for secret detection (`env`, later `audit`) and the model-string
+    /// matcher (`real`, A12). Template strings and f-strings are
+    /// deliberately excluded: interpolated values are not literal secrets.
+    ///
+    /// Two extra shapes beyond a plain assignment (A12, 03-REVIEW.md):
+    /// object-literal keys given as a STRING (`{"model": "x"}`, not just
+    /// the bare-identifier `{model: "x"}` already covered by `pair key:
+    /// (property_identifier)`), and Python `keyword_argument`s
+    /// (`client.messages.create(model="...")`) — the canonical
+    /// Anthropic/OpenAI SDK call shape, previously invisible to this query
+    /// because it only matched top-level `name = value` assignments.
     fn string_assignment_query(self) -> &'static str {
         match self {
             Self::JavaScript | Self::TypeScript | Self::Tsx => {
                 "(variable_declarator name: (identifier) @name value: (string) @value)\n\
                  (assignment_expression left: (identifier) @name right: (string) @value)\n\
-                 (pair key: (property_identifier) @name value: (string) @value)"
+                 (pair key: (property_identifier) @name value: (string) @value)\n\
+                 (pair key: (string) @name value: (string) @value)"
             }
-            Self::Python => "(assignment left: (identifier) @name right: (string) @value)",
+            Self::Python => {
+                "(assignment left: (identifier) @name right: (string) @value)\n\
+                 (keyword_argument name: (identifier) @name value: (string) @value)"
+            }
         }
     }
 }
@@ -282,17 +294,32 @@ fn assignments_in_file(path: &Path, lang: Lang) -> Result<Vec<StringAssignment>,
     let mut results = Vec::new();
 
     while let Some(m) = matches.next() {
-        let mut name = None;
+        let mut name_node = None;
         let mut value_node = None;
         for capture in m.captures {
             if Some(capture.index) == name_idx {
-                name = capture.node.utf8_text(source.as_bytes()).ok();
+                name_node = Some(capture.node);
             } else if Some(capture.index) == value_idx {
                 value_node = Some(capture.node);
             }
         }
-        let (Some(name), Some(node)) = (name, value_node) else {
+        let (Some(name_node), Some(node)) = (name_node, value_node) else {
             continue;
+        };
+        let Ok(raw_name) = name_node.utf8_text(source.as_bytes()) else {
+            continue;
+        };
+        // A12: a `@name` capture is either a bare identifier/property name
+        // (`model`) or, for the string-keyed object-pair shape
+        // (`{"model": "x"}`), a quoted string node — strip its delimiters
+        // the same way the value literal is stripped.
+        let name = if name_node.kind() == "string" {
+            let Some(stripped) = strip_string_delimiters(raw_name, lang) else {
+                continue;
+            };
+            stripped
+        } else {
+            raw_name.to_owned()
         };
         let Ok(raw) = node.utf8_text(source.as_bytes()) else {
             continue;
@@ -307,7 +334,7 @@ fn assignments_in_file(path: &Path, lang: Lang) -> Result<Vec<StringAssignment>,
         results.push(StringAssignment {
             path: path.to_path_buf(),
             lang,
-            name: name.to_owned(),
+            name,
             value,
             line: u32::try_from(pos.row).unwrap_or(u32::MAX).saturating_add(1),
             column: u32::try_from(pos.column)
