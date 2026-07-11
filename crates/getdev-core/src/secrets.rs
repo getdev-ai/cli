@@ -56,6 +56,18 @@ pub struct SecretPattern {
     regex: Regex,
 }
 
+/// C4/03-REVIEW.md — **structural note on match order:** `classify` below
+/// walks `patterns` in the order they were loaded and returns the FIRST
+/// regex match (first-match-wins). That order is exactly the order
+/// patterns appear in `rules/env/secrets.yaml`, which means correctness
+/// for any two patterns whose bodies can overlap (e.g. `sk-ant-…` matches
+/// BOTH the `anthropic-api-key` and `openai-api-key` regexes — the OpenAI
+/// pattern's `sk-` prefix is a strict subset of Anthropic's `sk-ant-`)
+/// depends entirely on YAML file order, not on any code-level
+/// disambiguation. Reordering `secrets.yaml` can silently change which
+/// provider a key classifies as. `anthropic_before_openai_ordering_is_pinned`
+/// below is the regression test guarding this; the corresponding note lives
+/// in `secrets.yaml` next to the two patterns.
 #[derive(Debug)]
 pub struct SecretPatterns {
     patterns: Vec<SecretPattern>,
@@ -258,6 +270,23 @@ mod tests {
     #[test]
     fn embedded_pack_compiles() {
         assert!(patterns().patterns.len() >= 10);
+    }
+
+    /// C4 regression: `sk-ant-…` matches BOTH the anthropic-api-key regex
+    /// and the openai-api-key regex (openai's `sk-` prefix is a strict
+    /// subset of anthropic's `sk-ant-`). Correctness depends entirely on
+    /// anthropic-api-key appearing before openai-api-key in
+    /// rules/env/secrets.yaml (first-match-wins) — this pins that ordering
+    /// so a future edit that reorders the YAML fails loudly here instead of
+    /// silently misclassifying every Anthropic key as OpenAI.
+    #[test]
+    fn anthropic_before_openai_ordering_is_pinned() {
+        let m = patterns()
+            .classify("sk-ant-FAKEFAKEFAKEFAKEFAKEFAKE1234", "apiKey")
+            .unwrap();
+        assert_eq!(m.provider, "anthropic");
+        assert_eq!(m.pattern_id, "anthropic-api-key");
+        assert_eq!(m.env_key, "ANTHROPIC_API_KEY");
     }
 
     #[test]
