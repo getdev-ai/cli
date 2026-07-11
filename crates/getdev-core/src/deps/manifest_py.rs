@@ -2,33 +2,86 @@
 //! normalized (Pitfall 3 — `Django`/`django`/`DJANGO` must collapse to one
 //! entry, or downstream registry lookups triple their work for nothing).
 
-use std::collections::BTreeSet;
-use std::path::Path;
+use std::collections::{BTreeSet, HashSet};
+use std::path::{Path, PathBuf};
 
-use super::DepsError;
+use super::{discover_manifests, record_or_fail, DepsError};
+use crate::scan::ScanError;
 
-/// Parse every Python manifest/lockfile dialect present under `root` and
-/// return the union of declared PyPI package names, PEP 503 normalized.
-pub fn declared_pypi(root: &Path) -> Result<BTreeSet<String>, DepsError> {
+/// Depth cap on `-r`/`--requirement` include resolution (F8): deep enough
+/// for a realistic split (`requirements.txt` -> `base.txt` -> `common.txt`)
+/// without letting a pathological or cyclic chain of includes recurse
+/// unboundedly. Combined with the visited-path cycle guard in
+/// [`resolve_requirement_include`].
+const MAX_REQUIREMENTS_INCLUDE_DEPTH: usize = 3;
+
+/// Parse every Python manifest/lockfile dialect present anywhere under
+/// `root` (bounded-depth recursive discovery — A4) and return the union of
+/// declared PyPI package names, PEP 503 normalized. A manifest that fails to
+/// *parse* is folded into the returned skip list rather than aborting the
+/// whole graph build (A10) — see [`super::record_or_fail`].
+pub fn declared_pypi(root: &Path) -> Result<(BTreeSet<String>, Vec<ScanError>), DepsError> {
     let mut raw = Vec::new();
+    let mut skipped = Vec::new();
 
-    if let Some(text) = read_optional(&root.join("requirements.txt"))? {
-        raw.extend(requirements_txt_deps(&text));
+    for path in discover_manifests(root, "requirements.txt") {
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                let mut visited = HashSet::new();
+                visited.insert(canonical_or_self(&path));
+                raw.extend(requirements_txt_deps(
+                    &text,
+                    &path,
+                    &mut visited,
+                    MAX_REQUIREMENTS_INCLUDE_DEPTH,
+                ));
+            }
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => return Err(DepsError::Read { path, source }),
+        }
     }
 
-    if let Some(text) = read_optional(&root.join("pyproject.toml"))? {
-        raw.extend(pyproject_deps(&text, &root.join("pyproject.toml"))?);
+    for path in discover_manifests(root, "pyproject.toml") {
+        match read_optional(&path) {
+            Ok(Some(text)) => match pyproject_deps(&text, &path) {
+                Ok(found) => raw.extend(found),
+                Err(err) => record_or_fail(err, &path, &mut skipped)?,
+            },
+            Ok(None) => {}
+            Err(err) => record_or_fail(err, &path, &mut skipped)?,
+        }
     }
 
-    if let Some(text) = read_optional(&root.join("poetry.lock"))? {
-        raw.extend(toml_lock_package_names(&text, &root.join("poetry.lock"))?);
+    for path in discover_manifests(root, "poetry.lock") {
+        match read_optional(&path) {
+            Ok(Some(text)) => match toml_lock_package_names(&text, &path) {
+                Ok(found) => raw.extend(found),
+                Err(err) => record_or_fail(err, &path, &mut skipped)?,
+            },
+            Ok(None) => {}
+            Err(err) => record_or_fail(err, &path, &mut skipped)?,
+        }
     }
 
-    if let Some(text) = read_optional(&root.join("uv.lock"))? {
-        raw.extend(toml_lock_package_names(&text, &root.join("uv.lock"))?);
+    for path in discover_manifests(root, "uv.lock") {
+        match read_optional(&path) {
+            Ok(Some(text)) => match toml_lock_package_names(&text, &path) {
+                Ok(found) => raw.extend(found),
+                Err(err) => record_or_fail(err, &path, &mut skipped)?,
+            },
+            Ok(None) => {}
+            Err(err) => record_or_fail(err, &path, &mut skipped)?,
+        }
     }
 
-    Ok(raw.iter().map(|name| normalize_pep503(name)).collect())
+    Ok((
+        raw.iter().map(|name| normalize_pep503(name)).collect(),
+        skipped,
+    ))
+}
+
+fn canonical_or_self(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn read_optional(path: &Path) -> Result<Option<String>, DepsError> {
@@ -64,10 +117,78 @@ pub fn normalize_pep503(name: &str) -> String {
 
 /// Minimal `requirements.txt` line parser: v0.1 only needs the package
 /// **name** (existence/typosquat checks), not full PEP 508 extras/markers —
-/// see 03-RESEARCH.md Alternatives. Skips comments, blank lines, option
-/// lines (`-r`, `-e`, ...), and VCS/URL requirements.
-fn requirements_txt_deps(text: &str) -> Vec<String> {
-    text.lines().filter_map(requirement_line_name).collect()
+/// see 03-RESEARCH.md Alternatives. Skips comments, blank lines, unknown
+/// option lines silently (F8), and VCS/URL/local-path requirements; `-r`/
+/// `--requirement` lines are resolved and recursively parsed (F8, depth-
+/// capped and cycle-safe via `visited`).
+fn requirements_txt_deps(
+    text: &str,
+    path: &Path,
+    visited: &mut HashSet<PathBuf>,
+    depth: usize,
+) -> Vec<String> {
+    let mut names = Vec::new();
+    for raw in text.lines() {
+        if let Some(target) = requirement_include_target(raw) {
+            if depth > 0 {
+                names.extend(resolve_requirement_include(&target, path, visited, depth));
+            }
+            continue;
+        }
+        if let Some(name) = requirement_line_name(raw) {
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// `-r other.txt` / `--requirement other.txt` (optionally `-r=other.txt`) ->
+/// `Some("other.txt")`. Any other `-`-prefixed option line (`-e`, `-c`,
+/// `--index-url`, ...) is not a recursive include and returns `None` —
+/// callers fall through to [`requirement_line_name`], which drops it
+/// silently (F8's "unknown option lines skipped silently"). The suffix
+/// after `-r`/`--requirement` must start with whitespace or `=`, so this
+/// never misfires on an (invalid, but theoretically possible) line like
+/// `-refactor-lib`.
+fn requirement_include_target(raw: &str) -> Option<String> {
+    let line = raw.split('#').next().unwrap_or("").trim();
+    let rest = line
+        .strip_prefix("--requirement")
+        .or_else(|| line.strip_prefix("-r"))?;
+    if rest.is_empty() || !(rest.starts_with('=') || rest.starts_with(char::is_whitespace)) {
+        return None;
+    }
+    let target = rest.trim_start_matches('=').trim();
+    if target.is_empty() {
+        None
+    } else {
+        Some(target.to_owned())
+    }
+}
+
+/// Resolve an `-r`/`--requirement` include relative to the file it was
+/// found in (never relative to `root` — a nested `backend/requirements.txt`
+/// including `./base.txt` means `backend/base.txt`, not `base.txt`) and
+/// recursively extract its declared names. An unreadable include (missing
+/// file, permission error) is skipped silently rather than failing the
+/// whole manifest — a name-existence check must not die on one broken
+/// include line. `visited` guards against include cycles.
+fn resolve_requirement_include(
+    target: &str,
+    from_path: &Path,
+    visited: &mut HashSet<PathBuf>,
+    depth: usize,
+) -> Vec<String> {
+    let base = from_path.parent().unwrap_or_else(|| Path::new("."));
+    let included = base.join(target);
+    let canonical = canonical_or_self(&included);
+    if !visited.insert(canonical) {
+        return Vec::new(); // cycle guard — already visited
+    }
+    let Ok(included_text) = std::fs::read_to_string(&included) else {
+        return Vec::new();
+    };
+    requirements_txt_deps(&included_text, &included, visited, depth - 1)
 }
 
 fn requirement_line_name(raw: &str) -> Option<String> {
@@ -78,11 +199,17 @@ fn requirement_line_name(raw: &str) -> Option<String> {
     if line.starts_with("git+") || line.starts_with("http://") || line.starts_with("https://") {
         return None;
     }
+    // F8: a bare `.` (or `-e .`, already caught by the `-` prefix check
+    // above) is a local-project self-reference, not a package name — it
+    // must yield NO declared name, never the bogus literal `.` (or `-`).
+    if line == "." || line == ".." || line.starts_with("./") || line.starts_with("../") {
+        return None;
+    }
     let end = line
         .find(|c: char| "[=<>!~;".contains(c) || c.is_whitespace())
         .unwrap_or(line.len());
     let name = line[..end].trim();
-    if name.is_empty() {
+    if name.is_empty() || name == "." {
         None
     } else {
         Some(name.to_owned())
@@ -92,6 +219,12 @@ fn requirement_line_name(raw: &str) -> Option<String> {
 /// `pyproject-toml` models PEP 621's `[project.dependencies]` but not
 /// arbitrary `[tool.*]` tables, so Poetry's `[tool.poetry.dependencies]` is
 /// walked separately via the raw TOML document.
+/// A11: beyond `[project.dependencies]`/`[tool.poetry.dependencies]`, also
+/// unions in PEP 621 `[project.optional-dependencies]` (every extras
+/// group), PEP 735 `[dependency-groups]`, `[tool.poetry.group.*.dependencies]`,
+/// and `[tool.poetry.dev-dependencies]` — a project that only imports a
+/// package via `pytest`/`ruff`-style dev/optional groups previously had no
+/// declared entry for it at all, guaranteed `real/phantom-import` FPs.
 fn pyproject_deps(text: &str, path: &Path) -> Result<Vec<String>, DepsError> {
     let parsed =
         pyproject_toml::PyProjectToml::new(text).map_err(|source| DepsError::PyProjectToml {
@@ -108,22 +241,78 @@ fn pyproject_deps(text: &str, path: &Path) -> Result<Vec<String>, DepsError> {
         names.extend(deps.iter().map(|req| req.name.to_string()));
     }
 
+    // PEP 621 optional-dependencies + PEP 735 dependency-groups, resolved
+    // (handles `include-group`/self-referential extras). If resolution
+    // fails (e.g. a self-referential extra without `project.name`, or an
+    // unresolvable `include-group`), still recover the plain string entries
+    // directly rather than losing the whole section — a manifest quirk in
+    // one group must not blank out every other declared name.
+    match parsed.resolve() {
+        Ok(resolved) => {
+            for reqs in resolved.optional_dependencies.values() {
+                names.extend(reqs.iter().map(|req| req.name.to_string()));
+            }
+            for reqs in resolved.dependency_groups.values() {
+                names.extend(reqs.iter().map(|req| req.name.to_string()));
+            }
+        }
+        Err(_) => {
+            if let Some(opt_deps) = parsed
+                .project
+                .as_ref()
+                .and_then(|p| p.optional_dependencies.as_ref())
+            {
+                for reqs in opt_deps.values() {
+                    names.extend(reqs.iter().map(|req| req.name.to_string()));
+                }
+            }
+            if let Some(groups) = parsed.dependency_groups.as_ref() {
+                for specifiers in groups.values() {
+                    for spec in specifiers {
+                        if let pyproject_toml::DependencyGroupSpecifier::String(req) = spec {
+                            names.push(req.name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let raw: toml::Value = toml::from_str(text).map_err(|source| DepsError::Toml {
         path: path.to_path_buf(),
         source: Box::new(source),
     })?;
-    if let Some(poetry_deps) = raw
-        .get("tool")
-        .and_then(|t| t.get("poetry"))
-        .and_then(|p| p.get("dependencies"))
-        .and_then(toml::Value::as_table)
-    {
-        names.extend(
-            poetry_deps
-                .keys()
-                .filter(|name| name.as_str() != "python")
-                .cloned(),
-        );
+    if let Some(poetry) = raw.get("tool").and_then(|t| t.get("poetry")) {
+        if let Some(poetry_deps) = poetry.get("dependencies").and_then(toml::Value::as_table) {
+            names.extend(
+                poetry_deps
+                    .keys()
+                    .filter(|name| name.as_str() != "python")
+                    .cloned(),
+            );
+        }
+        if let Some(dev_deps) = poetry
+            .get("dev-dependencies")
+            .and_then(toml::Value::as_table)
+        {
+            names.extend(
+                dev_deps
+                    .keys()
+                    .filter(|name| name.as_str() != "python")
+                    .cloned(),
+            );
+        }
+        if let Some(groups) = poetry.get("group").and_then(toml::Value::as_table) {
+            for group in groups.values() {
+                if let Some(deps) = group.get("dependencies").and_then(toml::Value::as_table) {
+                    names.extend(
+                        deps.keys()
+                            .filter(|name| name.as_str() != "python")
+                            .cloned(),
+                    );
+                }
+            }
+        }
     }
 
     Ok(names)
@@ -187,7 +376,8 @@ mod tests {
         )
         .unwrap();
 
-        let names = declared_pypi(&dir).unwrap();
+        let (names, skipped) = declared_pypi(&dir).unwrap();
+        assert!(skipped.is_empty());
         assert_eq!(
             names,
             BTreeSet::from(["flask".to_owned(), "requests".to_owned()])
@@ -209,7 +399,8 @@ mod tests {
         )
         .unwrap();
 
-        let names = declared_pypi(&dir).unwrap();
+        let (names, skipped) = declared_pypi(&dir).unwrap();
+        assert!(skipped.is_empty());
         assert_eq!(
             names,
             BTreeSet::from(["requests".to_owned(), "typing-extensions".to_owned()])
@@ -231,7 +422,8 @@ mod tests {
         )
         .unwrap();
 
-        let names = declared_pypi(&dir).unwrap();
+        let (names, skipped) = declared_pypi(&dir).unwrap();
+        assert!(skipped.is_empty());
         assert_eq!(names, BTreeSet::from(["django".to_owned()]));
     }
 
@@ -247,7 +439,8 @@ mod tests {
         )
         .unwrap();
 
-        let names = declared_pypi(&dir).unwrap();
+        let (names, skipped) = declared_pypi(&dir).unwrap();
+        assert!(skipped.is_empty());
         assert_eq!(names, BTreeSet::from(["flask".to_owned()]));
     }
 
@@ -266,7 +459,8 @@ mod tests {
         )
         .unwrap();
 
-        let names = declared_pypi(&dir).unwrap();
+        let (names, skipped) = declared_pypi(&dir).unwrap();
+        assert!(skipped.is_empty());
         assert_eq!(
             names,
             BTreeSet::from(["certifi".to_owned(), "charset-normalizer".to_owned()])
@@ -276,7 +470,8 @@ mod tests {
     #[test]
     fn absent_project_yields_empty_set_not_an_error() {
         let dir = tempdir("empty");
-        let names = declared_pypi(&dir).unwrap();
+        let (names, skipped) = declared_pypi(&dir).unwrap();
+        assert!(skipped.is_empty());
         assert!(names.is_empty());
     }
 }
