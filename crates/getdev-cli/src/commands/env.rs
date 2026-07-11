@@ -1,9 +1,11 @@
 use std::io::IsTerminal;
 use std::path::Path;
 
+use getdev_core::config::Config;
 use getdev_core::env::{self, EnvOptions};
 use getdev_core::findings::{Confidence, Finding, FindingsReport, ProjectInfo, Severity};
 use getdev_core::report::{self, ColorMode};
+use getdev_core::suppress;
 
 pub struct EnvArgs {
     pub path: std::path::PathBuf,
@@ -12,6 +14,8 @@ pub struct EnvArgs {
     pub fail_on: Option<Severity>,
     pub env_file: String,
     pub write: bool,
+    /// Resolved config (B2 audit fix) — `[ignore]`/`[[suppress]]` filtering.
+    pub cfg: Config,
     /// Suppress banner/summary chatter; findings still render (global flag,
     /// docs/PLAN.md §2.2).
     pub quiet: bool,
@@ -33,6 +37,10 @@ pub fn run(args: &EnvArgs) -> anyhow::Result<u8> {
     if env_committed {
         findings.push(env_file_committed_finding(&options.env_file));
     }
+
+    // B2(b): `[ignore] rules`/`paths` and `[[suppress]]` actually filter now.
+    let filter_outcome = suppress::filter_findings(findings, &args.cfg);
+    let findings = filter_outcome.kept;
 
     let applied = if args.write && !plan.entries.is_empty() {
         Some(env::apply(&args.path, &plan, &options)?)
@@ -100,6 +108,27 @@ pub fn run(args: &EnvArgs) -> anyhow::Result<u8> {
                 println!(
                     "{} unreadable file(s) skipped (-v for details)",
                     plan.skipped.len()
+                );
+            }
+        }
+        if !filter_outcome.suppressed.is_empty() {
+            if args.verbose > 0 {
+                println!(
+                    "{} finding(s) suppressed by config:",
+                    filter_outcome.suppressed.len()
+                );
+                for s in &filter_outcome.suppressed {
+                    println!(
+                        "  - {} {} — {}",
+                        s.finding.id,
+                        s.finding.file,
+                        s.reason.describe()
+                    );
+                }
+            } else if !args.quiet {
+                println!(
+                    "{} finding(s) suppressed by config (-v for details)",
+                    filter_outcome.suppressed.len()
                 );
             }
         }

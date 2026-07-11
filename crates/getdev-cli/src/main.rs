@@ -101,9 +101,9 @@ fn parse_fail_on(raw: &str) -> Result<Severity, String> {
 enum Command {
     /// Extract hardcoded secrets to .env (dry-run by default)
     Env {
-        /// Target env file
-        #[arg(long, default_value = ".env", value_name = "PATH")]
-        env_file: String,
+        /// Target env file (default: `[env] env_file` in config, else ".env")
+        #[arg(long, value_name = "PATH")]
+        env_file: Option<String>,
         /// Apply the plan: write the env files and rewrite references
         #[arg(long)]
         write: bool,
@@ -190,16 +190,35 @@ fn run(cli: Cli) -> anyhow::Result<u8> {
         // findings are all `fixable: true`, and docs/SPEC-COMMANDS.md's
         // "--fix on check maps to this" implies the same for the bare
         // command. Previously `--fix` silently did nothing here.
-        Command::Env { env_file, write } => commands::env::run(&commands::env::EnvArgs {
-            path,
-            json,
-            no_color,
-            fail_on,
-            env_file,
-            write: write || cli.global.fix,
-            quiet,
-            verbose,
-        }),
+        Command::Env { env_file, write } => {
+            // B2(a): `[env] env_file` feeds EnvOptions when `--env-file`
+            // wasn't explicitly passed — the flag stays `Option<String>`
+            // (no `default_value`) specifically so "unset" is distinguishable
+            // from "user passed .env", which a `value_source` lookup would
+            // otherwise be needed for.
+            let env_file = env_file.unwrap_or_else(|| cfg.env.env_file.clone());
+            // B2(c): `[env] include_urls` is a documented-but-unimplemented
+            // key (docs/SPEC-CONFIG.md carries it forward for a later
+            // phase) — warn rather than silently ignore or half-build URL
+            // detection.
+            if cfg.env.include_urls {
+                eprintln!(
+                    "warning: [env] include_urls is set in config but not yet implemented \
+                     (docs/SPEC-CONFIG.md) — no URLs/connection strings will be detected"
+                );
+            }
+            commands::env::run(&commands::env::EnvArgs {
+                path,
+                json,
+                no_color,
+                fail_on,
+                env_file,
+                write: write || cli.global.fix,
+                cfg: cfg.clone(),
+                quiet,
+                verbose,
+            })
+        }
         Command::Real {
             deps_only,
             apis_only,
@@ -213,6 +232,9 @@ fn run(cli: Cli) -> anyhow::Result<u8> {
             deps_only,
             apis_only,
             models_only,
+            check_apis: cfg.real.check_apis,
+            typosquat_sensitivity: cfg.real.typosquat_sensitivity.clone(),
+            cfg: cfg.clone(),
             quiet,
             verbose,
         }),

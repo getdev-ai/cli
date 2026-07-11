@@ -153,6 +153,72 @@ fn models_only_scopes_the_run_to_model_findings() {
     assert_eq!(before, after, "getdev real must never mutate the project");
 }
 
+/// B2(c): `[real] check_apis = false` skips the apis group for the default
+/// (no `--*-only`) scope — the same fixture as
+/// `apis_only_resolves_a_venv_layout_site_packages` would normally produce a
+/// `real/nonexistent-api` finding for `typed_pkg.fake_fn()`; with
+/// `check_apis = false` in config, it must not appear.
+#[test]
+fn check_apis_false_in_config_skips_the_apis_group() {
+    let dir = tmp_dir("check-apis-false");
+    std::fs::write(dir.join("requirements.txt"), "typed_pkg==1.0.0\n").unwrap();
+    std::fs::write(
+        dir.join("main.py"),
+        "import typed_pkg\n\ntyped_pkg.real_fn()\ntyped_pkg.fake_fn()\n",
+    )
+    .unwrap();
+    let site_packages = dir
+        .join(".venv")
+        .join("lib")
+        .join("python3.12")
+        .join("site-packages");
+    let pkg_dir = site_packages.join("typed_pkg");
+    std::fs::create_dir_all(&pkg_dir).unwrap();
+    std::fs::write(
+        pkg_dir.join("__init__.py"),
+        "__all__ = [\"real_fn\"]\n\ndef real_fn():\n    pass\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join(".getdev.toml"), "[real]\ncheck_apis = false\n").unwrap();
+
+    let assert = getdev()
+        .current_dir(&dir)
+        .env("GETDEV_OFFLINE", "1")
+        .env("GETDEV_CACHE_DIR", dir.join("cache"))
+        .arg("real")
+        .arg("--offline")
+        .arg("--json")
+        .assert();
+
+    let output = assert.get_output();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let report: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|err| panic!("stdout was not valid JSON ({err}): {stdout}"));
+    let findings = report["findings"].as_array().unwrap();
+    assert!(
+        findings.iter().all(|f| f["id"] != "real/nonexistent-api"),
+        "check_apis = false must skip the apis group entirely, got: {stdout}"
+    );
+
+    // Sanity: an explicit --apis-only still overrides config (flags > config).
+    let assert = getdev()
+        .current_dir(&dir)
+        .env("GETDEV_OFFLINE", "1")
+        .env("GETDEV_CACHE_DIR", dir.join("cache"))
+        .arg("real")
+        .arg("--apis-only")
+        .arg("--offline")
+        .arg("--json")
+        .assert();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let findings = report["findings"].as_array().unwrap();
+    assert!(
+        findings.iter().any(|f| f["id"] == "real/nonexistent-api"),
+        "--apis-only must override check_apis = false, got: {stdout}"
+    );
+}
+
 /// A1 — venv discovery: `getdev real` must resolve a real
 /// `.venv/lib/pythonX.Y/site-packages` layout (the overwhelming majority of
 /// real Python projects), not the fictional literal `<root>/site-packages`.

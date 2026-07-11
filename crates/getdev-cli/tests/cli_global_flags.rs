@@ -233,6 +233,119 @@ fn env_fix_flag_writes_exactly_like_write_flag() {
     assert!(env_file.contains("STRIPE_SECRET_KEY"));
 }
 
+/// B2(a): `[env] env_file` feeds `EnvOptions` when `--env-file` wasn't
+/// explicitly passed.
+#[test]
+fn env_file_from_config_is_honored_when_flag_is_absent() {
+    let dir = tmp_dir("env-file-from-config");
+    std::fs::write(
+        dir.join("pay.js"),
+        "const stripeKey = \"sk_live_FAKEFAKEFAKE1234\";\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join(".getdev.toml"),
+        "[env]\nenv_file = \"secrets.env\"\n",
+    )
+    .unwrap();
+
+    getdev()
+        .current_dir(&dir)
+        .arg("env")
+        .arg("--write")
+        .assert()
+        .success();
+
+    assert!(
+        dir.join("secrets.env").exists(),
+        "expected [env] env_file = \"secrets.env\" from config to be honored"
+    );
+    assert!(
+        !dir.join(".env").exists(),
+        "the default .env must not be written when config names a different file"
+    );
+}
+
+/// B2(a): an explicit `--env-file` flag still overrides config (flags >
+/// config, docs/SPEC-CONFIG.md precedence).
+#[test]
+fn env_file_flag_overrides_config() {
+    let dir = tmp_dir("env-file-flag-overrides-config");
+    std::fs::write(
+        dir.join("pay.js"),
+        "const stripeKey = \"sk_live_FAKEFAKEFAKE1234\";\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join(".getdev.toml"),
+        "[env]\nenv_file = \"secrets.env\"\n",
+    )
+    .unwrap();
+
+    getdev()
+        .current_dir(&dir)
+        .arg("env")
+        .arg("--write")
+        .arg("--env-file")
+        .arg("from-flag.env")
+        .assert()
+        .success();
+
+    assert!(dir.join("from-flag.env").exists());
+    assert!(!dir.join("secrets.env").exists());
+}
+
+/// B2(b): `[ignore] rules` actually drops matching findings now.
+#[test]
+fn ignore_rules_in_config_drops_matching_findings() {
+    let dir = tmp_dir("ignore-rules");
+    std::fs::write(
+        dir.join("pay.js"),
+        "const stripeKey = \"sk_live_FAKEFAKEFAKE1234\";\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join(".getdev.toml"),
+        "[ignore]\nrules = [\"env/hardcoded-secret\"]\n",
+    )
+    .unwrap();
+
+    let assert = getdev().current_dir(&dir).arg("env").arg("--json").assert();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let findings = report["findings"].as_array().unwrap();
+    assert!(
+        findings.iter().all(|f| f["id"] != "env/hardcoded-secret"),
+        "[ignore] rules must drop matching findings, got: {stdout}"
+    );
+}
+
+/// B2(b): `[ignore] paths` prefix-matches and drops findings under it.
+#[test]
+fn ignore_paths_in_config_drops_findings_under_the_prefix() {
+    let dir = tmp_dir("ignore-paths");
+    std::fs::create_dir_all(dir.join("vendor")).unwrap();
+    std::fs::write(
+        dir.join("vendor").join("lib.js"),
+        "const stripeKey = \"sk_live_FAKEFAKEFAKE1234\";\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join(".getdev.toml"),
+        "[ignore]\npaths = [\"vendor/\"]\n",
+    )
+    .unwrap();
+
+    let assert = getdev().current_dir(&dir).arg("env").arg("--json").assert();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let findings = report["findings"].as_array().unwrap();
+    assert!(
+        findings.is_empty(),
+        "[ignore] paths = [\"vendor/\"] must drop the only finding, got: {stdout}"
+    );
+}
+
 /// B4: `--fail-on` still accepts every value the spec allows.
 #[test]
 fn fail_on_accepts_every_contractual_severity() {

@@ -377,10 +377,37 @@ impl RegistryClient {
         eco: Ecosystem,
         name: &str,
     ) -> Result<RegistryVerdict, RegistryError> {
+        self.verify_full_with_sensitivity(
+            cache,
+            datasets,
+            eco,
+            name,
+            crate::typosquat::Sensitivity::Normal,
+        )
+    }
+
+    /// `verify_full`, but with `[real].typosquat_sensitivity` pass-through
+    /// (B2 audit fix — the config key existed but nothing read it).
+    pub fn verify_full_with_sensitivity(
+        &self,
+        cache: &crate::cache::Cache,
+        datasets: &crate::typosquat::Datasets,
+        eco: Ecosystem,
+        name: &str,
+        sensitivity: crate::typosquat::Sensitivity,
+    ) -> Result<RegistryVerdict, RegistryError> {
         let existence = self.verify(cache, eco, name)?;
         let (downloads, created_at) = self.cached_metadata(cache, eco, name)?;
         let now = now_unix();
-        let typosquat = crate::typosquat::score(datasets, eco, name, downloads, created_at, now);
+        let typosquat = crate::typosquat::score_with_sensitivity(
+            datasets,
+            eco,
+            name,
+            downloads,
+            created_at,
+            now,
+            sensitivity,
+        );
         Ok(RegistryVerdict {
             existence,
             downloads,

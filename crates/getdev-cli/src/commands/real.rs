@@ -13,15 +13,17 @@ use std::path::Path;
 use rayon::prelude::*;
 
 use getdev_core::apisurface::{self, ApiResult};
+use getdev_core::config::Config;
 use getdev_core::deps::{self, DependencyGraph, Ecosystem as CoreEco};
 use getdev_core::findings::{Finding, FindingsReport, ProjectInfo, Severity};
 use getdev_core::models::ModelMatcher;
 use getdev_core::real::{self, ExistenceLite, PackageVerdictInput, RealScope, TyposquatLite};
 use getdev_core::report::{self, ColorMode};
 use getdev_core::scan;
+use getdev_core::suppress;
 use getdev_registry::{
-    Cache, Datasets, Ecosystem as RegEco, Existence, RegistryClient, RegistryVerdict, TyposquatHit,
-    TyposquatReason,
+    Cache, Datasets, Ecosystem as RegEco, Existence, RegistryClient, RegistryVerdict, Sensitivity,
+    TyposquatHit, TyposquatReason,
 };
 
 pub struct RealArgs {
@@ -35,6 +37,16 @@ pub struct RealArgs {
     pub deps_only: bool,
     pub apis_only: bool,
     pub models_only: bool,
+    /// `[real].check_apis` (B2 audit fix) — when `false`, the apis group is
+    /// skipped for the default (no `--*-only`) scope. `--apis-only`
+    /// overrides this (an explicit flag beats config, per
+    /// docs/SPEC-CONFIG.md's flags > config precedence).
+    pub check_apis: bool,
+    /// `[real].typosquat_sensitivity` (B2 audit fix) — "strict" | "normal" |
+    /// "off", parsed by `getdev_registry::typosquat::Sensitivity::parse`.
+    pub typosquat_sensitivity: String,
+    /// Resolved config (B2 audit fix) — `[ignore]`/`[[suppress]]` filtering.
+    pub cfg: Config,
     /// Suppress banner/summary chatter; findings still render (global flag).
     pub quiet: bool,
     /// Debug-level detail, repeatable (global flag) — shows per-file skip
@@ -71,6 +83,14 @@ pub fn run(args: &RealArgs) -> anyhow::Result<u8> {
     } else {
         RealScope::default()
     };
+    // B2: `[real].check_apis = false` skips the apis group for the default
+    // scope; an explicit `--apis-only` still wins (flags > config,
+    // docs/SPEC-CONFIG.md precedence).
+    let scope = RealScope {
+        apis: scope.apis && (args.check_apis || args.apis_only),
+        ..scope
+    };
+    let sensitivity = Sensitivity::parse(&args.typosquat_sensitivity);
 
     // The dependency graph is always computed once — `apis` needs its
     // declared sets to know which ecosystem a used package belongs to, and
@@ -81,7 +101,7 @@ pub fn run(args: &RealArgs) -> anyhow::Result<u8> {
     let mut findings = Vec::new();
 
     if scope.deps {
-        run_deps_group(&graph, args.offline, &mut findings)?;
+        run_deps_group(&graph, args.offline, sensitivity, &mut findings)?;
     }
     if scope.apis {
         let apis_skipped = run_apis_group(&graph, &args.path, &mut findings)?;
@@ -94,6 +114,10 @@ pub fn run(args: &RealArgs) -> anyhow::Result<u8> {
     if let Some(hint) = &graph.unsupported_stack {
         findings.push(real::unsupported_stack_finding(hint));
     }
+
+    // B2(b): `[ignore] rules`/`paths` and `[[suppress]]` actually filter now.
+    let filter_outcome = suppress::filter_findings(findings, &args.cfg);
+    let findings = filter_outcome.kept;
 
     let report = FindingsReport::new(
         env!("CARGO_PKG_VERSION"),
@@ -122,6 +146,27 @@ pub fn run(args: &RealArgs) -> anyhow::Result<u8> {
                 );
             }
         }
+        if !filter_outcome.suppressed.is_empty() {
+            if args.verbose > 0 {
+                println!(
+                    "{} finding(s) suppressed by config:",
+                    filter_outcome.suppressed.len()
+                );
+                for s in &filter_outcome.suppressed {
+                    println!(
+                        "  - {} {} — {}",
+                        s.finding.id,
+                        s.finding.file,
+                        s.reason.describe()
+                    );
+                }
+            } else if !args.quiet {
+                println!(
+                    "{} finding(s) suppressed by config (-v for details)",
+                    filter_outcome.suppressed.len()
+                );
+            }
+        }
     }
 
     let failed = args
@@ -137,6 +182,7 @@ pub fn run(args: &RealArgs) -> anyhow::Result<u8> {
 fn run_deps_group(
     graph: &DependencyGraph,
     offline: bool,
+    sensitivity: Sensitivity,
     findings: &mut Vec<Finding>,
 ) -> anyhow::Result<()> {
     let cache = Cache::open()?;
@@ -178,7 +224,13 @@ fn run_deps_group(
         .par_iter()
         .map(|(eco, name)| {
             let verdict = client
-                .verify_full(&cache, &datasets, to_registry_eco(*eco), name)
+                .verify_full_with_sensitivity(
+                    &cache,
+                    &datasets,
+                    to_registry_eco(*eco),
+                    name,
+                    sensitivity,
+                )
                 .unwrap_or(RegistryVerdict {
                     existence: Existence::Inconclusive,
                     downloads: None,

@@ -14,3 +14,4 @@ pub mod real;
 pub mod report;
 pub mod scan;
 pub mod secrets;
+pub mod suppress;

@@ -16,4 +16,4 @@ pub use client::{
     encode_scoped, normalize_pep503, resolve_offline, Ecosystem, Existence, FetchOutcome, Fetcher,
     RegistryClient, RegistryError, RegistryVerdict,
 };
-pub use typosquat::{DatasetError, Datasets, TyposquatHit, TyposquatReason};
+pub use typosquat::{DatasetError, Datasets, Sensitivity, TyposquatHit, TyposquatReason};

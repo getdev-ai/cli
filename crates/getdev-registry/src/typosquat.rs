@@ -100,9 +100,44 @@ impl Datasets {
     }
 }
 
+/// `[real].typosquat_sensitivity` (docs/SPEC-CONFIG.md: `"strict" | "normal"
+/// | "off"`) — B2 audit fix: the config key existed but nothing read it.
+/// `Off` skips the typosquat check entirely (never returns a hit); `Strict`
+/// widens the near-name distance threshold to catch more lookalikes at the
+/// cost of more false positives; `Normal` is the existing/default behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sensitivity {
+    Strict,
+    Normal,
+    Off,
+}
+
+impl Sensitivity {
+    /// Unrecognized strings fall back to `Normal` — validating the config
+    /// value itself is not this fix's scope; a typo here degrades
+    /// gracefully to the pre-existing behavior rather than erroring.
+    #[must_use]
+    pub fn parse(raw: &str) -> Self {
+        match raw {
+            "strict" => Self::Strict,
+            "off" => Self::Off,
+            _ => Self::Normal,
+        }
+    }
+
+    fn near_name_max_distance(self) -> usize {
+        match self {
+            Self::Strict => NEAR_NAME_MAX_DISTANCE + 1,
+            Self::Normal => NEAR_NAME_MAX_DISTANCE,
+            Self::Off => 0,
+        }
+    }
+}
+
 /// Scores one package name against the embedded dataset plus its own
-/// registry-derived downloads/creation-date. Returns `None` when no reason
-/// fires (the common case — most dependencies are legitimate).
+/// registry-derived downloads/creation-date, at the default (`Normal`)
+/// sensitivity. Returns `None` when no reason fires (the common case — most
+/// dependencies are legitimate).
 pub fn score(
     datasets: &Datasets,
     eco: Ecosystem,
@@ -111,6 +146,32 @@ pub fn score(
     created_at: Option<i64>,
     now: i64,
 ) -> Option<TyposquatHit> {
+    score_with_sensitivity(
+        datasets,
+        eco,
+        name,
+        downloads,
+        created_at,
+        now,
+        Sensitivity::Normal,
+    )
+}
+
+/// `score`, but with `[real].typosquat_sensitivity` pass-through (B2).
+#[allow(clippy::too_many_arguments)]
+pub fn score_with_sensitivity(
+    datasets: &Datasets,
+    eco: Ecosystem,
+    name: &str,
+    downloads: Option<u64>,
+    created_at: Option<i64>,
+    now: i64,
+    sensitivity: Sensitivity,
+) -> Option<TyposquatHit> {
+    if sensitivity == Sensitivity::Off {
+        return None;
+    }
+
     let candidates = datasets.for_ecosystem(eco);
     let mut reasons = Vec::new();
     let mut nearest = String::new();
@@ -125,7 +186,7 @@ pub fn score(
                 nearest.clone_from(candidate);
             }
         }
-        if (1..=NEAR_NAME_MAX_DISTANCE).contains(&nearest_distance) {
+        if (1..=sensitivity.near_name_max_distance()).contains(&nearest_distance) {
             reasons.push(TyposquatReason::NearName);
         }
     }
