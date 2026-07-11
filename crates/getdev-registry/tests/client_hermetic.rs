@@ -8,10 +8,23 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use std::path::PathBuf;
+
 use getdev_registry::{
-    encode_scoped, normalize_pep503, Ecosystem, Existence, FetchOutcome, Fetcher, RegistryClient,
-    RegistryError,
+    encode_scoped, normalize_pep503, Cache, Datasets, Ecosystem, Existence, FetchOutcome, Fetcher,
+    RegistryClient, RegistryError,
 };
+
+fn temp_dir(label: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "getdev-registry-client-hermetic-it-{label}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ))
+}
 
 enum Canned {
     Status(u16, &'static str),
@@ -171,4 +184,61 @@ fn offline_client_makes_zero_fetcher_calls() {
 fn scoped_encoding_and_pep503_normalization() {
     assert_eq!(encode_scoped("@babel/core"), "@babel%2fcore");
     assert_eq!(normalize_pep503("Typing_Extensions"), "typing-extensions");
+}
+
+// --- E6: skip metadata fetches for a Missing/Inconclusive package --------
+
+#[test]
+fn verify_full_skips_metadata_fetches_for_a_missing_package() {
+    // Only ONE canned response: the existence 404. If `verify_full` still
+    // fetched npm downloads/full-doc for a Missing package (the pre-E6
+    // behavior), the RecordingFetcher's queue would be exhausted and panic.
+    let (fetcher, calls) = RecordingFetcher::new(vec![Canned::Status(404, "")]);
+    let client = RegistryClient::with_fetcher(Box::new(fetcher), false);
+    let cache = Cache::open_at(&temp_dir("e6-missing")).unwrap();
+    let datasets = Datasets::embedded().unwrap();
+
+    let verdict = client
+        .verify_full(
+            &cache,
+            &datasets,
+            Ecosystem::Npm,
+            "this-package-does-not-exist-xyz",
+        )
+        .unwrap();
+    assert_eq!(verdict.existence, Existence::Missing);
+    assert_eq!(verdict.downloads, None);
+    assert_eq!(verdict.created_at, None);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "E6: metadata must not be fetched for a Missing package"
+    );
+}
+
+#[test]
+fn verify_full_skips_metadata_fetches_for_an_inconclusive_package() {
+    // 3 canned 500s exhaust existence's own retries (Inconclusive); if
+    // `verify_full` still went on to fetch metadata, the queue would be
+    // exhausted and the RecordingFetcher would panic.
+    let (fetcher, calls) = RecordingFetcher::new(vec![
+        Canned::Status(500, ""),
+        Canned::Status(500, ""),
+        Canned::Status(500, ""),
+    ]);
+    let client = RegistryClient::with_fetcher(Box::new(fetcher), false);
+    let cache = Cache::open_at(&temp_dir("e6-inconclusive")).unwrap();
+    let datasets = Datasets::embedded().unwrap();
+
+    let verdict = client
+        .verify_full(&cache, &datasets, Ecosystem::Npm, "left-pad")
+        .unwrap();
+    assert_eq!(verdict.existence, Existence::Inconclusive);
+    assert_eq!(verdict.downloads, None);
+    assert_eq!(verdict.created_at, None);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        3,
+        "E6: metadata must not be fetched for an Inconclusive package"
+    );
 }

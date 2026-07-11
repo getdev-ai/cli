@@ -169,10 +169,25 @@ pub fn resolve_offline(flag: bool) -> bool {
     flag || std::env::var_os("GETDEV_OFFLINE").is_some()
 }
 
-/// npm scoped packages (`@scope/name`) contain a literal `/`; encode it
-/// defensively (03-RESEARCH.md Pattern 2).
+/// Percent-encodes `name` for safe inclusion as a single URL path segment.
+/// E4: the whole name is encoded (a query/fragment-inclusive allow-list —
+/// only RFC 3986 unreserved characters plus `@` for npm scopes pass
+/// through unencoded), not just the scoped `/` the old implementation
+/// special-cased. A name containing `?`/`#` previously truncated the
+/// request path silently instead of being treated as a literal (untrusted)
+/// package name; every non-allow-listed byte, including `/`, `?`, and `#`,
+/// is now percent-encoded.
 pub fn encode_scoped(name: &str) -> String {
-    name.replacen('/', "%2f", 1)
+    let mut out = String::with_capacity(name.len());
+    for byte in name.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'@' => {
+                out.push(byte as char);
+            }
+            other => out.push_str(&format!("%{other:02x}")),
+        }
+    }
+    out
 }
 
 /// PEP 503 normalization: lowercase; runs of `-`/`_`/`.` collapse to one
@@ -195,10 +210,32 @@ pub fn normalize_pep503(name: &str) -> String {
     out
 }
 
+/// E2: self-normalizes the incoming name for PyPI (PEP 503) before it is
+/// used as a cache key or dataset-lookup key — `verify`/`cached_metadata`
+/// each call this at their own entry point so the crate enforces its own
+/// documented invariant (`Django`/`django`/`DJANGO` share one cache row)
+/// instead of trusting every caller to have already normalized. npm names
+/// pass through unchanged — already canonical, and PEP 503's rules don't
+/// apply to them.
+fn self_normalize(eco: Ecosystem, name: &str) -> String {
+    match eco {
+        Ecosystem::Npm => name.to_owned(),
+        Ecosystem::Pypi => normalize_pep503(name),
+    }
+}
+
 fn existence_url(eco: Ecosystem, name: &str) -> String {
     match eco {
         Ecosystem::Npm => format!("https://registry.npmjs.org/{}", encode_scoped(name)),
-        Ecosystem::Pypi => format!("https://pypi.org/pypi/{}/json", normalize_pep503(name)),
+        // E4: PEP 503-normalize first, then percent-encode the result — a
+        // name containing `?`/`#` after normalization (normalization only
+        // touches case/`-_.` separators) must still land in the URL as a
+        // literal, encoded path segment rather than truncating/redirecting
+        // the request.
+        Ecosystem::Pypi => format!(
+            "https://pypi.org/pypi/{}/json",
+            encode_scoped(&normalize_pep503(name))
+        ),
     }
 }
 
@@ -220,21 +257,39 @@ fn parse_json<T: serde::de::DeserializeOwned>(url: &str, body: &[u8]) -> Result<
 }
 
 pub struct RegistryClient {
-    fetcher: Box<dyn Fetcher>,
+    /// `None` only when constructed offline via [`RegistryClient::new`] (E3)
+    /// — every offline call path is gated before ever reaching
+    /// [`RegistryClient::get_with_retry`], so this is never dereferenced
+    /// while `offline` is `true`. `with_fetcher` (the test seam) always
+    /// stores `Some`, matching its pre-E3 behavior exactly.
+    fetcher: Option<Box<dyn Fetcher>>,
     offline: bool,
 }
 
 impl RegistryClient {
-    /// Build a client backed by the real network [`ReqwestFetcher`].
+    /// Build a client backed by the real network [`ReqwestFetcher`] — unless
+    /// `offline` resolves `true`, in which case NO [`ReqwestFetcher`] (and
+    /// therefore no `reqwest::blocking::Client`/TLS setup) is constructed at
+    /// all (E3): an offline run has no use for it, and every offline call
+    /// path was already gated before ever reaching the fetcher.
     pub fn new(offline: bool) -> Result<Self, RegistryError> {
-        let fetcher = Box::new(ReqwestFetcher::new()?);
-        Ok(Self::with_fetcher(fetcher, offline))
+        let offline = resolve_offline(offline);
+        let fetcher = if offline {
+            None
+        } else {
+            Some(Box::new(ReqwestFetcher::new()?) as Box<dyn Fetcher>)
+        };
+        Ok(Self { fetcher, offline })
     }
 
     /// Build a client over an injected [`Fetcher`] — the hermetic-test seam.
+    /// Always stores `Some(fetcher)` regardless of `offline`, so tests can
+    /// assert an offline client never *calls* the injected fetcher (see
+    /// `tests/offline_hermetic.rs`'s `PanicFetcher`) without needing `new`'s
+    /// no-construction behavior.
     pub fn with_fetcher(fetcher: Box<dyn Fetcher>, offline: bool) -> Self {
         Self {
-            fetcher,
+            fetcher: Some(fetcher),
             offline: resolve_offline(offline),
         }
     }
@@ -251,9 +306,19 @@ impl RegistryClient {
         url: &str,
         accept: Option<&str>,
     ) -> Result<FetchOutcome, RegistryError> {
+        // E3: defensive fallback — every call site gates on `self.offline`
+        // before reaching here, so `fetcher` is always `Some` in practice;
+        // this returns the same `Offline` error the gated call sites would
+        // have returned rather than panicking, should that invariant ever
+        // slip.
+        let Some(fetcher) = self.fetcher.as_deref() else {
+            return Err(RegistryError::Offline {
+                url: url.to_owned(),
+            });
+        };
         let mut last_err: Option<RegistryError> = None;
         for attempt in 1..=MAX_ATTEMPTS {
-            match self.fetcher.get(url, accept) {
+            match fetcher.get(url, accept) {
                 Ok(outcome) => {
                     if (500..=599).contains(&outcome.status) && attempt < MAX_ATTEMPTS {
                         std::thread::sleep(backoff(attempt));
@@ -356,6 +421,9 @@ impl RegistryClient {
         eco: Ecosystem,
         name: &str,
     ) -> Result<Existence, RegistryError> {
+        // E2: self-normalize before the cache key is built — see
+        // `self_normalize`'s doc-comment.
+        let name = &self_normalize(eco, name);
         if let Some(existence) = cache.get_existence(eco, name)? {
             return Ok(existence);
         }
@@ -397,7 +465,16 @@ impl RegistryClient {
         sensitivity: crate::typosquat::Sensitivity,
     ) -> Result<RegistryVerdict, RegistryError> {
         let existence = self.verify(cache, eco, name)?;
-        let (downloads, created_at) = self.cached_metadata(cache, eco, name)?;
+        // E6: a Missing/Inconclusive package gets no downloads/full-doc
+        // fetch — there's nothing useful to fetch for a package that either
+        // doesn't exist or whose existence couldn't even be confirmed, and
+        // fetching anyway wastes a request (and, for npm, two: downloads +
+        // full-doc).
+        let (downloads, created_at) = if existence == Existence::Found {
+            self.cached_metadata(cache, eco, name)?
+        } else {
+            (None, None)
+        };
         let now = now_unix();
         let typosquat = crate::typosquat::score_with_sensitivity(
             datasets,
@@ -422,6 +499,9 @@ impl RegistryClient {
         eco: Ecosystem,
         name: &str,
     ) -> Result<crate::cache::Metadata, RegistryError> {
+        // E2: self-normalize before the cache key is built — see
+        // `self_normalize`'s doc-comment.
+        let name = &self_normalize(eco, name);
         if let Some(cached) = cache.get_metadata(eco, name)? {
             return Ok(cached);
         }
@@ -524,5 +604,85 @@ mod tests {
         // docs/TESTING.md, not via `std::env::set_var` in test code, which
         // is `unsafe` as of this toolchain and this crate forbids
         // `unsafe_code` workspace-wide (DEC-11).
+    }
+
+    // --- E4: full-name percent-encoding ---------------------------------
+
+    #[test]
+    fn full_name_percent_encoding_covers_query_and_fragment_chars() {
+        // A `?`/`#` in a name must never reach the built URL as a literal —
+        // the old scoped-slash-only `encode_scoped` silently truncated the
+        // request path at the first of either.
+        assert_eq!(encode_scoped("evil?x=1#y"), "evil%3fx%3d1%23y");
+
+        let npm_url = existence_url(Ecosystem::Npm, "evil?x=1#y");
+        assert!(npm_url.contains("%3f"), "expected encoded '?': {npm_url}");
+        assert!(npm_url.contains("%23"), "expected encoded '#': {npm_url}");
+        assert!(!npm_url.contains('?'), "raw '?' leaked into: {npm_url}");
+        assert!(!npm_url.contains('#'), "raw '#' leaked into: {npm_url}");
+
+        let pypi_url = existence_url(Ecosystem::Pypi, "evil?x=1#y");
+        assert!(pypi_url.contains("%3f"), "expected encoded '?': {pypi_url}");
+        assert!(pypi_url.contains("%23"), "expected encoded '#': {pypi_url}");
+        assert!(!pypi_url.contains('?'), "raw '?' leaked into: {pypi_url}");
+        assert!(!pypi_url.contains('#'), "raw '#' leaked into: {pypi_url}");
+    }
+
+    // --- E2: self-normalization ------------------------------------------
+
+    fn temp_cache_dir(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "getdev-registry-client-test-{label}-{}-{}",
+            std::process::id(),
+            now_unix()
+        ))
+    }
+
+    #[test]
+    fn verify_self_normalizes_pypi_name_so_case_variants_share_one_cache_row() {
+        let cache = crate::cache::Cache::open_at(&temp_cache_dir("pep503-cache-key")).unwrap();
+        // Seed the cache under the normalized key only, exactly as a prior
+        // `verify` call for the canonical spelling would have.
+        cache
+            .put_existence(Ecosystem::Pypi, "django", Existence::Found)
+            .unwrap();
+
+        let client = RegistryClient::with_fetcher(
+            Box::new(NeverCalledFetcher),
+            true, // offline: a cache hit must short-circuit before this matters
+        );
+
+        // Without E2's self-normalization, "Django" would miss the
+        // "django"-keyed cache row and fall through to (offline)
+        // Inconclusive instead of the cached Found.
+        assert_eq!(
+            client.verify(&cache, Ecosystem::Pypi, "Django").unwrap(),
+            Existence::Found
+        );
+    }
+
+    struct NeverCalledFetcher;
+    impl Fetcher for NeverCalledFetcher {
+        fn get(&self, url: &str, _accept: Option<&str>) -> Result<FetchOutcome, RegistryError> {
+            panic!("must never be called: {url}");
+        }
+    }
+
+    // --- E3: offline construction builds no fetcher -----------------------
+
+    #[test]
+    fn new_offline_succeeds_and_stays_cache_only() {
+        // Proves `RegistryClient::new(true)` works with no live network/TLS
+        // dependency having been initialized: construction succeeds, and a
+        // cache-miss `verify` under offline resolves Inconclusive (never
+        // fabricated as Missing) without needing a `Fetcher` at all.
+        let client = RegistryClient::new(true).unwrap();
+        assert!(client.is_offline());
+
+        let cache = crate::cache::Cache::open_at(&temp_cache_dir("new-offline")).unwrap();
+        let existence = client
+            .verify(&cache, Ecosystem::Npm, "never-cached-before-xyz")
+            .unwrap();
+        assert_eq!(existence, Existence::Inconclusive);
     }
 }
