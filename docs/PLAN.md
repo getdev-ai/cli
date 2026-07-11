@@ -69,6 +69,7 @@ These scopes are contractual. Text is carried over essentially verbatim from the
 | `real/nonexistent-api` | Attribute/method call not present in the installed version's public surface |
 | `real/version-mismatch-api` | API exists in another major version of the installed package but not the installed one |
 | `real/unknown-model-string` | LLM model identifier not in the known-models dataset (Anthropic/OpenAI/Google/Mistral/etc.) |
+| `real/unsupported-stack` | Project stack outside JS/TS/Python (REQ-language-support) — an explicit `info` finding instead of silent partial/empty results (sanctioned F1, mandated by the 03-05 must-have; shipped Phase 3) |
 
 **Mechanics:**
 - Dependency graph from manifest (`package.json`, `requirements.txt`, `pyproject.toml`, lockfiles) **plus** actual imports found by AST walk (agents often import without declaring).
@@ -84,7 +85,7 @@ These scopes are contractual. Text is carried over essentially verbatim from the
 
 | Category | Rules |
 |---|---|
-| Secrets | `hardcoded-secret` (provider-specific regexes: AWS, Stripe, OpenAI, Anthropic, GitHub, Supabase, etc. + Shannon-entropy fallback), `env-file-committed`, `secret-in-git-history` (HEAD-adjacent only in v0.1) |
+| Secrets | `hardcoded-secret` (provider-specific regexes: AWS, Stripe, OpenAI, Anthropic, GitHub, Supabase, etc. + Shannon-entropy fallback), `secret-in-git-history` (HEAD-adjacent only in v0.1) — `env-file-committed` is NOT an `audit/` rule; it's implemented (and owned) by `getdev env`, see that section below (sanctioned F1) |
 | Injection | `sql-string-concat`, `eval-user-input`, `exec-user-input`, `shell-interpolation` |
 | Web config | `cors-wildcard`, `debug-mode-enabled`, `cookie-insecure`, `missing-auth-middleware` (framework-aware: Express, FastAPI, Flask, Next.js API routes) |
 | Client/server | `client-only-validation` (form handlers with no matching server check — heuristic, `medium` max), `api-key-in-client-bundle` |
@@ -111,6 +112,13 @@ Analyzes a diff (working tree vs `HEAD` by default) for agent-session artifacts:
 **v0.1 constraint:** deterministic only. LLM-assisted semantic review is v0.4 (see `docs/ROADMAP.md`).
 
 #### `getdev env`
+
+**Checks (rule ID prefix `env/`, sanctioned F1):**
+
+| Rule | Detection |
+|---|---|
+| `env/hardcoded-secret` | Secret-pattern match (shares detection with the `audit` engine) planned for extraction |
+| `env/env-file-committed` | The target env file (`.env` by default) is tracked in git — implemented and owned here, not under `audit/` (see that section's note above) |
 
 Pipeline: **detect → plan → (apply)**.
 

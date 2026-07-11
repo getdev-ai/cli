@@ -48,7 +48,7 @@ CRITICAL  audit/hardcoded-secret     src/payments.ts:12
 
 **Synopsis:** `getdev real [--deps-only|--apis-only|--models-only] [global flags]`
 
-**What it does:** Verifies that packages, APIs, and model strings actually exist. Rule ID prefix: **`real/`** (`nonexistent-package`, `typosquat-suspect`, `phantom-import`, `nonexistent-api`, `version-mismatch-api`, `unknown-model-string` — detection definitions in `docs/PLAN.md` §2.3).
+**What it does:** Verifies that packages, APIs, and model strings actually exist. Rule ID prefix: **`real/`** (`nonexistent-package`, `typosquat-suspect`, `phantom-import`, `nonexistent-api`, `version-mismatch-api`, `unknown-model-string`, `unsupported-stack` — detection definitions in `docs/PLAN.md` §2.3; `unsupported-stack` sanctioned F1, mandated by the 03-05 must-have).
 
 **Mechanics:**
 - Dependency graph from manifests (`package.json`, `requirements.txt`, `pyproject.toml`, lockfiles) **plus** actual imports found by AST walk (agents often import without declaring).
@@ -68,7 +68,7 @@ CRITICAL  audit/hardcoded-secret     src/payments.ts:12
 
 **Synopsis:** `getdev audit [--severity <min>] [--ignore <rule-id>] [--rules <dir>] [global flags]`
 
-**What it does:** Security scan tuned to AI-generated failure patterns. Pure static analysis: tree-sitter AST + declarative YAML rules (`rules/audit/*.yaml`, format in `docs/SPEC-RULES.md`). Rule ID prefix: **`audit/`**. v0.1 rule pack categories: Secrets (`hardcoded-secret`, `env-file-committed`, `secret-in-git-history` HEAD-adjacent only), Injection (`sql-string-concat`, `eval-user-input`, `exec-user-input`, `shell-interpolation`), Web config (`cors-wildcard`, `debug-mode-enabled`, `cookie-insecure`, `missing-auth-middleware` — framework-aware: Express, FastAPI, Flask, Next.js API routes), Client/server (`client-only-validation` heuristic `medium` max, `api-key-in-client-bundle`), Platform (`supabase-permissive-rls`, `firebase-open-rules`).
+**What it does:** Security scan tuned to AI-generated failure patterns. Pure static analysis: tree-sitter AST + declarative YAML rules (`rules/audit/*.yaml`, format in `docs/SPEC-RULES.md`). Rule ID prefix: **`audit/`**. v0.1 rule pack categories: Secrets (`hardcoded-secret`, `secret-in-git-history` HEAD-adjacent only — note: `env-file-committed` is implemented under `env/`, not `audit/`, see `getdev env` below; sanctioned F1), Injection (`sql-string-concat`, `eval-user-input`, `exec-user-input`, `shell-interpolation`), Web config (`cors-wildcard`, `debug-mode-enabled`, `cookie-insecure`, `missing-auth-middleware` — framework-aware: Express, FastAPI, Flask, Next.js API routes), Client/server (`client-only-validation` heuristic `medium` max, `api-key-in-client-bundle`), Platform (`supabase-permissive-rls`, `firebase-open-rules`).
 
 **Flags:** `--severity <min>`, `--ignore <rule-id>` (also configurable), `--rules <dir>` (custom rule packs — declarative-only, never executable).
 
@@ -98,7 +98,7 @@ CRITICAL  audit/hardcoded-secret     src/payments.ts:12
 
 **Synopsis:** `getdev env [--write] [--include-urls] [--env-file <path>] [global flags]`
 
-**What it does:** Pipeline **detect → plan → (apply)**:
+**What it does:** Pipeline **detect → plan → (apply)**. Rule ID prefix: **`env/`** (`hardcoded-secret`, `env-file-committed` — sanctioned F1; `env-file-committed` was previously listed under `audit/` in earlier drafts of this doc, but is implemented and owned here):
 1. **Detect** hardcoded values: secret-pattern matches from the `audit` engine, plus (with `--include-urls`) http(s) URLs and connection strings assigned to identifiers.
 2. **Plan:** generate variable names (`STRIPE_SECRET_KEY` from context: identifier name, provider pattern, file path), detect collisions, detect existing `.env`.
 3. **Apply** (`--write` only): write/append `.env` (values) and `.env.example` (keys + placeholder comments); rewrite each reference to the idiomatic accessor for the stack (`process.env.X`, `os.environ["X"]`, framework config where detectable); ensure `.env` is in `.gitignore`; if `.env` was previously committed, emit a `critical` finding with key-rotation guidance (never rewrite git history automatically).
