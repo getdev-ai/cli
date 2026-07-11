@@ -264,11 +264,16 @@ fn api_finding(result: &ApiResult) -> Finding {
             Severity::Info
         }
     };
-    // A3: an aggregated NotInstalled/Unreadable result (`usage_count > 1`)
-    // rolls up every usage site of the package into one finding — it has
-    // no single member to name, so the message/remediation word the
-    // aggregate case distinctly from the normal per-usage-site case.
-    let (message, remediation) = if result.usage_count > 1 {
+    // A3: an aggregated NotInstalled/Unreadable result rolls up every usage
+    // site of the package into one finding with NO single member to name
+    // (`apisurface::check` always sets `member: String::new()` for these,
+    // regardless of how many usage sites were rolled up — audit-exposed
+    // residual bug, corpus fix pass 7: discriminating on `usage_count > 1`
+    // left the `usage_count == 1` aggregated case falling through to the
+    // per-usage-site branch below with an empty member, producing a
+    // dangling-dot message like "'acme-metrics.' does not exist"). The
+    // correct discriminator is whether there IS a member to name at all.
+    let (message, remediation) = if result.member.is_empty() {
         (
             format!(
                 "could not verify {} usage(s) of '{}' on the installed package's surface",

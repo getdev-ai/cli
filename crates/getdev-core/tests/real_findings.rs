@@ -253,6 +253,36 @@ fn api_finding_aggregate_message_never_names_a_single_member() {
     assert!(!finding.message.contains("does not exist"));
 }
 
+/// Corpus fix pass 7 (audit-exposed by the js-untyped sentinel): a single
+/// usage site rolled up as `NotInstalled`/`Unreadable` (`usage_count == 1`)
+/// still has an empty `member` — `apisurface::check` never sets one for
+/// aggregated results, regardless of count. The message must still word
+/// itself as a rollup ("could not verify 1 usage(s) of ..."), never fall
+/// through to the per-usage-site "'{package}.{member}' does not exist"
+/// wording with a dangling empty member (`'acme-metrics.' does not exist`).
+#[test]
+fn api_finding_aggregate_message_with_a_single_usage_still_words_as_a_rollup() {
+    let result = ApiResult {
+        kind: ApiResultKind::NonexistentApi,
+        package: "acme-metrics".to_owned(),
+        member: String::new(),
+        file: "src/app.js".to_owned(),
+        line: 7,
+        confidence: Confidence::Low,
+        tier: SurfaceTier::Unreadable,
+        detail: "could not verify 1 usage(s) of 'acme-metrics' — no readable types/source"
+            .to_owned(),
+        usage_count: 1,
+    };
+    let finding = api_findings(&[result]).remove(0);
+    assert_eq!(finding.severity, Severity::Info);
+    assert!(finding.message.contains("could not verify 1 usage(s)"));
+    assert!(finding.message.contains("acme-metrics"));
+    assert!(!finding.message.contains("does not exist"));
+    assert!(!finding.message.contains("'.'"));
+    assert!(!finding.message.ends_with('.'));
+}
+
 #[test]
 fn version_mismatch_kind_maps_to_its_own_rule_id() {
     let results = vec![ApiResult {
