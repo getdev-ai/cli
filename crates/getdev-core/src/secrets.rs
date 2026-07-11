@@ -106,10 +106,16 @@ impl SecretPatterns {
     /// Classify a string literal's contents. `identifier` is the variable /
     /// property name it is assigned to (used by the entropy fallback and to
     /// reject placeholders).
+    ///
+    /// C7/03-REVIEW.md: a known provider pattern (an exact-format match on
+    /// the vendor's own key shape) wins even if the literal's body happens
+    /// to contain a placeholder-looking substring like `xxxx`/`todo` — a
+    /// real live key with a randomly-generated body that happens to
+    /// contain those four characters in sequence is a false negative we
+    /// cannot afford. The placeholder screen only protects the entropy
+    /// fallback, where there is no vendor-format signal to trust and a
+    /// placeholder-shaped string is the dominant false-positive source.
     pub fn classify(&self, value: &str, identifier: &str) -> Option<SecretMatch> {
-        if looks_like_placeholder(value) {
-            return None;
-        }
         for pattern in &self.patterns {
             if pattern.regex.is_match(value) {
                 return Some(SecretMatch {
@@ -122,8 +128,11 @@ impl SecretPatterns {
                 });
             }
         }
-        // generic fallback: random-looking value assigned to a secret-ish name
-        if !is_known_non_secret(value)
+        // generic fallback: random-looking value assigned to a secret-ish
+        // name — no vendor format to anchor on, so the placeholder screen
+        // applies here only.
+        if !looks_like_placeholder(value)
+            && !is_known_non_secret(value)
             && identifier_suggests_secret(identifier)
             && value.len() >= ENTROPY_MIN_LEN
             && !value.contains(char::is_whitespace)
@@ -145,20 +154,25 @@ impl SecretPatterns {
 /// Masked preview per docs/SPEC-FINDINGS.md: `sk_live_…9f2a`. Keeps the
 /// pattern's stable prefix (or the first 3 chars) and the last 4; everything
 /// else is elided. Short values are fully elided.
+///
+/// C8/03-REVIEW.md: the guard against head+tail overlapping (or elided
+/// content shrinking to nothing) must scale with the actual `head` used —
+/// a long pattern prefix (e.g. `github_pat_`, 11 chars) plus the 4-char
+/// tail can equal-or-exceed the value length well above the old flat `< 12`
+/// floor, which was sized only for the no-prefix 3-char-head case and left
+/// long-prefix patterns unguarded.
 pub fn mask(value: &str, prefix: &str) -> String {
     let value = value.trim();
-    if value.len() < 12 {
-        return "…".to_owned();
-    }
+    let chars: Vec<char> = value.chars().collect();
     let head: String = if !prefix.is_empty() && value.starts_with(prefix) {
         prefix.to_owned()
     } else {
-        value.chars().take(3).collect()
+        chars.iter().take(3).collect()
     };
-    let tail: String = {
-        let chars: Vec<char> = value.chars().collect();
-        chars[chars.len().saturating_sub(4)..].iter().collect()
-    };
+    if head.chars().count() + 4 >= chars.len() {
+        return "…".to_owned();
+    }
+    let tail: String = chars[chars.len().saturating_sub(4)..].iter().collect();
     format!("{head}…{tail}")
 }
 
@@ -275,6 +289,24 @@ mod tests {
         assert!(p.classify("<insert key>", "apiKey").is_none());
     }
 
+    /// C7 regression: a provider-pattern match wins even when the literal's
+    /// body happens to contain a placeholder-looking substring like `xxxx`
+    /// — the placeholder screen must only guard the entropy fallback, not
+    /// gate provider patterns ahead of them.
+    #[test]
+    fn provider_pattern_wins_over_placeholder_screen() {
+        let m = patterns()
+            .classify("sk_live_FAKExxxxFAKE1234", "stripeKey")
+            .unwrap();
+        assert_eq!(m.provider, "stripe");
+        assert_eq!(m.pattern_id, "stripe-live-secret-key");
+
+        // "TODO" inside the body of an otherwise well-formed AWS key
+        // (must stay uppercase — the AWS pattern only allows [0-9A-Z])
+        let aws = patterns().classify("AKIAFAKETODOFAKEFAKE", "x").unwrap();
+        assert_eq!(aws.provider, "aws");
+    }
+
     #[test]
     fn entropy_fallback_requires_secretish_identifier() {
         let p = patterns();
@@ -288,6 +320,23 @@ mod tests {
         assert!(p
             .classify("aaaaaaaaaaaaaaaaaaaaaaaa", "api_token")
             .is_none());
+    }
+
+    /// C8 regression: when `prefix_len + 4 >= value_len` the mask must fall
+    /// back to fully-elided `…` rather than emitting a head/tail pair that
+    /// overlaps (or reveals more of the value than intended, e.g. a
+    /// `head…tail` where `head` and `tail` share characters).
+    #[test]
+    fn mask_falls_back_when_prefix_plus_tail_would_overlap() {
+        // "github_pat_" is 11 chars; value is exactly 15 chars total, so
+        // prefix_len(11) + 4 == 15 >= len(15) — must fall back.
+        assert_eq!(mask("github_pat_ABCD", "github_pat_"), "…");
+        // one char longer clears the guard and masks normally.
+        assert_eq!(mask("github_pat_ABCDE", "github_pat_"), "github_pat_…BCDE");
+        // no-prefix path: head defaults to 3 chars, so the boundary is at
+        // len == 7 (3 + 4).
+        assert_eq!(mask("abcdefg", ""), "…");
+        assert_eq!(mask("abcdefgh", ""), "abc…efgh");
     }
 
     #[test]
