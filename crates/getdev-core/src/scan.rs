@@ -117,6 +117,21 @@ pub enum ScanError {
     Skipped { path: PathBuf, reason: String },
 }
 
+impl ScanError {
+    /// The file this error is about, when there is one (`Grammar`/`Query`
+    /// are crate-wide, not per-file). F4 audit fix: lets callers surface a
+    /// `{ path, reason }` pair in `--json` skip-lists instead of only a
+    /// pre-formatted display string.
+    #[must_use]
+    pub fn path(&self) -> Option<&Path> {
+        match self {
+            Self::Read { path, .. } | Self::Parse { path } | Self::TooLarge { path } => Some(path),
+            Self::Skipped { path, .. } => Some(path),
+            Self::Grammar(_) | Self::Query(_) => None,
+        }
+    }
+}
+
 /// F7 — hard cap on the size of a single file this crate will read into
 /// memory for parsing. A multi-GB minified bundle or vendored binary must
 /// never be slurped whole just because it happens to carry a supported

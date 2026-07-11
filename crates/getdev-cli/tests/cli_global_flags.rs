@@ -346,6 +346,129 @@ fn ignore_paths_in_config_drops_findings_under_the_prefix() {
     );
 }
 
+/// F4: `env --json --write` is a single valid JSON document that includes
+/// an additive `applied` object describing what was written.
+#[test]
+fn env_json_write_includes_an_applied_object() {
+    let dir = tmp_dir("json-write-applied");
+    std::fs::write(
+        dir.join("pay.js"),
+        "const stripeKey = \"sk_live_FAKEFAKEFAKE1234\";\n",
+    )
+    .unwrap();
+
+    let assert = getdev()
+        .current_dir(&dir)
+        .arg("env")
+        .arg("--write")
+        .arg("--json")
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|err| {
+        panic!("env --write --json did not print valid JSON: {err}\n{stdout}")
+    });
+    assert!(!report["findings"].as_array().unwrap().is_empty());
+    let applied = &report["applied"];
+    assert_eq!(applied["vars_written"].as_u64().unwrap(), 1);
+    assert_eq!(applied["files_rewritten"].as_u64().unwrap(), 1);
+    assert_eq!(applied["env_file"].as_str().unwrap(), ".env");
+    assert!(applied["env_file_created"].as_bool().unwrap());
+}
+
+/// F4: a dry run (no `--write`) must never include the `applied` key at all
+/// (optional field, omitted when absent — not `null`).
+#[test]
+fn env_json_dry_run_omits_the_applied_key() {
+    let dir = tmp_dir("json-dry-run-no-applied");
+    std::fs::write(
+        dir.join("pay.js"),
+        "const stripeKey = \"sk_live_FAKEFAKEFAKE1234\";\n",
+    )
+    .unwrap();
+
+    let assert = getdev().current_dir(&dir).arg("env").arg("--json").assert();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(
+        report.get("applied").is_none(),
+        "applied must be omitted (not null) on a dry run, got: {stdout}"
+    );
+}
+
+/// F4: when `apply` fails mid-write, the findings must still print before
+/// the error exit — not silently swallowed by an early `?`. The scratch dir
+/// itself (not the source file, which must stay readable for `plan` to find
+/// the finding in the first place) is made read-only so `mutate`'s
+/// temp-file-then-rename write deterministically fails.
+#[cfg(unix)]
+#[test]
+fn env_apply_error_still_prints_findings_before_exiting() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tmp_dir("apply-error-prints-findings");
+    std::fs::write(
+        dir.join("pay.js"),
+        "const stripeKey = \"sk_live_FAKEFAKEFAKE1234\";\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    let assert = getdev()
+        .current_dir(&dir)
+        .arg("env")
+        .arg("--write")
+        .arg("--json")
+        .assert()
+        .failure();
+
+    // restore permissions so the scratch dir can be cleaned up
+    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755));
+
+    let code = assert.get_output().status.code().unwrap();
+    assert_eq!(code, 2, "an apply I/O error is an execution error (2)");
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|err| {
+        panic!("findings must still print as valid JSON on an apply error: {err}\n{stdout}")
+    });
+    assert!(
+        !report["findings"].as_array().unwrap().is_empty(),
+        "expected the findings to have printed despite the apply failure, got: {stdout}"
+    );
+    assert!(report.get("applied").is_none());
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("error:"),
+        "expected an error message on stderr, got: {stderr}"
+    );
+}
+
+/// F4: `--json` includes a `skipped` array for unreadable files (previously
+/// terminal-only, under `-v`).
+#[cfg(unix)]
+#[test]
+fn env_json_includes_skipped_array_for_unreadable_files() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tmp_dir("json-skipped-array");
+    let unreadable = dir.join("broken.js");
+    std::fs::write(&unreadable, "const x = 1;\n").unwrap();
+    std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let assert = getdev().current_dir(&dir).arg("env").arg("--json").assert();
+
+    let _ = std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o644));
+
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let skipped = report["skipped"].as_array().unwrap();
+    assert!(
+        !skipped.is_empty(),
+        "expected the unreadable file to appear in the skipped array, got: {stdout}"
+    );
+    assert!(skipped[0]["reason"].is_string());
+}
+
 /// B4: `--fail-on` still accepts every value the spec allows.
 #[test]
 fn fail_on_accepts_every_contractual_severity() {

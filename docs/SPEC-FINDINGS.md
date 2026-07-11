@@ -52,6 +52,8 @@ Serializing a `FindingsReport` (pretty-printed, trailing newline) IS the `--json
 | `score` | int 0–100 | **`check` only** — omitted (not `null`) for every other command |
 | `summary` | object | per-severity counts + `fixable` count; always present, all six keys always present |
 | `findings` | array | sorted severity-desc, then file, then line — the stable presentation order shared by all renderers |
+| `applied` | object | **`env --write` only** (F4 audit fix) — omitted (not `null`) unless the command actually mutated something. `{ vars_written, files_rewritten, env_file, env_file_created, gitignore_patched, example_file }`, mirroring the terminal renderer's "applied: N var(s) → …" summary. Kept so `env --json --write` is a single valid JSON document instead of the apply summary going to a second, non-JSON stream. |
+| `skipped` | array | omitted (empty array serializes as `[]`, never present as `null`) when nothing was skipped — one `{ path, reason }` entry per unreadable file (`env`, `real`); `path` is optional (some skip reasons, e.g. a grammar-load failure, aren't about one file). Previously terminal/`-v`-only; F4 audit fix. |
 
 ## Finding fields
 
@@ -74,7 +76,11 @@ Serializing a `FindingsReport` (pretty-printed, trailing newline) IS the `--json
 ## Invariants
 
 1. **One schema for everything.** No analyzer emits any other shape; renderers, Ship Score,
-   baselines, and future SARIF conversion all consume `Vec<Finding>`.
+   baselines, and future SARIF conversion all consume `Vec<Finding>`. The envelope itself may
+   grow additive, optional, command-specific fields (`score`, `applied`, `skipped`) — every one
+   of them is omitted (not `null`) when the producing command doesn't apply, so existing
+   consumers parsing only `findings`/`summary` are unaffected. This document and
+   `findings.rs`/`FindingsReport` must stay in lockstep whenever such a field is added.
 2. **Secrets never appear** in any field, in any renderer, ever.
 3. Optional fields are **omitted**, never `null`.
 4. Severity ordering is total: `critical > high > medium > low > info` — used by `--fail-on`,

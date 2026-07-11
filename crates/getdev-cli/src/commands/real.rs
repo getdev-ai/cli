@@ -96,7 +96,7 @@ pub fn run(args: &RealArgs) -> anyhow::Result<u8> {
     // declared sets to know which ecosystem a used package belongs to, and
     // `unsupported_stack` must be surfaced regardless of scope.
     let (graph, deps_skipped) = deps::build_graph(&args.path)?;
-    let mut skipped: Vec<String> = deps_skipped.iter().map(ToString::to_string).collect();
+    let mut skip_errors: Vec<getdev_core::scan::ScanError> = deps_skipped;
 
     let mut findings = Vec::new();
 
@@ -105,11 +105,11 @@ pub fn run(args: &RealArgs) -> anyhow::Result<u8> {
     }
     if scope.apis {
         let apis_skipped = run_apis_group(&graph, &args.path, &mut findings)?;
-        skipped.extend(apis_skipped.into_iter().map(|e| e.to_string()));
+        skip_errors.extend(apis_skipped);
     }
     if scope.models {
         let models_skipped = run_models_group(&args.path, &mut findings)?;
-        skipped.extend(models_skipped.into_iter().map(|e| e.to_string()));
+        skip_errors.extend(models_skipped);
     }
     if let Some(hint) = &graph.unsupported_stack {
         findings.push(real::unsupported_stack_finding(hint));
@@ -119,7 +119,9 @@ pub fn run(args: &RealArgs) -> anyhow::Result<u8> {
     let filter_outcome = suppress::filter_findings(findings, &args.cfg);
     let findings = filter_outcome.kept;
 
-    let report = FindingsReport::new(
+    let skipped: Vec<String> = skip_errors.iter().map(ToString::to_string).collect();
+
+    let mut report = FindingsReport::new(
         env!("CARGO_PKG_VERSION"),
         ProjectInfo {
             path: display_path(&args.path),
@@ -127,6 +129,14 @@ pub fn run(args: &RealArgs) -> anyhow::Result<u8> {
         },
         findings,
     );
+    // F4: skip-list surfaced in --json too (previously terminal-only).
+    report.skipped = skip_errors
+        .iter()
+        .map(|e| getdev_core::findings::SkippedEntry {
+            path: e.path().map(|p| p.display().to_string()),
+            reason: e.to_string(),
+        })
+        .collect();
 
     if args.json {
         print!("{}", report::render_json(&report)?);

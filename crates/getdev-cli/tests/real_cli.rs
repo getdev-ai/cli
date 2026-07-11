@@ -219,6 +219,41 @@ fn check_apis_false_in_config_skips_the_apis_group() {
     );
 }
 
+/// F4: `real --json` includes a `skipped` array for unreadable files
+/// (previously terminal-only, under `-v`).
+#[cfg(unix)]
+#[test]
+fn real_json_includes_skipped_array_for_unreadable_files() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tmp_dir("real-json-skipped");
+    std::fs::write(dir.join("package.json"), "{}\n").unwrap();
+    let unreadable = dir.join("app.js");
+    std::fs::write(&unreadable, "const x = 1;\n").unwrap();
+    std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let assert = getdev()
+        .current_dir(&dir)
+        .env("GETDEV_OFFLINE", "1")
+        .env("GETDEV_CACHE_DIR", dir.join("cache"))
+        .arg("real")
+        .arg("--apis-only")
+        .arg("--offline")
+        .arg("--json")
+        .assert();
+
+    let _ = std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o644));
+
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let skipped = report["skipped"].as_array().unwrap();
+    assert!(
+        !skipped.is_empty(),
+        "expected the unreadable file to appear in the skipped array, got: {stdout}"
+    );
+    assert!(skipped[0]["reason"].is_string());
+}
+
 /// A1 — venv discovery: `getdev real` must resolve a real
 /// `.venv/lib/pythonX.Y/site-packages` layout (the overwhelming majority of
 /// real Python projects), not the fictional literal `<root>/site-packages`.

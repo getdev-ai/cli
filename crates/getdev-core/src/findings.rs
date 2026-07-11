@@ -182,6 +182,34 @@ pub struct ProjectInfo {
     pub stack: Vec<String>,
 }
 
+/// What a mutating command (`env --write`) actually did, surfaced in
+/// `--json` (F4 audit fix — the JSON output used to say nothing about the
+/// apply step, only the terminal renderer did). docs/SPEC-FINDINGS.md
+/// documents this as an additive, optional envelope field: omitted entirely
+/// when the command didn't mutate anything, so every existing consumer of
+/// the schema is unaffected.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppliedInfo {
+    pub vars_written: usize,
+    pub files_rewritten: usize,
+    pub env_file: String,
+    pub env_file_created: bool,
+    pub gitignore_patched: bool,
+    pub example_file: String,
+}
+
+/// One unreadable-file skip, surfaced in `--json` (F4 audit fix — the
+/// terminal renderer already listed these under `-v`, but `--json` silently
+/// dropped them). Additive, optional envelope field — omitted (empty array)
+/// when nothing was skipped.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkippedEntry {
+    /// project-relative path, when the skip is about a specific file
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    pub reason: String,
+}
+
 /// The top-level report envelope — serializing this IS the `--json` output.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FindingsReport {
@@ -195,6 +223,12 @@ pub struct FindingsReport {
     pub score: Option<u8>,
     pub summary: Summary,
     pub findings: Vec<Finding>,
+    /// F4 audit fix: additive, optional — see [`AppliedInfo`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applied: Option<AppliedInfo>,
+    /// F4 audit fix: additive, optional — see [`SkippedEntry`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<SkippedEntry>,
 }
 
 impl FindingsReport {
@@ -217,6 +251,8 @@ impl FindingsReport {
             score: None,
             summary: Summary::from_findings(&findings),
             findings,
+            applied: None,
+            skipped: Vec::new(),
         }
     }
 }

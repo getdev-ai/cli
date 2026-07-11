@@ -3,7 +3,9 @@ use std::path::Path;
 
 use getdev_core::config::Config;
 use getdev_core::env::{self, EnvOptions};
-use getdev_core::findings::{Confidence, Finding, FindingsReport, ProjectInfo, Severity};
+use getdev_core::findings::{
+    AppliedInfo, Confidence, Finding, FindingsReport, ProjectInfo, Severity, SkippedEntry,
+};
 use getdev_core::report::{self, ColorMode};
 use getdev_core::suppress;
 
@@ -42,13 +44,17 @@ pub fn run(args: &EnvArgs) -> anyhow::Result<u8> {
     let filter_outcome = suppress::filter_findings(findings, &args.cfg);
     let findings = filter_outcome.kept;
 
-    let applied = if args.write && !plan.entries.is_empty() {
-        Some(env::apply(&args.path, &plan, &options)?)
+    // F4: apply before printing (never `?` here) so that on failure the
+    // findings still print before the error exit — the apply error is
+    // propagated only after rendering below.
+    let applied_result = if args.write && !plan.entries.is_empty() {
+        Some(env::apply(&args.path, &plan, &options))
     } else {
         None
     };
+    let applied_ok = applied_result.as_ref().and_then(|r| r.as_ref().ok());
 
-    let report = FindingsReport::new(
+    let mut report = FindingsReport::new(
         env!("CARGO_PKG_VERSION"),
         ProjectInfo {
             path: display_path(&args.path),
@@ -56,6 +62,27 @@ pub fn run(args: &EnvArgs) -> anyhow::Result<u8> {
         },
         findings,
     );
+    // F4: skip-list surfaced in --json too (previously terminal-only).
+    report.skipped = plan
+        .skipped
+        .iter()
+        .map(|s| SkippedEntry {
+            path: s.path().map(|p| p.display().to_string()),
+            reason: s.to_string(),
+        })
+        .collect();
+    // F4: the apply summary, surfaced as an additive optional envelope field
+    // so `--json --write` stays a single valid JSON document.
+    if let Some(summary) = applied_ok {
+        report.applied = Some(AppliedInfo {
+            vars_written: summary.vars_written.len(),
+            files_rewritten: summary.files_rewritten.len(),
+            env_file: options.env_file.clone(),
+            env_file_created: summary.env_file_created,
+            gitignore_patched: summary.gitignore_patched,
+            example_file: summary.example_file.clone(),
+        });
+    }
 
     if args.json {
         print!("{}", report::render_json(&report)?);
@@ -63,8 +90,8 @@ pub fn run(args: &EnvArgs) -> anyhow::Result<u8> {
         let color = ColorMode::resolve(args.no_color, std::io::stdout().is_terminal());
         print!("{}", report::render_terminal(&report, color));
         if !args.quiet {
-            match &applied {
-                Some(summary) => {
+            match applied_result.as_ref() {
+                Some(Ok(summary)) => {
                     println!();
                     println!(
                         "applied: {} var(s) → {} ({}), {} file(s) rewritten{}",
@@ -87,6 +114,10 @@ pub fn run(args: &EnvArgs) -> anyhow::Result<u8> {
                         summary.example_file, options.env_file
                     );
                 }
+                // F4: apply failed — say nothing extra here, the findings
+                // above already printed; the error itself surfaces after
+                // this block via the caller's `?`/exit-code-2 path.
+                Some(Err(_)) => {}
                 None if !plan.entries.is_empty() => {
                     println!();
                     println!(
@@ -132,6 +163,12 @@ pub fn run(args: &EnvArgs) -> anyhow::Result<u8> {
                 );
             }
         }
+    }
+
+    // F4: the apply error is propagated only now — findings (and, for
+    // --json, the full report) have already printed above.
+    if let Some(Err(err)) = applied_result {
+        return Err(err.into());
     }
 
     let failed = args
