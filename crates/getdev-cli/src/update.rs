@@ -75,13 +75,29 @@ pub fn latest_release_version(offline: bool) -> ReleaseCheck {
         Err(_) => return ReleaseCheck::Unreachable,
     };
 
-    match response.status().as_u16() {
-        200 => response
-            .json::<ReleaseResponse>()
-            .ok()
-            .map_or(ReleaseCheck::Unreachable, |release| {
-                classify(release.tag_name.trim_start_matches('v'))
-            }),
+    let status = response.status().as_u16();
+    classify_status(status, || response.json::<ReleaseResponse>().ok())
+}
+
+/// The pure status-code -> [`ReleaseCheck`] mapping, pulled out of
+/// [`latest_release_version`] so it is unit-testable without an actual HTTP
+/// roundtrip (D5, 03-REVIEW.md): the previous integration test at this
+/// contract only asserted an adjacent, always-true fact ("doctor doesn't
+/// crash when the cache dir doesn't exist yet") while claiming 404
+/// coverage it never exercised. Calling this function directly with a
+/// synthetic status code exercises the exact same production code path
+/// GitHub's real 404-for-no-releases-yet response would hit, with no mock
+/// HTTP server required. `parse_body` is only invoked for a 200 status
+/// (lazy — a 404/other status never attempts to parse a body that was
+/// never fetched as JSON).
+fn classify_status(
+    status: u16,
+    parse_body: impl FnOnce() -> Option<ReleaseResponse>,
+) -> ReleaseCheck {
+    match status {
+        200 => parse_body().map_or(ReleaseCheck::Unreachable, |release| {
+            classify(release.tag_name.trim_start_matches('v'))
+        }),
         404 => ReleaseCheck::NoReleasesYet,
         _ => ReleaseCheck::Unreachable,
     }
@@ -117,6 +133,36 @@ mod tests {
     fn classify_differing_version_is_outdated() {
         assert_eq!(
             classify("999.999.999"),
+            ReleaseCheck::Outdated {
+                latest: "999.999.999".to_owned()
+            }
+        );
+    }
+
+    /// D5: genuine, hermetic coverage of the 404 path — GitHub Releases'
+    /// 404-for-no-published-release-yet must map to `NoReleasesYet`, not
+    /// `Unreachable` (pre-launch expected state, not a failure).
+    #[test]
+    fn status_404_is_no_releases_yet_not_a_failure() {
+        assert_eq!(classify_status(404, || None), ReleaseCheck::NoReleasesYet);
+    }
+
+    #[test]
+    fn status_500_is_unreachable_never_treated_as_release_evidence() {
+        assert_eq!(classify_status(500, || None), ReleaseCheck::Unreachable);
+    }
+
+    #[test]
+    fn status_200_with_an_unparseable_body_is_unreachable_not_a_crash() {
+        assert_eq!(classify_status(200, || None), ReleaseCheck::Unreachable);
+    }
+
+    #[test]
+    fn status_200_with_a_valid_release_body_classifies_normally() {
+        assert_eq!(
+            classify_status(200, || Some(ReleaseResponse {
+                tag_name: "v999.999.999".to_owned()
+            })),
             ReleaseCheck::Outdated {
                 latest: "999.999.999".to_owned()
             }

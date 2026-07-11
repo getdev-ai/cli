@@ -48,12 +48,18 @@ fn offline_doctor_makes_zero_network_calls_and_passes_on_a_healthy_env() {
     );
 }
 
+/// D5: this test's previous name (`a_404_from_github_releases_is_...`)
+/// falsely claimed 404 coverage — a live GitHub call is out of scope for a
+/// hermetic integration test, so nothing here ever exercises that path.
+/// Genuine, hermetic coverage of the 404-maps-to-`NoReleasesYet` status
+/// mapping lives in `update.rs`'s own unit tests
+/// (`status_404_is_no_releases_yet_not_a_failure`), which call the real
+/// production status-classification function directly with a synthetic
+/// status code — no network, no `mockito`-style server needed. This test
+/// only pins the adjacent, genuinely-integration-level contract: doctor
+/// never hard-fails just because the cache hasn't been created yet.
 #[test]
-fn a_404_from_github_releases_is_not_exercised_offline_but_cache_absent_is_still_a_pass() {
-    // NoReleasesYet only differs from Skipped when a live GitHub call is
-    // made (out of scope for a hermetic test); this test instead pins down
-    // the adjacent contract that doctor never hard-fails just because the
-    // cache hasn't been created yet.
+fn doctor_passes_when_the_cache_has_never_been_created() {
     let dir = tmp_dir("cache-absent");
     let cache_dir = dir.join("cache-does-not-exist");
     getdev()
@@ -62,6 +68,10 @@ fn a_404_from_github_releases_is_not_exercised_offline_but_cache_absent_is_still
         .arg("--offline")
         .assert()
         .success();
+    assert!(
+        !cache_dir.exists(),
+        "a plain doctor run (no --fix) must never create the cache directory as a side effect"
+    );
 }
 
 #[test]
@@ -107,6 +117,12 @@ fn offline_fix_clears_a_corrupt_cache_and_the_follow_up_run_passes() {
     );
 }
 
+/// D4: the previous version of this test only asserted a passing exit code
+/// — a `--fix` that silently deleted and never recreated the cache, or
+/// deleted an unrelated file, would still exit 0 and pass. This version
+/// asserts the healthy cache file actually survives `--fix` byte-for-byte
+/// (a true no-op, not a delete-then-succeed), and that a follow-up plain
+/// run still reports it healthy.
 #[test]
 fn fix_with_an_already_healthy_cache_is_a_no_op_and_still_passes() {
     let dir = tmp_dir("healthy-fix-noop");
@@ -115,6 +131,13 @@ fn fix_with_an_already_healthy_cache_is_a_no_op_and_still_passes() {
     // itself — open the cache the same way getdev-registry's own tests do).
     getdev_registry_precreate(&cache_dir);
 
+    let cache_file = cache_dir.join("cache.sqlite3");
+    assert!(
+        cache_file.is_file(),
+        "precondition: the precreated cache file must exist before --fix runs"
+    );
+    let before = std::fs::read(&cache_file).expect("read precreated cache file");
+
     getdev()
         .env("GETDEV_CACHE_DIR", &cache_dir)
         .arg("doctor")
@@ -122,6 +145,29 @@ fn fix_with_an_already_healthy_cache_is_a_no_op_and_still_passes() {
         .arg("--fix")
         .assert()
         .success();
+
+    assert!(
+        cache_file.is_file(),
+        "--fix on an already-healthy cache must be a no-op — the cache file must still exist"
+    );
+    let after = std::fs::read(&cache_file).expect("read cache file after --fix");
+    assert_eq!(
+        before, after,
+        "--fix on an already-healthy cache must leave its contents byte-for-byte unchanged"
+    );
+
+    // A follow-up plain run must still see it as healthy.
+    let assert = getdev()
+        .env("GETDEV_CACHE_DIR", &cache_dir)
+        .arg("doctor")
+        .arg("--offline")
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    assert!(
+        stdout.contains("cache") && stdout.contains("healthy"),
+        "expected the cache to still report healthy after a no-op --fix, got:\n{stdout}"
+    );
 }
 
 #[test]
