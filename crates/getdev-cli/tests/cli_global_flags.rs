@@ -209,6 +209,30 @@ fn fail_on_info_is_rejected_at_parse_time_with_exact_clap_usage_exit_code() {
     );
 }
 
+/// B5: global `--fix` on `env` behaves exactly like `--write` — env's
+/// findings are all fixable, but `--fix` used to be silently ignored.
+#[test]
+fn env_fix_flag_writes_exactly_like_write_flag() {
+    let dir = tmp_dir("env-fix-writes");
+    std::fs::write(
+        dir.join("pay.js"),
+        "const stripeKey = \"sk_live_FAKEFAKEFAKE1234\";\n",
+    )
+    .unwrap();
+
+    getdev()
+        .current_dir(&dir)
+        .arg("env")
+        .arg("--fix")
+        .assert()
+        .success();
+
+    let env_file = std::fs::read_to_string(dir.join(".env")).unwrap_or_else(|err| {
+        panic!("expected --fix to write .env exactly like --write would: {err}")
+    });
+    assert!(env_file.contains("STRIPE_SECRET_KEY"));
+}
+
 /// B4: `--fail-on` still accepts every value the spec allows.
 #[test]
 fn fail_on_accepts_every_contractual_severity() {

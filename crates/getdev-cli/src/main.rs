@@ -186,13 +186,17 @@ fn run(cli: Cli) -> anyhow::Result<u8> {
     let path = cli.global.path.clone();
 
     match cli.command {
+        // B5: global `--fix` behaves exactly like `--write` on `env` — its
+        // findings are all `fixable: true`, and docs/SPEC-COMMANDS.md's
+        // "--fix on check maps to this" implies the same for the bare
+        // command. Previously `--fix` silently did nothing here.
         Command::Env { env_file, write } => commands::env::run(&commands::env::EnvArgs {
             path,
             json,
             no_color,
             fail_on,
             env_file,
-            write,
+            write: write || cli.global.fix,
             quiet,
             verbose,
         }),
