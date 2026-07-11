@@ -197,6 +197,129 @@ pub struct Suppression {
     pub reason: String,
 }
 
+/// Presence-tracking mirror of [`Config`] used only during [`Config::merge`]
+/// (B1 audit fix): every leaf is `Option<T>` so "this key was absent from
+/// the file" is distinguishable from "present and happens to equal the
+/// compiled-in default". The old value-based `pick()` conflated the two,
+/// producing a precedence inversion: a project config that pinned
+/// `fail_on = "high"` (the default) could never override a global
+/// `fail_on = "low"`, because `"high" == default` looked identical to
+/// "project didn't mention `fail_on`". Never exposed outside this module —
+/// [`Config`] (concrete types) is what the rest of the codebase consumes.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct RawConfig {
+    project: RawProjectConfig,
+    check: RawCheckConfig,
+    real: RawRealConfig,
+    audit: RawAuditConfig,
+    review: RawReviewConfig,
+    env: RawEnvConfig,
+    snap: RawSnapConfig,
+    ship: RawShipConfig,
+    ignore: RawIgnoreConfig,
+    #[serde(rename = "suppress")]
+    suppressions: Option<Vec<Suppression>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct RawProjectConfig {
+    stack: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct RawCheckConfig {
+    fail_on: Option<Severity>,
+    score_badge: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct RawRealConfig {
+    offline: Option<bool>,
+    check_apis: Option<bool>,
+    typosquat_sensitivity: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct RawAuditConfig {
+    severity_min: Option<Severity>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct RawReviewConfig {
+    against: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct RawEnvConfig {
+    include_urls: Option<bool>,
+    env_file: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct RawSnapConfig {
+    keep: Option<u32>,
+    auto_snap_before_fix: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct RawShipConfig {
+    target: Option<String>,
+    run_build: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct RawIgnoreConfig {
+    rules: Option<Vec<String>>,
+    paths: Option<Vec<String>>,
+}
+
+impl RawConfig {
+    fn parse(text: &str, path: &Path) -> Result<Self, ConfigError> {
+        toml::from_str(text).map_err(|source| ConfigError::Parse {
+            path: path.to_path_buf(),
+            source: Box::new(source),
+        })
+    }
+
+    fn load(dir: &Path) -> Result<Self, ConfigError> {
+        let path = dir.join(PROJECT_CONFIG_FILE);
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default());
+            }
+            Err(source) => return Err(ConfigError::Read { path, source }),
+        };
+        Self::parse(&text, &path)
+    }
+
+    fn load_global_at(dir: &Path) -> Result<Self, ConfigError> {
+        let path = dir.join(GLOBAL_CONFIG_FILE);
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default());
+            }
+            Err(source) => return Err(ConfigError::Read { path, source }),
+        };
+        Self::parse(&text, &path)
+    }
+
+    fn load_global() -> Result<Self, ConfigError> {
+        Self::load_global_at(&global_config_dir())
+    }
+}
+
 impl Config {
     /// Load `.getdev.toml` from `dir`; a missing file is the default config,
     /// a malformed or unknown-key file is a hard error (CLI exit code 3).
@@ -245,107 +368,108 @@ impl Config {
         Self::parse(&text, &path)
     }
 
-    /// Pure field-level precedence merge: a `project` value that differs
-    /// from the built-in default wins; otherwise a `global` value that
-    /// differs from the default wins; otherwise the default applies.
-    /// `docs/SPEC-CONFIG.md`: **flags > project > global > defaults** — this
-    /// implements the project/global/defaults half of that chain (flags are
-    /// applied by the CLI layer on top of the `Config` this returns).
-    #[must_use]
-    pub fn merge(project: Config, global: Config) -> Config {
+    /// Presence-based field-level precedence merge (B1 audit fix): a
+    /// `project` value that was explicitly present in the file wins,
+    /// regardless of whether it equals the built-in default; otherwise an
+    /// explicitly-present `global` value wins; otherwise the default
+    /// applies. `docs/SPEC-CONFIG.md`: **flags > project > global >
+    /// defaults** — this implements the project/global/defaults half of
+    /// that chain (flags are applied by the CLI layer on top of the
+    /// `Config` this returns).
+    fn merge(project: RawConfig, global: RawConfig) -> Config {
         let default = Config::default();
         Config {
             project: ProjectConfig {
-                stack: pick(
+                stack: resolve_field(
                     project.project.stack,
                     global.project.stack,
                     default.project.stack,
                 ),
             },
             check: CheckConfig {
-                fail_on: pick(
+                fail_on: resolve_field(
                     project.check.fail_on,
                     global.check.fail_on,
                     default.check.fail_on,
                 ),
-                score_badge: pick(
+                score_badge: resolve_field(
                     project.check.score_badge,
                     global.check.score_badge,
                     default.check.score_badge,
                 ),
             },
             real: RealConfig {
-                offline: pick(
+                offline: resolve_field(
                     project.real.offline,
                     global.real.offline,
                     default.real.offline,
                 ),
-                check_apis: pick(
+                check_apis: resolve_field(
                     project.real.check_apis,
                     global.real.check_apis,
                     default.real.check_apis,
                 ),
-                typosquat_sensitivity: pick(
+                typosquat_sensitivity: resolve_field(
                     project.real.typosquat_sensitivity,
                     global.real.typosquat_sensitivity,
                     default.real.typosquat_sensitivity,
                 ),
             },
             audit: AuditConfig {
-                severity_min: pick(
+                severity_min: resolve_field(
                     project.audit.severity_min,
                     global.audit.severity_min,
                     default.audit.severity_min,
                 ),
             },
             review: ReviewConfig {
-                against: pick(
+                against: resolve_field(
                     project.review.against,
                     global.review.against,
                     default.review.against,
                 ),
             },
             env: EnvConfig {
-                include_urls: pick(
+                include_urls: resolve_field(
                     project.env.include_urls,
                     global.env.include_urls,
                     default.env.include_urls,
                 ),
-                env_file: pick(
+                env_file: resolve_field(
                     project.env.env_file,
                     global.env.env_file,
                     default.env.env_file,
                 ),
             },
             snap: SnapConfig {
-                keep: pick(project.snap.keep, global.snap.keep, default.snap.keep),
-                auto_snap_before_fix: pick(
+                keep: resolve_field(project.snap.keep, global.snap.keep, default.snap.keep),
+                auto_snap_before_fix: resolve_field(
                     project.snap.auto_snap_before_fix,
                     global.snap.auto_snap_before_fix,
                     default.snap.auto_snap_before_fix,
                 ),
             },
             ship: ShipConfig {
-                target: pick(project.ship.target, global.ship.target, default.ship.target),
-                run_build: pick(
+                target: resolve_field(project.ship.target, global.ship.target, default.ship.target),
+                run_build: resolve_field(
                     project.ship.run_build,
                     global.ship.run_build,
                     default.ship.run_build,
                 ),
             },
             ignore: IgnoreConfig {
-                rules: pick(
+                rules: resolve_field(
                     project.ignore.rules,
                     global.ignore.rules,
                     default.ignore.rules,
                 ),
-                paths: pick(
+                paths: resolve_field(
                     project.ignore.paths,
                     global.ignore.paths,
                     default.ignore.paths,
                 ),
             },
-            suppressions: pick(
+            suppressions: resolve_field(
                 project.suppressions,
                 global.suppressions,
                 default.suppressions,
@@ -364,11 +488,11 @@ impl Config {
                     path: path.to_path_buf(),
                     source,
                 })?;
-                Self::parse(&text, path)?
+                RawConfig::parse(&text, path)?
             }
-            None => Self::load(dir)?,
+            None => RawConfig::load(dir)?,
         };
-        let global = Self::load_global()?;
+        let global = RawConfig::load_global()?;
         Ok(Self::merge(project, global))
     }
 }
@@ -395,18 +519,13 @@ pub fn offline_resolved(flag: bool, cfg: &Config) -> bool {
     flag || std::env::var_os("GETDEV_OFFLINE").is_some() || cfg.real.offline
 }
 
-/// `project` wins if it differs from `default` (i.e. was explicitly set to
-/// something other than the compiled-in default); otherwise `global` wins
-/// under the same rule; otherwise `default` applies. This is the field-level
-/// precedence primitive `Config::merge` applies to every key.
-fn pick<T: PartialEq>(project: T, global: T, default: T) -> T {
-    if project != default {
-        project
-    } else if global != default {
-        global
-    } else {
-        default
-    }
+/// `project` wins if the key was explicitly present in the project file
+/// (`Some`, regardless of value); otherwise `global` wins under the same
+/// rule; otherwise `default` applies. This is the presence-based
+/// field-level precedence primitive `Config::merge` applies to every key
+/// (B1 audit fix — replaces the old value-based `pick()`).
+fn resolve_field<T>(project: Option<T>, global: Option<T>, default: T) -> T {
+    project.or(global).unwrap_or(default)
 }
 
 #[cfg(test)]
@@ -542,8 +661,8 @@ reason = "test fixture key, not a real secret"
     fn global_only_value_is_used_when_project_unset() {
         let dir = tmp_dir("global-only");
         std::fs::write(dir.join(GLOBAL_CONFIG_FILE), "[check]\nfail_on = \"low\"\n").unwrap();
-        let global = Config::load_global_at(&dir).unwrap();
-        let merged = Config::merge(Config::default(), global);
+        let global = RawConfig::load_global_at(&dir).unwrap();
+        let merged = Config::merge(RawConfig::default(), global);
         assert_eq!(merged.check.fail_on, Severity::Low);
     }
 
@@ -551,8 +670,8 @@ reason = "test fixture key, not a real secret"
     fn project_value_overrides_the_same_key_set_in_global() {
         let dir = tmp_dir("project-overrides");
         std::fs::write(dir.join(GLOBAL_CONFIG_FILE), "[check]\nfail_on = \"low\"\n").unwrap();
-        let global = Config::load_global_at(&dir).unwrap();
-        let project = Config::parse(
+        let global = RawConfig::load_global_at(&dir).unwrap();
+        let project = RawConfig::parse(
             "[check]\nfail_on = \"critical\"\n",
             Path::new(".getdev.toml"),
         )
@@ -563,8 +682,25 @@ reason = "test fixture key, not a real secret"
 
     #[test]
     fn merge_falls_back_to_default_when_neither_layer_sets_a_key() {
-        let merged = Config::merge(Config::default(), Config::default());
+        let merged = Config::merge(RawConfig::default(), RawConfig::default());
         assert_eq!(merged, Config::default());
+    }
+
+    /// B1 regression: presence-based precedence. Global sets `fail_on =
+    /// "low"`; project explicitly sets `fail_on = "high"` — which happens to
+    /// equal the compiled-in default. The old value-based `pick()` treated
+    /// "equals the default" as "wasn't set", so project's explicit "high"
+    /// would have lost to global's "low". Presence-based merge must resolve
+    /// to the project's explicit value.
+    #[test]
+    fn project_value_equal_to_default_still_overrides_global_via_presence() {
+        let dir = tmp_dir("presence-precedence");
+        std::fs::write(dir.join(GLOBAL_CONFIG_FILE), "[check]\nfail_on = \"low\"\n").unwrap();
+        let global = RawConfig::load_global_at(&dir).unwrap();
+        let project =
+            RawConfig::parse("[check]\nfail_on = \"high\"\n", Path::new(".getdev.toml")).unwrap();
+        let merged = Config::merge(project, global);
+        assert_eq!(merged.check.fail_on, Severity::High);
     }
 
     #[test]
