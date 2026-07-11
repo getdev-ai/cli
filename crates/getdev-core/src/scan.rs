@@ -94,6 +94,88 @@ pub enum ScanError {
     Query(#[from] getdev_grammars::tree_sitter::QueryError),
     #[error("parser returned no tree for {path}")]
     Parse { path: PathBuf },
+    /// F7 — files above [`MAX_SCAN_FILE_BYTES`] are never read into memory.
+    #[error("skipped {path}: exceeds {MAX_SCAN_FILE_BYTES} byte scan cap")]
+    TooLarge { path: PathBuf },
+    /// Generic non-fatal skip, used by callers outside this module (e.g.
+    /// `deps::build_graph`, A10) that need to fold a recoverable error
+    /// (malformed manifest, etc.) into the same skip-reporting channel as
+    /// scan errors, without inventing a second reporting type end-to-end.
+    #[error("skipped {path}: {reason}")]
+    Skipped { path: PathBuf, reason: String },
+}
+
+/// F7 — hard cap on the size of a single file this crate will read into
+/// memory for parsing. A multi-GB minified bundle or vendored binary must
+/// never be slurped whole just because it happens to carry a supported
+/// extension.
+pub const MAX_SCAN_FILE_BYTES: u64 = 5 * 1024 * 1024;
+
+/// Directory names excluded from every project walk (A7): installed/vendored
+/// dependency trees and VCS/build metadata a static analyzer must never
+/// treat as first-party project source. Applied via `filter_entry` so
+/// `ignore` never even descends into them, belt-and-braces alongside
+/// `.gitignore` handling (which is skipped entirely on non-git trees without
+/// this).
+const EXCLUDED_DIR_NAMES: &[&str] = &[
+    "node_modules",
+    ".venv",
+    "venv",
+    "env",
+    "site-packages",
+    "__pycache__",
+    ".git",
+    "dist",
+    "build",
+    "target",
+];
+
+/// The single walker constructor every project-source walk in this crate
+/// must build on (A7): `.gitignore` is honored even outside a git repo
+/// (`require_git(false)`), the user's global `~/.gitignore` never leaks into
+/// results (`git_global(false)`), and the excluded directories above are
+/// hard-pruned regardless of `.gitignore` state. `hidden(true)` (skip
+/// dotfiles/dot-directories) is kept at its `ignore` crate default — a
+/// deliberate, documented decision, not an oversight (03-REVIEW.md A7).
+pub fn project_walker(root: &Path) -> WalkBuilder {
+    let mut builder = WalkBuilder::new(root);
+    builder
+        .require_git(false)
+        .git_global(false)
+        .filter_entry(is_not_excluded_dir);
+    builder
+}
+
+/// `WalkBuilder::filter_entry` predicate backing [`project_walker`]. Only
+/// ever prunes directories by exact name match; files are never filtered
+/// here (extension filtering happens at each call site).
+fn is_not_excluded_dir(entry: &ignore::DirEntry) -> bool {
+    if entry.file_type().is_some_and(|t| t.is_dir()) {
+        if let Some(name) = entry.file_name().to_str() {
+            return !EXCLUDED_DIR_NAMES.contains(&name);
+        }
+    }
+    true
+}
+
+/// Read a source file's contents, enforcing the [`MAX_SCAN_FILE_BYTES`] cap
+/// (F7) before ever allocating a buffer for it. Every parse-eligible read in
+/// this crate goes through this function rather than a bare
+/// `std::fs::read_to_string`.
+pub fn read_source_capped(path: &Path) -> Result<String, ScanError> {
+    let metadata = std::fs::metadata(path).map_err(|source| ScanError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if metadata.len() > MAX_SCAN_FILE_BYTES {
+        return Err(ScanError::TooLarge {
+            path: path.to_path_buf(),
+        });
+    }
+    std::fs::read_to_string(path).map_err(|source| ScanError::Read {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 /// Per-file result of the spike scan.
@@ -116,7 +198,7 @@ pub fn scan_path(root: &Path) -> Result<(Vec<FileScan>, Vec<ScanError>), ScanErr
     let mut results = Vec::new();
     let mut skipped = Vec::new();
 
-    for entry in WalkBuilder::new(root).build().flatten() {
+    for entry in project_walker(root).build().flatten() {
         if !entry.file_type().is_some_and(|t| t.is_file()) {
             continue;
         }
@@ -161,7 +243,7 @@ pub fn collect_string_assignments(
     let mut results = Vec::new();
     let mut skipped = Vec::new();
 
-    for entry in WalkBuilder::new(root).build().flatten() {
+    for entry in project_walker(root).build().flatten() {
         if !entry.file_type().is_some_and(|t| t.is_file()) {
             continue;
         }
@@ -180,10 +262,7 @@ pub fn collect_string_assignments(
 }
 
 fn assignments_in_file(path: &Path, lang: Lang) -> Result<Vec<StringAssignment>, ScanError> {
-    let source = std::fs::read_to_string(path).map_err(|source| ScanError::Read {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let source = read_source_capped(path)?;
 
     let language = lang.language();
     let mut parser = Parser::new();
@@ -264,10 +343,7 @@ fn strip_string_delimiters(raw: &str, lang: Lang) -> Option<String> {
 }
 
 fn scan_file(path: &Path, lang: Lang) -> Result<FileScan, ScanError> {
-    let source = std::fs::read_to_string(path).map_err(|source| ScanError::Read {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let source = read_source_capped(path)?;
 
     let language = lang.language();
     let mut parser = Parser::new();
@@ -338,6 +414,66 @@ mod tests {
         let (scans, _) = scan_path(&dir).unwrap();
         assert_eq!(scans.len(), 1);
         assert!(scans[0].has_syntax_errors);
+    }
+
+    /// A7 regression: a bare `WalkBuilder` only honors `.gitignore` inside a
+    /// git repository, so on a fresh clone/tempdir with no `.git` a
+    /// `node_modules` tree was walked and parsed in full. This tempdir is
+    /// deliberately never `git init`-ed.
+    #[test]
+    fn project_walker_excludes_node_modules_outside_a_git_repo() {
+        let dir = tempdir();
+        std::fs::create_dir_all(dir.join("node_modules/some-pkg")).unwrap();
+        std::fs::write(
+            dir.join("node_modules/some-pkg/index.js"),
+            "function vendored() {}\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("app.js"), "function first_party() {}\n").unwrap();
+
+        let (scans, skipped) = scan_path(&dir).unwrap();
+        assert!(skipped.is_empty());
+        assert_eq!(
+            scans.len(),
+            1,
+            "node_modules must be pruned even without a .git directory present"
+        );
+        assert_eq!(scans[0].path, dir.join("app.js"));
+    }
+
+    /// A7 belt-and-braces: the same exclusion set covers Python's venv/
+    /// site-packages/__pycache__ trees, and applies uniformly whether or not
+    /// `.gitignore` would already have caught them.
+    #[test]
+    fn project_walker_excludes_python_vendor_dirs() {
+        let dir = tempdir();
+        for vendor in [".venv", "venv", "env", "site-packages", "__pycache__"] {
+            std::fs::create_dir_all(dir.join(vendor)).unwrap();
+            std::fs::write(dir.join(vendor).join("vendored.py"), "def x(): pass\n").unwrap();
+        }
+        std::fs::write(dir.join("app.py"), "def first_party(): pass\n").unwrap();
+
+        let (scans, skipped) = scan_path(&dir).unwrap();
+        assert!(skipped.is_empty());
+        assert_eq!(scans.len(), 1);
+        assert_eq!(scans[0].path, dir.join("app.py"));
+    }
+
+    /// F7: a file over the scan cap is skipped with a reason, never read
+    /// into memory.
+    #[test]
+    fn oversized_file_is_skipped_not_read() {
+        let dir = tempdir();
+        // one byte over the cap
+        let oversized = "x".repeat(usize::try_from(MAX_SCAN_FILE_BYTES).unwrap() + 1);
+        std::fs::write(dir.join("huge.js"), format!("// {oversized}\n")).unwrap();
+        std::fs::write(dir.join("small.js"), "function ok() {}\n").unwrap();
+
+        let (scans, skipped) = scan_path(&dir).unwrap();
+        assert_eq!(scans.len(), 1);
+        assert_eq!(scans[0].path, dir.join("small.js"));
+        assert_eq!(skipped.len(), 1);
+        assert!(matches!(skipped[0], ScanError::TooLarge { .. }));
     }
 
     fn tempdir() -> PathBuf {
