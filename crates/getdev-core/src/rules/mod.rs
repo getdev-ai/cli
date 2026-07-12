@@ -263,6 +263,23 @@ pub(crate) fn compile_rule(
     rule: &Rule,
     origin: &str,
 ) -> Result<(), RuleLoadError> {
+    // Validate every `path_glob` entry compiles — mirroring the text-regex
+    // `file_glob` path (`CompiledTextMatcher::compile`). Without this, an
+    // invalid user glob is silently accepted at load and, because a builder
+    // that dropped every bad pattern yields an empty `GlobSet` (matches
+    // nothing), silently DISABLES the whole rule at scan time (WR-02): the
+    // worst failure for a security scanner — a false all-clear. A bad glob
+    // must be a typed per-rule load error (fatal for the embedded pack,
+    // collected for `--rules`), exactly like `BadRegex`/`BadGlob` already are
+    // for text matchers.
+    for pattern in &rule.path_glob {
+        globset::Glob::new(pattern).map_err(|source| RuleLoadError::BadGlob {
+            origin: origin.to_owned(),
+            rule_id: rule.id.clone(),
+            source,
+        })?;
+    }
+
     // Combine all AST matchers that share a language into ONE multi-pattern
     // query string (tree-sitter supports many patterns per query). The
     // `QueryCache` is keyed by `(Lang, rule_id)` — exactly one query per
@@ -616,6 +633,52 @@ fixtures:
         assert_eq!(rules.len(), 1);
         assert_eq!(errors.len(), 1);
         assert!(matches!(errors[0], RuleLoadError::QueryCompile { .. }));
+    }
+
+    /// WR-02: an invalid `path_glob` entry is a typed `BadGlob` load error,
+    /// not a silently-accepted rule that matches nothing at scan time.
+    #[test]
+    fn invalid_path_glob_is_a_bad_glob_load_error() {
+        let yaml = VALID_RULE_YAML.replace(
+            "languages: [javascript]",
+            "languages: [javascript]\npath_glob: [\"src/**/*.{ts\"]",
+        );
+        let rule = load_rule(&yaml, "test").unwrap();
+        let mut cache = QueryCache::new();
+        let err = compile_rule(&mut cache, &rule, "test").unwrap_err();
+        assert!(
+            matches!(err, RuleLoadError::BadGlob { .. }),
+            "expected BadGlob, got {err:?}"
+        );
+    }
+
+    /// WR-02: a bad `path_glob` in a `--rules` file is collected per-file
+    /// (never fatal to the pack), just like a bad AST query.
+    #[test]
+    fn user_pack_bad_path_glob_is_collected_not_fatal() {
+        let dir = tempdir();
+        let bad = VALID_RULE_YAML.replace(
+            "languages: [javascript]",
+            "languages: [javascript]\npath_glob: [\"[\"]",
+        );
+        std::fs::write(dir.join("bad.yaml"), bad).unwrap();
+        std::fs::write(
+            dir.join("good.yaml"),
+            VALID_RULE_YAML.replace("audit/cors-wildcard", "audit/other-rule"),
+        )
+        .unwrap();
+
+        let (rules, errors) = load_user_pack(&dir);
+        assert_eq!(rules.len(), 1);
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(errors[0], RuleLoadError::BadGlob { .. }));
+    }
+
+    /// WR-02: the shipped embedded pack (which uses `path_glob`, e.g.
+    /// missing-auth-middleware) still loads clean under the new validation.
+    #[test]
+    fn embedded_pack_path_globs_all_compile() {
+        let _pack = load_embedded().unwrap();
     }
 
     #[test]
