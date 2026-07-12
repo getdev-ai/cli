@@ -253,6 +253,31 @@ pub struct FileScan {
     pub has_syntax_errors: bool,
 }
 
+/// The single source-file walk every collector in this crate builds on
+/// (IN-05): apply [`project_walker`], keep only regular files with a
+/// supported extension, and invoke `visit(path, lang)` for each. Extracting
+/// it means the prune/skip semantics (which dirs are excluded, which entries
+/// count as files) can never drift between `scan_path` and
+/// `collect_string_assignments`. `visit` may return `Err(E)` to abort the
+/// whole walk early (used to fail loudly on grammar/query bugs); a normal
+/// per-file skip is handled inside `visit` and returns `Ok(())`.
+fn for_each_source_file<E>(
+    root: &Path,
+    mut visit: impl FnMut(&Path, Lang) -> Result<(), E>,
+) -> Result<(), E> {
+    for entry in project_walker(root).build().flatten() {
+        if !entry.file_type().is_some_and(|t| t.is_file()) {
+            continue;
+        }
+        let path = entry.path();
+        let Some(lang) = Lang::from_path(path) else {
+            continue;
+        };
+        visit(path, lang)?;
+    }
+    Ok(())
+}
+
 /// Walk `root` (honoring .gitignore) and parse every supported source file,
 /// counting function definitions via one tree-sitter query per language.
 ///
@@ -263,14 +288,7 @@ pub fn scan_path(root: &Path) -> Result<(Vec<FileScan>, Vec<ScanError>), ScanErr
     let mut results = Vec::new();
     let mut skipped = Vec::new();
 
-    for entry in project_walker(root).build().flatten() {
-        if !entry.file_type().is_some_and(|t| t.is_file()) {
-            continue;
-        }
-        let path = entry.path();
-        let Some(lang) = Lang::from_path(path) else {
-            continue;
-        };
+    for_each_source_file(root, |path, lang| {
         match scan_file(path, lang) {
             Ok(scan) => results.push(scan),
             // grammar/query errors are programming bugs — fail loudly;
@@ -278,7 +296,8 @@ pub fn scan_path(root: &Path) -> Result<(Vec<FileScan>, Vec<ScanError>), ScanErr
             Err(err @ (ScanError::Grammar(_) | ScanError::Query(_))) => return Err(err),
             Err(err) => skipped.push(err),
         }
-    }
+        Ok(())
+    })?;
 
     Ok((results, skipped))
 }
@@ -330,14 +349,7 @@ pub fn collect_string_assignments(
     let mut results = Vec::new();
     let mut skipped = Vec::new();
 
-    for entry in project_walker(root).build().flatten() {
-        if !entry.file_type().is_some_and(|t| t.is_file()) {
-            continue;
-        }
-        let path = entry.path();
-        let Some(lang) = Lang::from_path(path) else {
-            continue;
-        };
+    for_each_source_file(root, |path, lang| {
         match assignments_in_file(path, lang) {
             Ok(mut found) => results.append(&mut found),
             Err(err @ (ScanError::Grammar(_) | ScanError::Query(_))) => return Err(err),
