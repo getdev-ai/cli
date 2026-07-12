@@ -57,6 +57,7 @@ pub enum ConfigError {
 /// [`ConfigError::TooLarge`]. Every config read in this module goes through
 /// here rather than a bare `std::fs::read_to_string`.
 fn read_config_capped(path: &Path) -> Result<Option<String>, ConfigError> {
+    use std::io::Read;
     let metadata = match std::fs::metadata(path) {
         Ok(metadata) => metadata,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -67,19 +68,44 @@ fn read_config_capped(path: &Path) -> Result<Option<String>, ConfigError> {
             })
         }
     };
-    if metadata.len() > MAX_CONFIG_FILE_BYTES {
+    // Refuse anything that isn't a regular file: a FIFO/device (or symlink to
+    // one) reports a bogus small `len()`, defeating a metadata-only cap and
+    // letting the read run unbounded (OOM) or block forever (hang). `.getdev.toml`
+    // lives in the attacker-controllable scanned repo, so this must be robust.
+    if !metadata.is_file() {
         return Err(ConfigError::TooLarge {
             path: path.to_path_buf(),
         });
     }
-    match std::fs::read_to_string(path) {
-        Ok(text) => Ok(Some(text)),
-        // a file that vanished between the stat and the read is a race, not a
+    // Bound the READ ITSELF (`take`), not just the metadata pre-check: a file
+    // that grows after the stat must not slurp past the cap. Read cap+1 so an
+    // exactly-at-cap file is accepted and one byte over is rejected.
+    let mut buf = Vec::new();
+    match std::fs::File::open(path).and_then(|f| {
+        f.take(MAX_CONFIG_FILE_BYTES.saturating_add(1))
+            .read_to_end(&mut buf)
+    }) {
+        Ok(_) => {}
+        // a file that vanished between the stat and the open is a race, not a
         // present-but-unreadable error — treat it as absent, same as above
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(source) => Err(ConfigError::Read {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(ConfigError::Read {
+                path: path.to_path_buf(),
+                source,
+            })
+        }
+    }
+    if buf.len() as u64 > MAX_CONFIG_FILE_BYTES {
+        return Err(ConfigError::TooLarge {
             path: path.to_path_buf(),
-            source,
+        });
+    }
+    match String::from_utf8(buf) {
+        Ok(text) => Ok(Some(text)),
+        Err(err) => Err(ConfigError::Read {
+            path: path.to_path_buf(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, err.utf8_error()),
         }),
     }
 }
@@ -675,6 +701,17 @@ reason = "test fixture key, not a real secret"
         let err = Config::load(&dir).unwrap_err();
         assert!(matches!(err, ConfigError::TooLarge { .. }));
         assert!(err.to_string().contains("byte limit"));
+    }
+
+    /// WR-02 hardening (commit-review: cap-defeat via non-regular file): a
+    /// metadata-only size check is defeated by a FIFO/device — it reports
+    /// `len()==0` yet reads unbounded. `/dev/null` (a char device) must be
+    /// refused, not treated as a valid empty config.
+    #[test]
+    #[cfg(unix)]
+    fn non_regular_config_file_is_refused() {
+        let err = read_config_capped(std::path::Path::new("/dev/null")).unwrap_err();
+        assert!(matches!(err, ConfigError::TooLarge { .. }));
     }
 
     /// WR-02: the same cap guards the global config and the `--config`

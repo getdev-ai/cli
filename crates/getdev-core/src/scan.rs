@@ -228,18 +228,40 @@ fn is_not_excluded_dir(entry: &ignore::DirEntry) -> bool {
 /// this crate goes through this function rather than a bare
 /// `std::fs::read_to_string`.
 pub fn read_source_capped(path: &Path) -> Result<String, ScanError> {
+    use std::io::Read;
     let metadata = std::fs::metadata(path).map_err(|source| ScanError::Read {
         path: path.to_path_buf(),
         source,
     })?;
-    if metadata.len() > MAX_SCAN_FILE_BYTES {
+    // Refuse anything that isn't a regular file. A FIFO / device / a symlink to
+    // one reports a bogus small `len()`, so a metadata-only cap can be defeated:
+    // `read_to_string` would then read unbounded (OOM) or block forever (hang).
+    if !metadata.is_file() {
         return Err(ScanError::TooLarge {
             path: path.to_path_buf(),
         });
     }
-    std::fs::read_to_string(path).map_err(|source| ScanError::Read {
+    // Bound the READ ITSELF (`take`), not just the metadata pre-check: a file
+    // that grows after the stat must not slurp past the cap. Read cap+1 so an
+    // exactly-at-cap file is accepted and one byte over is rejected.
+    let mut buf = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|f| {
+            f.take(MAX_SCAN_FILE_BYTES.saturating_add(1))
+                .read_to_end(&mut buf)
+        })
+        .map_err(|source| ScanError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    if buf.len() as u64 > MAX_SCAN_FILE_BYTES {
+        return Err(ScanError::TooLarge {
+            path: path.to_path_buf(),
+        });
+    }
+    String::from_utf8(buf).map_err(|err| ScanError::Read {
         path: path.to_path_buf(),
-        source,
+        source: std::io::Error::new(std::io::ErrorKind::InvalidData, err.utf8_error()),
     })
 }
 
@@ -732,6 +754,17 @@ mod tests {
         assert_eq!(scans[0].path, dir.join("small.js"));
         assert_eq!(skipped.len(), 1);
         assert!(matches!(skipped[0], ScanError::TooLarge { .. }));
+    }
+
+    /// F7 hardening (commit-review: cap-defeat via non-regular file): a
+    /// metadata-only size check is defeated by a FIFO/device — it reports a
+    /// bogus small `len()` yet reads unbounded. `read_source_capped` must
+    /// refuse a non-regular file rather than slurp it.
+    #[test]
+    #[cfg(unix)]
+    fn non_regular_file_is_refused() {
+        let err = read_source_capped(Path::new("/dev/null")).unwrap_err();
+        assert!(matches!(err, ScanError::TooLarge { .. }));
     }
 
     fn tempdir() -> PathBuf {
