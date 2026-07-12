@@ -448,20 +448,142 @@ pub fn snapshot(
     })
 }
 
+/// Resolve snapshot `id` to its `(namespace, commit oid)`. Searches the manual
+/// `refs/getdev/snaps/<id>` namespace FIRST, then `refs/getdev/auto/<id>`
+/// (Open Q1 / A2: `back <N>` searches snaps then auto over the single
+/// shared-counter id space — a given id is only ever in one namespace, but the
+/// search order makes a manual id win if both somehow existed). A missing id is
+/// `NoSuchSnapshot`, returned via `rev-parse --verify --quiet` (no stderr
+/// noise) BEFORE any disk write so a bad id can never partially restore
+/// (T-05-10).
+fn resolve_ref(root: &Path, id: u32) -> Result<(Namespace, String), GitxError> {
+    for ns in [Namespace::Snaps, Namespace::Auto] {
+        let out = git_command_readonly(root)
+            .args([
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("{}^{{commit}}", ns.ref_path(id)),
+            ])
+            .output()?;
+        if out.status.success() {
+            let commit = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+            if !commit.is_empty() {
+                return Ok((ns, commit));
+            }
+        }
+    }
+    Err(GitxError::NoSuchSnapshot { id })
+}
+
 /// Restore the working tree to snapshot `id` (byte-identical over the
-/// snapshotted scope). Implemented in 05-03.
+/// snapshotted scope; D-05 exact-not-additive semantics).
+///
+/// The restore plan is derived entirely from a `diff-tree` between the CURRENT
+/// working state and the target snapshot's tree — never a filesystem walk
+/// (§ Pattern 3). Because gitignored paths never enter either tree, they can
+/// never be classified for overwrite or removal, so restore leaves them
+/// untouched for free (T-05-09 / D-05). Plumbing only — never `git
+/// checkout`/`git restore` (porcelain moves HEAD and runs hooks); every git
+/// call sets an explicit throwaway `GIT_INDEX_FILE`.
 pub fn restore(root: &Path, id: u32) -> Result<RestoreOutcome, GitxError> {
-    let _ = (root, id);
-    Err(GitxError::NotImplemented { op: "restore" })
+    // Resolve the target BEFORE touching the working tree or building a tree —
+    // a bad id must be a clean `NoSuchSnapshot`, never a partial restore
+    // (T-05-10).
+    let (_, target_commit) = resolve_ref(root, id)?;
+    let target_tree = {
+        let out = capture(
+            git_command_readonly(root).args([
+                "rev-parse",
+                "--verify",
+                &format!("{target_commit}^{{tree}}"),
+            ]),
+            "rev-parse",
+        )?;
+        String::from_utf8_lossy(&out).trim().to_owned()
+    };
+
+    // Current working state as a tree (temp index #1 — used only for diffing).
+    let current_tree = build_current_tree(root)?;
+
+    // Classify every in-scope path via a RECURSIVE diff-tree (Pitfall 1: `-r` is
+    // mandatory or only top-level tree entries are reported). Orientation:
+    // current is the FIRST tree, target the SECOND, so a change transforming
+    // current → target reads as: `A` = present only in target → recreate,
+    // `D` = present only in current → created since the snapshot → remove,
+    // `M`/`T` = differs → overwrite from target.
+    let diff = capture(
+        git_command_readonly(root).args([
+            "diff-tree",
+            "--no-commit-id",
+            "-r",
+            "--name-status",
+            &current_tree,
+            &target_tree,
+        ]),
+        "diff-tree",
+    )?;
+
+    let mut restored = 0usize; // `M`/`T` overwritten from target
+    let mut removed = 0usize; // `D` created-since, deleted from disk
+    let mut readded = 0usize; // `A` target-only, recreated
+    let mut created_since: Vec<PathBuf> = Vec::new();
+    for line in String::from_utf8_lossy(&diff).lines() {
+        let mut parts = line.splitn(2, '\t');
+        let status = parts.next().unwrap_or("");
+        let path = match parts.next() {
+            Some(p) if !p.is_empty() => p,
+            _ => continue,
+        };
+        match status.chars().next() {
+            Some('A') => readded += 1,
+            Some('M' | 'T') => restored += 1,
+            Some('D') => {
+                removed += 1;
+                created_since.push(root.join(path));
+            }
+            _ => {}
+        }
+    }
+
+    // Materialize the target with a SECOND, distinct temp index (never reuse
+    // index #1 across diff and checkout — Anti-Pattern / Pitfall): `read-tree`
+    // loads the target tree into the index, `checkout-index -a -f` writes every
+    // target path to disk, overwriting `M`/`T` and recreating target-only `A`
+    // paths in one pass.
+    let index = TempIndex::new("back");
+    capture(
+        git_command(root, index.path()).args(["read-tree", &target_tree]),
+        "read-tree",
+    )?;
+    capture(
+        git_command(root, index.path()).args(["checkout-index", "-a", "-f"]),
+        "checkout-index",
+    )?;
+
+    // Remove every path present now but absent in the target (created since the
+    // snapshot) — D-05's exact-not-additive semantics. Each path is in-scope by
+    // construction (ignored paths never entered either tree). A missing file is
+    // fine (already gone); any other i/o error is surfaced.
+    for path in &created_since {
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(GitxError::Io { source: e }),
+        }
+    }
+
+    Ok(RestoreOutcome {
+        restored,
+        removed,
+        readded,
+    })
 }
 
 /// The id of the most recent manual snapshot (`refs/getdev/snaps/<N>`), the
-/// target of a bare `back`. Implemented in 05-03.
+/// target of a bare `back`, or `None` when no manual snapshot exists (D-02).
 pub fn latest_manual(root: &Path) -> Result<Option<u32>, GitxError> {
-    let _ = root;
-    Err(GitxError::NotImplemented {
-        op: "latest_manual",
-    })
+    highest_id(root, Namespace::Snaps)
 }
 
 /// All manual snapshots, newest first, for `snap list`. Implemented in 05-04.
