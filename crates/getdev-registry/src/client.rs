@@ -558,11 +558,32 @@ fn parse_iso8601_utc(s: &str) -> Option<i64> {
     if time_parts.next().is_some() {
         return None;
     }
-    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+    // IN-02: reject impossible calendar dates (Feb 30, Apr 31, ...) rather
+    // than letting `days_from_civil` compute a nonsense day for them —
+    // untrusted npm `time.created` feeding the NewPackage typosquat
+    // heuristic must not be skewed by a hijacked-mirror out-of-range day.
+    if d < 1 || d > days_in_month(y, m)? {
         return None;
     }
     let days = days_from_civil(y, m, d);
     Some(days * 86400 + hh * 3600 + mm * 60 + ss)
+}
+
+/// Number of days in a proleptic-Gregorian month, or `None` for an
+/// out-of-range month (subsumes the old `1..=12` guard).
+fn days_in_month(year: i64, month: u32) -> Option<u32> {
+    let days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => return None,
+    };
+    Some(days)
+}
+
+fn is_leap_year(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
 }
 
 #[cfg(test)]
@@ -594,6 +615,23 @@ mod tests {
         );
         assert_eq!(parse_iso8601_utc("not-a-date"), None);
         assert_eq!(parse_iso8601_utc("2014-03-14T09:09:20+02:00"), None);
+    }
+
+    #[test]
+    fn iso8601_rejects_impossible_calendar_dates() {
+        // IN-02: an out-of-range day-of-month must be rejected, not fed to
+        // days_from_civil (which would compute a nonsense date).
+        assert_eq!(parse_iso8601_utc("2024-02-30T00:00:00.000Z"), None); // Feb 30
+        assert_eq!(parse_iso8601_utc("2023-02-29T00:00:00.000Z"), None); // non-leap Feb 29
+        assert_eq!(parse_iso8601_utc("2024-04-31T00:00:00.000Z"), None); // Apr 31
+        assert_eq!(parse_iso8601_utc("2024-00-10T00:00:00.000Z"), None); // month 0
+        assert_eq!(parse_iso8601_utc("2024-13-10T00:00:00.000Z"), None); // month 13
+        assert_eq!(parse_iso8601_utc("2024-01-00T00:00:00.000Z"), None); // day 0
+                                                                         // Valid boundary dates must still parse.
+        assert!(parse_iso8601_utc("2024-02-29T00:00:00.000Z").is_some()); // leap Feb 29
+        assert!(parse_iso8601_utc("2024-01-31T00:00:00.000Z").is_some());
+        assert!(parse_iso8601_utc("2000-02-29T00:00:00.000Z").is_some()); // 2000 is leap
+        assert!(parse_iso8601_utc("1900-02-29T00:00:00.000Z").is_none()); // 1900 is not
     }
 
     #[test]
