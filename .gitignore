@@ -24,6 +24,9 @@ __pycache__/
 *.p12
 credentials*.toml
 
+# proptest failing-seed caches — generated runtime output, regenerated on demand
+*.proptest-regressions
+
 # AI-assistant working files & internal planning — local only, not for the public repo
 CLAUDE.md
 CLAUDE.local.md
