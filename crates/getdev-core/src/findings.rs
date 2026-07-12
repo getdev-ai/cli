@@ -242,11 +242,22 @@ impl FindingsReport {
     /// (worst first), then file, then line — the stable presentation order
     /// shared by all renderers.
     pub fn new(tool_version: &str, project: ProjectInfo, mut findings: Vec<Finding>) -> Self {
+        // IN-04: sort on a TOTAL key so identical input always yields
+        // identical output (deterministic-core principle). Severity/file/line
+        // alone are not total — two findings tied on all three (e.g. two
+        // secrets on the same line) would otherwise keep filesystem
+        // walk-order, which is not stable across runs/filesystems. Extending
+        // the key through column, id, and finally message makes ties resolve
+        // the same way every time regardless of the order findings were
+        // collected in.
         findings.sort_by(|a, b| {
             b.severity
                 .cmp(&a.severity)
                 .then_with(|| a.file.cmp(&b.file))
                 .then_with(|| a.line.cmp(&b.line))
+                .then_with(|| a.column.cmp(&b.column))
+                .then_with(|| a.id.cmp(&b.id))
+                .then_with(|| a.message.cmp(&b.message))
         });
         Self {
             schema_version: SCHEMA_VERSION.to_owned(),
@@ -337,5 +348,67 @@ mod tests {
         // round-trips
         let back: FindingsReport = serde_json::from_value(json).unwrap();
         assert_eq!(back.findings.len(), 2);
+    }
+
+    /// IN-04 regression: findings that tie on (severity, file, line) must
+    /// still order deterministically — independent of the order they were
+    /// collected in (filesystem walk order is not stable). Build the same set
+    /// of exact-tie findings in two different input orders and assert the
+    /// resulting order is byte-for-byte identical, resolved by the total
+    /// tie-break key (column, then id, then message).
+    #[test]
+    fn exact_tie_findings_order_deterministically_regardless_of_input_order() {
+        let make = |id: &str, column: u32, message: &str| Finding {
+            id: id.into(),
+            command: "audit".into(),
+            severity: Severity::High,
+            confidence: Confidence::High,
+            file: "src/app.ts".into(),
+            line: Some(12),
+            column: Some(column),
+            end_line: Some(12),
+            message: message.into(),
+            detail: None,
+            suggestion: None,
+            remediation: None,
+            fixable: false,
+            refs: vec![],
+            fingerprint: None,
+        };
+        // three findings tied on severity/file/line, differing only in the
+        // tie-break dimensions.
+        let a = make("audit/secret-a", 7, "first secret on the line");
+        let b = make("audit/secret-b", 7, "second secret, same column");
+        let c = make("audit/secret-a", 3, "earlier column wins");
+
+        let project = ProjectInfo {
+            path: ".".into(),
+            stack: vec!["node".into()],
+        };
+        let order_one = FindingsReport::new(
+            "0.1.0-dev",
+            project.clone(),
+            vec![a.clone(), b.clone(), c.clone()],
+        );
+        let order_two = FindingsReport::new("0.1.0-dev", project, vec![b, c, a]);
+
+        let ids_one: Vec<_> = order_one
+            .findings
+            .iter()
+            .map(|f| (f.id.clone(), f.column, f.message.clone()))
+            .collect();
+        let ids_two: Vec<_> = order_two
+            .findings
+            .iter()
+            .map(|f| (f.id.clone(), f.column, f.message.clone()))
+            .collect();
+        assert_eq!(ids_one, ids_two, "tie ordering must be input-independent");
+        // and the total key resolved as expected: column 3 first, then the
+        // two column-7 rows by id.
+        assert_eq!(ids_one[0].0, "audit/secret-a");
+        assert_eq!(ids_one[0].1, Some(3));
+        assert_eq!(ids_one[1].0, "audit/secret-a");
+        assert_eq!(ids_one[1].1, Some(7));
+        assert_eq!(ids_one[2].0, "audit/secret-b");
     }
 }
