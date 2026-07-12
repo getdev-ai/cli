@@ -253,9 +253,12 @@ pub fn check(
                 "no readable types/source",
                 "check that it ships type declarations (`.d.ts`) or readable Python source",
             ),
-            SurfaceTier::Resolved | SurfaceTier::Dynamic => unreachable!(
-                "aggregated only ever holds NotInstalled/Unreadable misses (see match above)"
-            ),
+            // `aggregated` is only ever populated in the
+            // NotInstalled/Unreadable arm above, so this is dead today — but
+            // degrade gracefully (skip emitting) rather than panic across the
+            // crate boundary if that populating match is ever broadened
+            // (IN-01; CLAUDE.md hard rule 1 forbids panics in a library).
+            SurfaceTier::Resolved | SurfaceTier::Dynamic => continue,
         };
         results.push(ApiResult {
             kind: ApiResultKind::NonexistentApi,
