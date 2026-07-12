@@ -81,8 +81,13 @@ fn render_finding(out: &mut String, finding: &Finding, color: ColorMode) {
         None => finding.file.clone(),
     };
 
+    // `severity_label` returns the label already padded to the column width
+    // (and colorized after padding) — do NOT re-apply a `:<10` here: under
+    // color the string carries ANSI escape bytes, and format-spec padding
+    // counts those bytes, so the columns would drift by the escape length
+    // (IN-03).
     let label = severity_label(finding.severity, color);
-    let _ = writeln!(out, "{label:<10} {:<28} {location}", finding.id);
+    let _ = writeln!(out, "{label} {:<28} {location}", finding.id);
 
     let mut message = finding.message.clone();
     if finding.confidence < Confidence::High {
@@ -97,8 +102,21 @@ fn render_finding(out: &mut String, finding: &Finding, color: ColorMode) {
     }
 }
 
+/// Column width the severity label is padded to. Must fit the widest label
+/// (`CRITICAL`, 8) plus breathing room.
+const SEVERITY_LABEL_WIDTH: usize = 10;
+
 fn severity_label(severity: Severity, color: ColorMode) -> String {
-    let text = severity.as_str().to_uppercase();
+    // IN-03: pad the PLAIN text to the column width FIRST, then colorize the
+    // padded string. Colorizing first (and padding the result) would make the
+    // caller's width spec count the ANSI escape bytes and misalign every
+    // colored row. With this order the visible width is always
+    // `SEVERITY_LABEL_WIDTH` whether color is on or off.
+    let text = format!(
+        "{:<width$}",
+        severity.as_str().to_uppercase(),
+        width = SEVERITY_LABEL_WIDTH
+    );
     if color == ColorMode::Off {
         return text;
     }
@@ -185,6 +203,64 @@ mod tests {
             ColorMode::Off,
         );
         assert!(out.contains("(confidence: low)"));
+    }
+
+    /// Strip ANSI SGR escape sequences (`ESC [ ... m`) so a colored line can
+    /// be measured by its VISIBLE width.
+    fn strip_ansi(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let mut chars = s.chars();
+        while let Some(c) = chars.next() {
+            if c == '\u{1b}' {
+                // consume up to and including the terminating 'm'
+                for e in chars.by_ref() {
+                    if e == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    /// IN-03 regression: under color the severity label carries ANSI escape
+    /// bytes, but its VISIBLE width must stay fixed so the `id`/location
+    /// columns line up. Render two findings whose labels differ in length
+    /// (`CRITICAL` vs `LOW`) with color ON, strip the escapes, and assert the
+    /// id column starts at the same visible offset on both rows.
+    #[test]
+    fn colored_labels_keep_columns_aligned() {
+        let out = render_terminal(
+            &report(vec![
+                finding(Severity::Critical, Confidence::High),
+                finding(Severity::Low, Confidence::High),
+            ]),
+            ColorMode::On,
+        );
+        // color must actually have been applied
+        assert!(
+            out.contains('\u{1b}'),
+            "expected ANSI escapes with color on"
+        );
+
+        let id_col = |needle: &str| -> usize {
+            let line = out
+                .lines()
+                .map(strip_ansi)
+                .find(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("no {needle} row in:\n{out}"));
+            line.find("real/nonexistent-package")
+                .unwrap_or_else(|| panic!("id must be present on the row: {line}"))
+        };
+        assert_eq!(
+            id_col("CRITICAL"),
+            id_col("LOW"),
+            "the id column must start at the same visible offset regardless of label length"
+        );
+        // and the visible offset is exactly the padded label width + 1 space
+        assert_eq!(id_col("CRITICAL"), SEVERITY_LABEL_WIDTH + 1);
     }
 
     #[test]
