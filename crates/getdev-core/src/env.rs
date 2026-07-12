@@ -496,9 +496,26 @@ fn ensure_os_import(content: &str) -> String {
 
 /// dotenv-format value: quote when the value contains characters that would
 /// change meaning unquoted.
+///
+/// WR-02/02-env-REVIEW.md: a newline is whitespace, so it triggers quoting —
+/// but writing the raw newline splits `KEY=` across physical lines, and
+/// dotenv parsers that don't support multi-line double-quoted values mis-read
+/// the key and every line after it. Highest-severity secret shapes (PEM
+/// private keys — the `private-key-block` pattern — and JS/Python
+/// triple-quoted literals) carry real newlines, so escape `\n`/`\r` inside
+/// the quoted branch (dotenv decodes `\n`/`\r` back inside double quotes),
+/// keeping the value on one logical line. `\\` is escaped first so the
+/// backslashes we introduce for `\n`/`\r` are not doubled.
 fn dotenv_quote(value: &str) -> String {
     if value.contains(|c: char| c.is_whitespace() || c == '#' || c == '"' || c == '\'') {
-        format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+        format!(
+            "\"{}\"",
+            value
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('\r', "\\r")
+                .replace('\n', "\\n")
+        )
     } else {
         value.to_owned()
     }
@@ -797,6 +814,32 @@ mod tests {
         let debug_output = format!("{entry:?}");
         assert!(!debug_output.contains("sk_live_FAKEFAKEFAKE1234"));
         assert!(debug_output.contains("«redacted»"));
+    }
+
+    /// WR-02 regression: a multi-line value (PEM key / triple-quoted literal)
+    /// must be written as a single logical `.env` entry — quoted with `\n`
+    /// escaped — not split across physical lines.
+    #[test]
+    fn dotenv_quote_escapes_newlines_into_one_line() {
+        let pem = "-----BEGIN KEY-----\nabc\ndef\n-----END KEY-----";
+        let quoted = dotenv_quote(pem);
+        assert!(
+            !quoted.contains('\n'),
+            "quoted value must not contain a raw newline: {quoted:?}"
+        );
+        assert!(
+            quoted.starts_with('"') && quoted.ends_with('"'),
+            "{quoted:?}"
+        );
+        assert_eq!(
+            quoted,
+            "\"-----BEGIN KEY-----\\nabc\\ndef\\n-----END KEY-----\""
+        );
+        // a whole `KEY=value\n` line stays a single physical line
+        let line = format!("K={quoted}\n");
+        assert_eq!(line.matches('\n').count(), 1, "one trailing newline only");
+        // carriage returns are escaped too
+        assert!(!dotenv_quote("a\r\nb").contains('\r'));
     }
 
     #[test]
