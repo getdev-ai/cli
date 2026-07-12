@@ -20,9 +20,17 @@ use super::RuleLoadError;
 
 /// The exhaustive set of tree-sitter predicate names the Rust binding
 /// auto-evaluates inside `QueryCursor::matches()` (verified against the
-/// vendored `tree-sitter-0.25.10` binding source — see docs/SPEC-RULES.md
-/// "Predicate support"). Names here are the raw operator text as the
-/// binding parses it: WITHOUT the leading `#`, WITH the trailing `?`.
+/// vendored `tree-sitter-0.25.10` binding source, lines 2614-2747 — see
+/// docs/SPEC-RULES.md "Predicate support"). These all parse into
+/// `text_predicates`, which `matches()` evaluates. Names here are the raw
+/// operator text as the binding parses it: WITHOUT the leading `#`, WITH the
+/// trailing `?`.
+///
+/// NOTE: `is?`/`is-not?` are deliberately ABSENT — the binding parses them
+/// into `property_predicates`, NOT `text_predicates`, and `matches()` never
+/// evaluates them (they are metadata assertions for external consumers). A
+/// rule using `#is?` would therefore silently match-all, so [`QueryCache::compile`]
+/// rejects any query carrying a property predicate.
 const AUTO_EVALUATED_PREDICATES: &[&str] = &[
     "eq?",
     "not-eq?",
@@ -32,8 +40,6 @@ const AUTO_EVALUATED_PREDICATES: &[&str] = &[
     "not-match?",
     "any-match?",
     "any-not-match?",
-    "is?",
-    "is-not?",
     "any-of?",
     "not-any-of?",
 ];
@@ -87,6 +93,13 @@ impl QueryCache {
                     unsupported.push(format!("#{name}"));
                 }
             }
+            // `#is?`/`#is-not?` parse into property_predicates, which
+            // `matches()` does NOT evaluate (tree-sitter-0.25.10 lib.rs:2700)
+            // — an unrejected one would silently match-all. The bool is
+            // `true` for `#is?`, `false` for `#is-not?` (lib.rs:2708).
+            for property in query.property_predicates(pattern_index) {
+                unsupported.push(if property.1 { "#is?" } else { "#is-not?" }.to_owned());
+            }
         }
         if !unsupported.is_empty() {
             unsupported.sort();
@@ -106,6 +119,16 @@ impl QueryCache {
     #[must_use]
     pub fn get(&self, lang: Lang, rule_id: &str) -> Option<&Query> {
         self.queries.get(&(lang, rule_id.to_owned()))
+    }
+
+    /// Evict every compiled query for `rule_id` (all languages). Used when a
+    /// `--rules` user pack overrides an embedded rule of the same id: the
+    /// stale embedded queries must be dropped first, otherwise the
+    /// already-present fast-path in [`Self::compile`] keeps them and the
+    /// override's replacement query never compiles (BL-01, docs/SPEC-RULES.md
+    /// "a user rule … overrides that rule entirely").
+    pub fn remove_rule(&mut self, rule_id: &str) {
+        self.queries.retain(|(_, id), _| id != rule_id);
     }
 
     #[must_use]
@@ -158,6 +181,41 @@ mod tests {
         };
         assert!(names.contains("matches?"), "names was: {names}");
         assert_eq!(cache.len(), 0, "a rejected query must never be cached");
+    }
+
+    /// WR-01 regression: `#is?`/`#is-not?` parse into property_predicates,
+    /// which `matches()` never evaluates — an accepted one would silently
+    /// match-all. They must be rejected at compile, not treated as
+    /// auto-evaluated.
+    #[test]
+    fn property_predicate_is_rejected() {
+        let mut cache = QueryCache::new();
+        let query = "(call_expression function: (identifier) @fn (#is? @fn local)) @call";
+        let err = cache
+            .compile(Lang::JavaScript, "audit/bad", "test", query)
+            .unwrap_err();
+        let RuleLoadError::UnsupportedPredicate { names, .. } = &err else {
+            panic!("expected UnsupportedPredicate, got {err:?}");
+        };
+        assert!(names.contains("is?"), "names was: {names}");
+        assert_eq!(cache.len(), 0, "a rejected query must never be cached");
+    }
+
+    /// BL-01 support: `remove_rule` evicts every language's query for an id
+    /// so a `--rules` override can recompile its replacement query.
+    #[test]
+    fn remove_rule_evicts_all_languages() {
+        let mut cache = QueryCache::new();
+        cache
+            .compile(Lang::JavaScript, "audit/x", "test", VALID_QUERY)
+            .unwrap();
+        cache
+            .compile(Lang::TypeScript, "audit/x", "test", VALID_QUERY)
+            .unwrap();
+        assert_eq!(cache.len(), 2);
+        cache.remove_rule("audit/x");
+        assert_eq!(cache.len(), 0);
+        assert!(cache.get(Lang::JavaScript, "audit/x").is_none());
     }
 
     /// Task 2 behavior: a syntactically invalid query is a clean

@@ -386,6 +386,13 @@ pub fn load_user_pack(dir: &Path) -> (Vec<Rule>, Vec<RuleLoadError>) {
 pub fn merge(mut embedded: RulePack, user: Vec<Rule>) -> (RulePack, Vec<String>) {
     let mut warnings = Vec::new();
     for rule in user {
+        // A user rule overrides an embedded rule of the same id ENTIRELY
+        // (docs/SPEC-RULES.md). Evict any cached queries for this id FIRST —
+        // otherwise the already-present fast-path in `QueryCache::compile`
+        // keeps the stale embedded query and the override's replacement query
+        // is never compiled (BL-01), so the embedded pattern would run under
+        // the user's metadata.
+        embedded.query_cache.remove_rule(&rule.id);
         // Already validated to compile once by `load_user_pack`; re-insert
         // into the embedded cache so the merged pack's queries are actually
         // usable. Compilation is pure/deterministic, so a second failure

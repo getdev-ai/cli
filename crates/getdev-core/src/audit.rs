@@ -579,6 +579,97 @@ fixtures:
         );
     }
 
+    const OVERRIDE_EMBEDDED_YAML: &str = r#"
+id: audit/test-override
+severity: high
+confidence: high
+languages: [javascript]
+description: embedded rule — matches alpha()
+message: "embedded finding"
+remediation: remove it
+refs: []
+matchers:
+  - language: javascript
+    query: |
+      (call_expression
+        function: (identifier) @fn (#eq? @fn "alpha")) @finding
+fixtures:
+  positive: [a.js, b.js, c.js]
+  negative: [d.js, e.js, f.js]
+"#;
+
+    const OVERRIDE_USER_YAML: &str = r#"
+id: audit/test-override
+severity: high
+confidence: high
+languages: [javascript]
+description: user override — matches beta() instead
+message: "user override finding"
+remediation: remove it
+refs: []
+matchers:
+  - language: javascript
+    query: |
+      (call_expression
+        function: (identifier) @fn (#eq? @fn "beta")) @finding
+fixtures:
+  positive: [a.js, b.js, c.js]
+  negative: [d.js, e.js, f.js]
+"#;
+
+    /// BL-01 regression: a `--rules` user rule that overrides an embedded
+    /// rule of the same id replaces its AST query ENTIRELY. Pre-fix, the
+    /// `(lang, id)`-keyed cache's already-present fast-path kept the embedded
+    /// query, so the override was silently ineffective (the embedded pattern
+    /// ran under the user's metadata). Post-fix: `merge` evicts the embedded
+    /// query first, so the override's query is what runs.
+    #[test]
+    fn user_pack_override_replaces_embedded_query() {
+        let embedded_dir = tempdir("override-embedded");
+        std::fs::write(embedded_dir.join("rule.yaml"), OVERRIDE_EMBEDDED_YAML).unwrap();
+        let embedded = build_pack(&embedded_dir);
+
+        let user_dir = tempdir("override-user");
+        std::fs::write(user_dir.join("rule.yaml"), OVERRIDE_USER_YAML).unwrap();
+        let (user_rules, errs) = rules::load_user_pack(&user_dir);
+        assert!(errs.is_empty(), "user pack load errors: {errs:?}");
+
+        let (merged, warnings) = rules::merge(embedded, user_rules);
+        assert_eq!(warnings.len(), 1, "override should warn once: {warnings:?}");
+
+        // The override matches beta(), not alpha().
+        let proj_beta = tempdir("override-beta");
+        std::fs::write(proj_beta.join("f.js"), "beta();\n").unwrap();
+        let (hits_beta, _) = run(
+            &proj_beta,
+            &merged,
+            &DetectedFrameworks::default(),
+            &AuditOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            hits_beta.len(),
+            1,
+            "override query must fire on beta(): {hits_beta:?}"
+        );
+        assert_eq!(hits_beta[0].message, "user override finding");
+
+        // The embedded pattern (alpha) must no longer fire — it was replaced.
+        let proj_alpha = tempdir("override-alpha");
+        std::fs::write(proj_alpha.join("f.js"), "alpha();\n").unwrap();
+        let (hits_alpha, _) = run(
+            &proj_alpha,
+            &merged,
+            &DetectedFrameworks::default(),
+            &AuditOptions::default(),
+        )
+        .unwrap();
+        assert!(
+            hits_alpha.is_empty(),
+            "embedded query must be evicted by the override: {hits_alpha:?}"
+        );
+    }
+
     const FRAMEWORK_SCOPED_RULE_YAML: &str = r#"
 id: audit/test-framework-scoped
 severity: high

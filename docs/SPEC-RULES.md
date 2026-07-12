@@ -63,9 +63,11 @@ fixtures:
 
 A `query:` matcher's tree-sitter predicates (`#eq?`, `#match?`, `#any-of?`, etc.) are evaluated **automatically** by the Rust `tree-sitter` binding inside `QueryCursor::matches()` — `core::rules` contains no custom predicate evaluator. Only the following predicate names are auto-evaluated and therefore usable in a rule's `query:`:
 
-`#eq?` `#not-eq?` `#any-eq?` `#any-not-eq?` `#match?` `#not-match?` `#any-match?` `#any-not-match?` `#is?` `#is-not?` `#any-of?` `#not-any-of?`
+`#eq?` `#not-eq?` `#any-eq?` `#any-not-eq?` `#match?` `#not-match?` `#any-match?` `#any-not-match?` `#any-of?` `#not-any-of?`
 
-Any other predicate name — a typo (`#matches?`) or a genuinely unsupported predicate — is rejected as a load-time error (`RuleLoadError::UnsupportedPredicate`) naming the offending predicate. It is never silently ignored: an unevaluated predicate would otherwise make the surrounding pattern match unconditionally, turning a typo into a rule that fires on everything.
+`#is?` and `#is-not?` are **NOT** supported: the `tree-sitter` binding parses them into *property predicates* (metadata assertions for external consumers), not *text predicates*, so `QueryCursor::matches()` never evaluates them — a rule using one would match unconditionally on that constraint. They are therefore rejected at load time, exactly like any other unsupported predicate.
+
+Any other predicate name — a typo (`#matches?`), a property predicate (`#is?`/`#is-not?`), or a genuinely unsupported predicate — is rejected as a load-time error (`RuleLoadError::UnsupportedPredicate`) naming the offending predicate. It is never silently ignored: an unevaluated predicate would otherwise make the surrounding pattern match unconditionally, turning a typo into a rule that fires on everything.
 
 ## Pack merge & collisions
 
