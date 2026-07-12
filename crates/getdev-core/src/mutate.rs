@@ -198,7 +198,14 @@ fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
             .unwrap_or_else(|| "file".to_owned()),
         std::process::id()
     ));
-    std::fs::write(&tmp, content)?;
+    // IN-07: create the temp at owner-only perms UP FRONT. A plain
+    // `fs::write` creates it at the umask default (typically 0644,
+    // world-readable); for a brand-new secret-bearing file (`env --write`
+    // creating `.env`) there is no existing target to copy perms from, so the
+    // secret would land — and stay — world-readable. A security tool that
+    // writes secrets must never do that. For an existing target we still copy
+    // its own perms below so executable scripts etc. keep their mode.
+    write_private_tmp(&tmp, content)?;
     // carry over permissions from an existing target (e.g. executable scripts)
     if let Ok(meta) = std::fs::metadata(&real_path) {
         let _ = std::fs::set_permissions(&tmp, meta.permissions());
@@ -208,6 +215,34 @@ fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
         let _ = std::fs::remove_file(&tmp);
     }
     renamed
+}
+
+/// Write `content` to a freshly-created temp file at owner-only permissions
+/// (0600) on Unix, so a secret-bearing temp is never even briefly
+/// world-readable (IN-07). The `mode` is applied atomically at `open` time,
+/// closing the window a `write`-then-`set_permissions` would leave open. On
+/// non-Unix targets, where the Unix permission model does not apply, this is
+/// a plain write.
+#[cfg(unix)]
+fn write_private_tmp(tmp: &Path, content: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(tmp)?;
+    // a pre-existing temp (e.g. a same-pid retry after a crash) would keep
+    // its old mode through `open`, so force owner-only explicitly too.
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    file.write_all(content.as_bytes())
+}
+
+#[cfg(not(unix))]
+fn write_private_tmp(tmp: &Path, content: &str) -> std::io::Result<()> {
+    std::fs::write(tmp, content)
 }
 
 fn roll_back(written: &[&PlannedWrite]) -> String {
@@ -417,6 +452,31 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(entries, vec!["shared.js".to_owned()]);
+    }
+
+    /// IN-07 regression: a brand-new secret-bearing file (the `.env` case)
+    /// must be created owner-only (0600), never at the umask default
+    /// (typically 0644, world-readable). Unix-only: the permission model
+    /// doesn't apply elsewhere.
+    #[cfg(unix)]
+    #[test]
+    fn new_secret_file_is_created_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempdir("perms");
+        let path = dir.join(".env");
+        apply(vec![PlannedWrite::WriteFile {
+            path: path.clone(),
+            original: None,
+            new_content: "STRIPE=sk_live_FAKEFAKEFAKE1234\n".into(),
+        }])
+        .unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "a new secret-bearing file must be owner-only, was {mode:o}"
+        );
     }
 
     #[test]
