@@ -84,7 +84,10 @@ pub fn run(args: &EnvArgs) -> anyhow::Result<u8> {
     // findings still print before the error exit — the apply error is
     // propagated only after rendering below.
     let applied_result = if args.write && !plan.entries.is_empty() {
-        Some(env::apply(&args.path, &plan, &options))
+        // 05-05 swaps this `None` for a getdev-gitx-backed AutoSnapHook so
+        // multi-file `env --write` mutations auto-snapshot first; a placeholder
+        // for now keeps the workspace green.
+        Some(env::apply(&args.path, &plan, &options, None))
     } else {
         None
     };

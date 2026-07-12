@@ -309,6 +309,7 @@ pub fn apply(
     root: &Path,
     plan: &EnvPlan,
     options: &EnvOptions,
+    hook: Option<&dyn crate::mutate::PreMutateHook>,
 ) -> Result<AppliedSummary, EnvError> {
     let mut writes: Vec<PlannedWrite> = Vec::new();
 
@@ -441,7 +442,7 @@ pub fn apply(
         });
     }
 
-    mutate::apply(writes, None)?;
+    mutate::apply(writes, hook)?;
 
     Ok(AppliedSummary {
         vars_written,
@@ -647,7 +648,7 @@ mod tests {
 
         // apply must succeed — mutate's reparse-verify rejects invalid JS, so
         // Ok here proves `process.env._2FA_TOKEN` is syntactically valid.
-        apply(&dir, &plan, &EnvOptions::default()).unwrap();
+        apply(&dir, &plan, &EnvOptions::default(), None).unwrap();
 
         let rewritten = std::fs::read_to_string(dir.join("cfg.js")).unwrap();
         assert!(rewritten.contains("process.env._2FA_TOKEN"), "{rewritten}");
@@ -799,7 +800,7 @@ mod tests {
         .unwrap();
 
         let plan = plan(&dir, &EnvOptions::default()).unwrap();
-        apply(&dir, &plan, &EnvOptions::default()).unwrap();
+        apply(&dir, &plan, &EnvOptions::default(), None).unwrap();
 
         let rewritten = std::fs::read_to_string(dir.join("config.py")).unwrap();
         assert!(
@@ -970,7 +971,7 @@ mod tests {
             "value with a \\n escape still classifies"
         );
         // apply must not raise Stale — the verbatim value matches source bytes
-        apply(&dir, &plan, &EnvOptions::default()).unwrap();
+        apply(&dir, &plan, &EnvOptions::default(), None).unwrap();
 
         let env_file = std::fs::read_to_string(dir.join(".env")).unwrap();
         // written in escaped source form (literal backslash-n), NOT a newline

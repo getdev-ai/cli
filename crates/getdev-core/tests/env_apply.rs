@@ -45,7 +45,7 @@ fn apply_rewrites_extracts_and_stays_parseable() {
 
     let plan = env::plan(&dir, &options).unwrap();
     assert_eq!(plan.entries.len(), 3);
-    let summary = env::apply(&dir, &plan, &options).unwrap();
+    let summary = env::apply(&dir, &plan, &options, None).unwrap();
     assert_eq!(summary.vars_written.len(), 3);
     assert_eq!(summary.files_rewritten.len(), 2);
     assert!(summary.env_file_created);
@@ -116,7 +116,7 @@ fn apply_appends_without_clobbering_existing_env_files() {
     let options = EnvOptions::default();
 
     let plan = env::plan(&dir, &options).unwrap();
-    let summary = env::apply(&dir, &plan, &options).unwrap();
+    let summary = env::apply(&dir, &plan, &options, None).unwrap();
 
     let env_file = std::fs::read_to_string(dir.join(".env")).unwrap();
     assert!(
@@ -153,7 +153,7 @@ fn env_key_added_between_plan_and_apply_is_not_duplicated() {
     )
     .unwrap();
 
-    let summary = env::apply(&dir, &plan, &options).unwrap();
+    let summary = env::apply(&dir, &plan, &options, None).unwrap();
     assert_eq!(
         summary.vars_skipped_stale,
         vec!["STRIPE_SECRET_KEY".to_owned()]
@@ -181,7 +181,7 @@ fn stale_plan_is_rejected_and_nothing_is_written() {
     // file changes between plan and apply
     std::fs::write(dir.join("pay.js"), "const x = 1;\n").unwrap();
 
-    let err = env::apply(&dir, &plan, &options).unwrap_err();
+    let err = env::apply(&dir, &plan, &options, None).unwrap_err();
     assert!(err.to_string().contains("changed since the plan"));
     assert!(!dir.join(".env").exists(), "stale apply must write nothing");
 }
