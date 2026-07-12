@@ -586,17 +586,141 @@ pub fn latest_manual(root: &Path) -> Result<Option<u32>, GitxError> {
     highest_id(root, Namespace::Snaps)
 }
 
-/// All manual snapshots, newest first, for `snap list`. Implemented in 05-04.
-pub fn list(root: &Path) -> Result<Vec<SnapMeta>, GitxError> {
-    let _ = root;
-    Err(GitxError::NotImplemented { op: "list" })
+/// The oid of git's empty tree, computed from this repo's object format (so it
+/// is correct for both SHA-1 and SHA-256 repos rather than hard-coding the
+/// SHA-1 constant). git always resolves the empty tree even when unstored, so
+/// this is a safe left-hand side for a "full file count" diff.
+fn empty_tree(root: &Path) -> Result<String, GitxError> {
+    let out = capture(
+        git_command_readonly(root).args(["hash-object", "-t", "tree", null_device()]),
+        "hash-object",
+    )?;
+    Ok(String::from_utf8_lossy(&out).trim().to_owned())
 }
 
-/// Files-changed summary of snapshot `id` vs the current tree, for
-/// `snap diff <id>`. Implemented in 05-04.
+/// The A/D/M name-status changes transforming `from_tree` into `to_tree`, via a
+/// RECURSIVE `diff-tree` (Pitfall 1: `-r` is mandatory or only top-level tree
+/// entries are reported). This is the same name-status sequence `restore` folds
+/// (Pattern 3); `list` counts the rows and `diff` folds them. `'T'` (type
+/// change) collapses to `'M'`. Read-only.
+fn diff_tree_name_status(
+    root: &Path,
+    from_tree: &str,
+    to_tree: &str,
+) -> Result<Vec<(char, String)>, GitxError> {
+    let out = capture(
+        git_command_readonly(root).args([
+            "diff-tree",
+            "--no-commit-id",
+            "-r",
+            "--name-status",
+            from_tree,
+            to_tree,
+        ]),
+        "diff-tree",
+    )?;
+    let mut changes = Vec::new();
+    for line in String::from_utf8_lossy(&out).lines() {
+        let mut parts = line.splitn(2, '\t');
+        let status = parts.next().unwrap_or("");
+        let path = match parts.next() {
+            Some(p) if !p.is_empty() => p.to_owned(),
+            _ => continue,
+        };
+        let c = match status.chars().next() {
+            Some('A') => 'A',
+            Some('D') => 'D',
+            Some('M' | 'T') => 'M',
+            _ => continue,
+        };
+        changes.push((c, path));
+    }
+    Ok(changes)
+}
+
+/// All manual snapshots (`refs/getdev/snaps/` ONLY — the auto safety net stays
+/// invisible, D-06), ordered ascending by id. Each row carries its id, the
+/// commit subject (message), an `age_secs` derived from the committer timestamp
+/// (the ONE time-derived human field permitted by DEC-01 — ids/messages stay
+/// deterministic), and a `files_changed` count recomputed at list-time by
+/// diffing each snapshot against its numeric PREDECESSOR snapshot tree (Open
+/// Q2 — storage-free; the lowest id diffs against the empty tree, so its count
+/// is the full file count). Read-only; prints nothing (the CLI renders).
+pub fn list(root: &Path) -> Result<Vec<SnapMeta>, GitxError> {
+    let stdout = capture(
+        git_command_readonly(root).args([
+            "for-each-ref",
+            "--format=%(refname)%09%(committerdate:unix)%09%(contents:subject)",
+            Namespace::Snaps.ref_prefix(),
+        ]),
+        "for-each-ref",
+    )?;
+
+    let mut rows: Vec<(u32, u64, String)> = Vec::new();
+    for line in String::from_utf8_lossy(&stdout).lines() {
+        let mut fields = line.splitn(3, '\t');
+        let refname = fields.next().unwrap_or("");
+        let ts = fields
+            .next()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+        let message = fields.next().unwrap_or("").to_owned();
+        let id = match refname
+            .rsplit('/')
+            .next()
+            .and_then(|s| s.parse::<u32>().ok())
+        {
+            Some(n) => n,
+            None => continue,
+        };
+        rows.push((id, ts, message));
+    }
+    rows.sort_by_key(|row| row.0);
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let mut prev_tree = empty_tree(root)?;
+    let mut out = Vec::with_capacity(rows.len());
+    for (id, ts, message) in rows {
+        let tree = rev_parse_tree(root, &Namespace::Snaps.ref_path(id))?
+            .ok_or(GitxError::NoSuchSnapshot { id })?;
+        let files_changed = diff_tree_name_status(root, &prev_tree, &tree)?.len();
+        out.push(SnapMeta {
+            id,
+            age_secs: now.saturating_sub(ts),
+            message,
+            files_changed,
+        });
+        prev_tree = tree;
+    }
+    Ok(out)
+}
+
+/// Summarize the changes between snapshot `id` and the CURRENT working tree
+/// (`snap diff <id>` — summary-only; v0.1 emits no per-file patches). Resolves
+/// the target BEFORE building any tree, so a bad id is a clean `NoSuchSnapshot`
+/// with no side effects (T-05-13). Orientation: the snapshot is the FIRST tree
+/// and the current state the SECOND, so `A` = created since the snapshot,
+/// `D` = removed since, `M` = modified since. Read-only; prints nothing.
 pub fn diff(root: &Path, id: u32) -> Result<DiffSummary, GitxError> {
-    let _ = (root, id);
-    Err(GitxError::NotImplemented { op: "diff" })
+    let (_, commit) = resolve_ref(root, id)?;
+    let target_tree = rev_parse_tree(root, &commit)?.ok_or(GitxError::NoSuchSnapshot { id })?;
+    let current_tree = build_current_tree(root)?;
+
+    let mut summary = DiffSummary::default();
+    for (status, path) in diff_tree_name_status(root, &target_tree, &current_tree)? {
+        match status {
+            'A' => summary.added += 1,
+            'D' => summary.deleted += 1,
+            'M' => summary.modified += 1,
+            _ => {}
+        }
+        summary.paths.push((status, path));
+    }
+    Ok(summary)
 }
 
 /// Manually enforce `keep` retention on `ns` (the same logic snap runs
