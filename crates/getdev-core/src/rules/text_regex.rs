@@ -62,6 +62,15 @@ impl CompiledTextMatcher {
             .map(|text| self.pattern.is_match(text))
             .unwrap_or(false)
     }
+
+    /// Path-only pre-check, without needing the file's bytes — lets a
+    /// caller (`core::audit`'s per-file walk, 04-02) decide whether a file
+    /// is even worth reading before paying the `read_source_capped` cost,
+    /// for the no-grammar config files this matcher kind exists to cover.
+    #[must_use]
+    pub fn glob_matches(&self, path: &Path) -> bool {
+        self.file_glob.is_match(path)
+    }
 }
 
 #[cfg(test)]

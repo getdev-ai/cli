@@ -322,7 +322,22 @@ fn assignments_in_file(path: &Path, lang: Lang) -> Result<Vec<StringAssignment>,
             path: path.to_path_buf(),
         })?;
 
-    let query = Query::new(&language, lang.string_assignment_query())?;
+    string_assignments_from_tree(&tree, &source, lang, path)
+}
+
+/// The extraction half of [`assignments_in_file`], split out so a caller
+/// that has ALREADY parsed a file (e.g. `core::audit`'s own per-file
+/// AST-matcher loop, 04-02) can reuse this against its own `Tree` instead of
+/// parsing the file a second time for secret detection — CLAUDE.md rule 5 /
+/// 04-RESEARCH.md Pitfall 7: a file is parsed once per invocation, never
+/// once per analysis purpose.
+pub(crate) fn string_assignments_from_tree(
+    tree: &getdev_grammars::tree_sitter::Tree,
+    source: &str,
+    lang: Lang,
+    path: &Path,
+) -> Result<Vec<StringAssignment>, ScanError> {
+    let query = Query::new(&lang.language(), lang.string_assignment_query())?;
     let name_idx = query.capture_index_for_name("name");
     let value_idx = query.capture_index_for_name("value");
 
