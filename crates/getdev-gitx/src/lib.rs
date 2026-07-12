@@ -2,6 +2,8 @@
 //! extraction, by shelling out to the git binary (no git2/gix — settled
 //! decision). Snap/back land in P4; diff extraction in P5.
 
+pub mod snap;
+
 use std::path::Path;
 use std::process::{Command, Stdio};
 

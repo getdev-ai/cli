@@ -23,6 +23,7 @@ clap = { version = "4.5", features = ["derive"] }
 humantime = "2"
 ignore = "0.4"
 owo-colors = "4"
+proptest = "1"
 rayon = "1.12"
 regex = "1"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls", "json"] }
