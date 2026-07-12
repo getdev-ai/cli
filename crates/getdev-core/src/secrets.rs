@@ -186,6 +186,16 @@ pub fn mask(value: &str, prefix: &str) -> String {
     let chars: Vec<char> = value.chars().collect();
     let head: String = if !prefix.is_empty() && value.starts_with(prefix) {
         prefix.to_owned()
+    } else if !prefix.is_empty() {
+        // IN-03/02-env-REVIEW.md: the declared `prefix` isn't a literal
+        // prefix of THIS value — e.g. an `ASIA…` STS key against the AWS
+        // pattern, whose regex matches `AKIA|ASIA` but whose declared prefix
+        // is only `AKIA`. Falling back to a generic 3-char head (`ASI…`)
+        // drops the recognisable provider marker. Keep a head of the same
+        // length as the declared prefix so `ASIA…` still reads as AWS; the
+        // overlap guard below still fully elides short values, so this never
+        // reveals more of the secret body than the prefix path would.
+        chars.iter().take(prefix.chars().count()).collect()
     } else {
         chars.iter().take(3).collect()
     };
@@ -374,6 +384,22 @@ mod tests {
         // len == 7 (3 + 4).
         assert_eq!(mask("abcdefg", ""), "…");
         assert_eq!(mask("abcdefgh", ""), "abc…efgh");
+    }
+
+    /// IN-03 regression: an `ASIA…` STS key matches the AWS regex
+    /// (`AKIA|ASIA`) but not its declared `AKIA` prefix. The masked preview
+    /// must keep a provider-recognisable `ASIA…` head (prefix-length), not a
+    /// generic 3-char `ASI…` head — while still never revealing the middle.
+    #[test]
+    fn mask_keeps_provider_head_for_alternate_prefix() {
+        let m = patterns().classify("ASIAFAKEFAKEFAKEFAKE", "x").unwrap();
+        assert_eq!(m.provider, "aws");
+        assert_eq!(m.masked, "ASIA…FAKE");
+        assert!(!m.masked.contains("FAKEFAKE"), "middle must stay elided");
+        // direct: prefix-length head when value doesn't start with the prefix
+        assert_eq!(mask("ASIAFAKEFAKEFAKEFAKE", "AKIA"), "ASIA…FAKE");
+        // a short alternate-prefix value still fully elides (guard holds)
+        assert_eq!(mask("ASIAFAKE", "AKIA"), "…");
     }
 
     #[test]
