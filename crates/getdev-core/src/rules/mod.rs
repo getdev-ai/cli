@@ -258,11 +258,30 @@ fn load_rule(raw: &str, origin: &str) -> Result<Rule, RuleLoadError> {
 /// persisted here; `Secret` matchers wrap `core::secrets` and need no
 /// compilation step at all). 04-RESEARCH.md Pitfall 7: this is called ONCE
 /// per rule at load time, never per scanned file.
-fn compile_rule(cache: &mut QueryCache, rule: &Rule, origin: &str) -> Result<(), RuleLoadError> {
+pub(crate) fn compile_rule(
+    cache: &mut QueryCache,
+    rule: &Rule,
+    origin: &str,
+) -> Result<(), RuleLoadError> {
+    // Combine all AST matchers that share a language into ONE multi-pattern
+    // query string (tree-sitter supports many patterns per query). The
+    // `QueryCache` is keyed by `(Lang, rule_id)` — exactly one query per
+    // pair — so without this merge a rule declaring several same-language
+    // AST matchers would silently keep only its FIRST pattern: every later
+    // same-language matcher hits the `contains_key` fast-path in
+    // `QueryCache::compile` and is dropped. Order is preserved so a rule's
+    // patterns compile in author order. `TextRegex`/`Secret` matchers are
+    // unaffected (validated/handled per entry, never AST-cached).
+    let mut combined: Vec<(Lang, String)> = Vec::new();
     for matcher in &rule.matchers {
         match matcher {
             Matcher::Ast { language, query } => {
-                cache.compile(*language, &rule.id, origin, query)?;
+                if let Some((_, acc)) = combined.iter_mut().find(|(lang, _)| lang == language) {
+                    acc.push('\n');
+                    acc.push_str(query);
+                } else {
+                    combined.push((*language, query.clone()));
+                }
             }
             Matcher::TextRegex {
                 file_glob,
@@ -272,6 +291,9 @@ fn compile_rule(cache: &mut QueryCache, rule: &Rule, origin: &str) -> Result<(),
             }
             Matcher::Secret => {}
         }
+    }
+    for (language, query) in &combined {
+        cache.compile(*language, &rule.id, origin, query)?;
     }
     Ok(())
 }

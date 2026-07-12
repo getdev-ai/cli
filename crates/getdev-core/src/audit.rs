@@ -177,31 +177,33 @@ fn process_lang_file(
         ) {
             continue;
         }
-        for matcher in &rule.matchers {
-            match matcher {
-                Matcher::Ast {
-                    language: matcher_lang,
-                    ..
-                } if *matcher_lang == lang => {
-                    if let Some(query) = ctx.pack.query_cache.get(lang, &rule.id) {
-                        for node in run_ast_matcher(query, root_node, bytes) {
-                            findings.push(ast_hit_to_finding(rule, node, rel));
-                        }
-                    }
+        // AST: all same-language AST matchers of this rule were merged into
+        // ONE cached query at load time (see `rules::compile_rule`), so run
+        // it exactly ONCE per (lang, rule) here. Iterating per matcher entry
+        // would re-run the same cached query and duplicate every finding.
+        let has_ast_for_lang = rule
+            .matchers
+            .iter()
+            .any(|m| matches!(m, Matcher::Ast { language, .. } if *language == lang));
+        if has_ast_for_lang {
+            if let Some(query) = ctx.pack.query_cache.get(lang, &rule.id) {
+                for node in run_ast_matcher(query, root_node, bytes) {
+                    findings.push(ast_hit_to_finding(rule, node, rel));
                 }
-                Matcher::Secret => {
-                    let assignments =
-                        crate::scan::string_assignments_from_tree(&tree, source, lang, path)?;
-                    for assignment in &assignments {
-                        if let Some(secret) = ctx
-                            .secret_patterns
-                            .classify(&assignment.value, &assignment.name)
-                        {
-                            findings.push(secret_hit_to_finding(rule, assignment, &secret, rel));
-                        }
-                    }
+            }
+        }
+
+        // Secret: classify the file's string assignments once if this rule
+        // declares a secret matcher.
+        if rule.matchers.iter().any(|m| matches!(m, Matcher::Secret)) {
+            let assignments = crate::scan::string_assignments_from_tree(&tree, source, lang, path)?;
+            for assignment in &assignments {
+                if let Some(secret) = ctx
+                    .secret_patterns
+                    .classify(&assignment.value, &assignment.name)
+                {
+                    findings.push(secret_hit_to_finding(rule, assignment, &secret, rel));
                 }
-                Matcher::Ast { .. } | Matcher::TextRegex { .. } => {}
             }
         }
     }
@@ -451,14 +453,11 @@ mod tests {
         let (rules, errors) = rules::load_user_pack(rules_dir);
         assert!(errors.is_empty(), "rule load errors: {errors:?}");
         let mut query_cache = QueryCache::new();
+        // Compile via the real `compile_rule` (not a per-matcher loop) so
+        // tests exercise the same same-language-matcher merge that
+        // production `load_embedded`/`merge` use.
         for rule in &rules {
-            for matcher in &rule.matchers {
-                if let Matcher::Ast { language, query } = matcher {
-                    query_cache
-                        .compile(*language, &rule.id, "test", query)
-                        .unwrap();
-                }
-            }
+            rules::compile_rule(&mut query_cache, rule, "test").unwrap();
         }
         RulePack { rules, query_cache }
     }
@@ -505,6 +504,79 @@ fixtures:
         assert_eq!(findings[0].file, "positive.js");
         assert_eq!(findings[0].line, Some(1));
         assert_eq!(findings[0].column, Some(1));
+    }
+
+    const TWO_MATCHER_RULE_YAML: &str = r#"
+id: audit/test-two-matchers
+severity: high
+confidence: high
+languages: [javascript]
+description: test rule — two same-language AST matchers
+message: "two-matcher finding"
+remediation: remove it
+refs: []
+matchers:
+  - language: javascript
+    query: |
+      (call_expression
+        function: (identifier) @fn (#eq? @fn "alpha")) @finding
+  - language: javascript
+    query: |
+      (call_expression
+        function: (identifier) @fn (#eq? @fn "beta")) @finding
+fixtures:
+  positive: [a.js, b.js, c.js]
+  negative: [d.js, e.js, f.js]
+"#;
+
+    /// Regression: a rule with several same-language AST matchers must
+    /// (a) fire ALL its patterns — not silently drop every matcher after
+    /// the first (the `QueryCache` is keyed by `(Lang, rule_id)`), and
+    /// (b) report each real hit exactly ONCE — not once per matcher entry.
+    /// Pre-fix `both.js` produced two findings both on line 1 (the first
+    /// matcher run twice, the second dropped); post-fix it produces one hit
+    /// on line 1 (`alpha`) and one on line 2 (`beta`).
+    #[test]
+    fn same_language_matchers_all_fire_without_duplication() {
+        let rules_dir = tempdir("two-matcher-rules");
+        std::fs::write(rules_dir.join("rule.yaml"), TWO_MATCHER_RULE_YAML).unwrap();
+        let pack = build_pack(&rules_dir);
+
+        // File exercising BOTH patterns: exactly two findings, on lines 1 & 2.
+        let project = tempdir("two-matcher-both");
+        std::fs::write(project.join("both.js"), "alpha();\nbeta();\n").unwrap();
+        let (findings, skipped) = run(
+            &project,
+            &pack,
+            &DetectedFrameworks::default(),
+            &AuditOptions::default(),
+        )
+        .unwrap();
+        assert!(skipped.is_empty());
+        assert_eq!(
+            findings.len(),
+            2,
+            "both patterns fire once each: {findings:?}"
+        );
+        let mut lines: Vec<u32> = findings.iter().filter_map(|f| f.line).collect();
+        lines.sort_unstable();
+        assert_eq!(lines, vec![1, 2], "one hit per pattern, no duplicates");
+
+        // File exercising ONE pattern: exactly one finding (not two).
+        let project_one = tempdir("two-matcher-one");
+        std::fs::write(project_one.join("one.js"), "alpha();\n").unwrap();
+        let (findings_one, _skipped) = run(
+            &project_one,
+            &pack,
+            &DetectedFrameworks::default(),
+            &AuditOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            findings_one.len(),
+            1,
+            "single hit must not be duplicated per matcher entry: {findings_one:?}"
+        );
     }
 
     const FRAMEWORK_SCOPED_RULE_YAML: &str = r#"
