@@ -330,6 +330,155 @@ mod tests {
         dir
     }
 
+    /// `git init` a hermetic repo at `dir` (no network, local only) so the
+    /// auto-snap has a repo to write `refs/getdev/auto/` into. `snapshot`'s own
+    /// `ensure_repo` would `git init` on demand, but doing it explicitly keeps
+    /// the test's intent obvious and its state deterministic.
+    fn git_init(dir: &std::path::Path) {
+        let ok = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["init", "--quiet"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        assert!(ok, "git init failed for {}", dir.display());
+    }
+
+    /// Count the live `refs/getdev/auto/` refs in `dir` by shelling
+    /// `for-each-ref` — the auto namespace `snapshot` writes into. `list` is
+    /// manual-namespace-only, so the auto refs are counted directly.
+    fn count_auto_refs(dir: &std::path::Path) -> usize {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["for-each-ref", "--format=%(refname)", "refs/getdev/auto/"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "for-each-ref failed");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .count()
+    }
+
+    /// Build an `EnvArgs` for a `--write` run over `dir` with the given
+    /// auto-snap toggle. Everything else mirrors the crate's convention (quiet,
+    /// no color, no fail-on) so the tests assert only on filesystem/ref state.
+    fn write_args(dir: &std::path::Path, auto_snap: bool) -> EnvArgs {
+        let mut cfg = Config::default();
+        cfg.snap.auto_snap_before_fix = auto_snap;
+        EnvArgs {
+            path: dir.to_path_buf(),
+            json: false,
+            no_color: true,
+            fail_on: None,
+            env_file: ".env".to_owned(),
+            write: true,
+            cfg,
+            quiet: true,
+            verbose: 0,
+        }
+    }
+
+    /// Write two secret-bearing source files so the mutation plan is multi-file
+    /// (two source rewrites + the `.env`/`.gitignore` writes) — the D-07
+    /// trigger that fires the auto-snap hook. Distinct values so neither is
+    /// deduped away by the extractor.
+    fn seed_two_secret_files(dir: &std::path::Path) {
+        std::fs::write(
+            dir.join("one.js"),
+            "const a = \"sk_live_AAAAAAAAAAAAAAAA01\";\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("two.js"),
+            "const b = \"sk_live_BBBBBBBBBBBBBBBB02\";\n",
+        )
+        .unwrap();
+    }
+
+    /// REQ-safe-by-default: a multi-file `env --write` with
+    /// `snap.auto_snap_before_fix = true` records exactly one
+    /// `refs/getdev/auto/` snapshot BEFORE mutating — the undo point the Phase 2
+    /// carry-forward promised (success criterion 4).
+    #[test]
+    fn env_write_creates_auto_snap_before_mutation() {
+        let dir = unique_dir("autosnap-on");
+        git_init(&dir);
+        seed_two_secret_files(&dir);
+
+        assert_eq!(count_auto_refs(&dir), 0, "no auto ref before the run");
+        run(&write_args(&dir, true)).unwrap();
+
+        assert_eq!(
+            count_auto_refs(&dir),
+            1,
+            "exactly one auto-snap must be recorded before the multi-file mutation"
+        );
+        // and the mutation still happened — the raw secrets left the source
+        let one = std::fs::read_to_string(dir.join("one.js")).unwrap();
+        assert!(
+            one.contains("process.env"),
+            "source should be rewritten after the auto-snap, got:\n{one}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Config-honored: with `snap.auto_snap_before_fix = false`, the SAME
+    /// multi-file `env --write` records ZERO auto snapshots (the toggle is read
+    /// at the call site, so `None` is passed to `env::apply`).
+    #[test]
+    fn env_write_auto_snap_disabled_by_config() {
+        let dir = unique_dir("autosnap-off");
+        git_init(&dir);
+        seed_two_secret_files(&dir);
+
+        run(&write_args(&dir, false)).unwrap();
+
+        assert_eq!(
+            count_auto_refs(&dir),
+            0,
+            "toggle off must record no auto-snap"
+        );
+        // the mutation still ran — the toggle only governs the safety snapshot
+        let one = std::fs::read_to_string(dir.join("one.js")).unwrap();
+        assert!(
+            one.contains("process.env"),
+            "source is still rewritten with the toggle off, got:\n{one}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// D-07 dedupe: a second immediate `env --write` must not churn the auto
+    /// namespace. After the first run the secrets have already been extracted,
+    /// so the second run's plan is empty — `env::apply` is never called and no
+    /// second auto ref is created. The invariant the user cares about holds: the
+    /// auto namespace stays at exactly one ref for back-to-back runs, never
+    /// accumulating a duplicate for an unchanged tree.
+    #[test]
+    fn env_write_twice_dedupes_auto_snap() {
+        let dir = unique_dir("autosnap-dedupe");
+        git_init(&dir);
+        seed_two_secret_files(&dir);
+
+        run(&write_args(&dir, true)).unwrap();
+        assert_eq!(count_auto_refs(&dir), 1, "first run records one auto-snap");
+
+        // immediate second run: no secrets remain, so nothing to mutate and no
+        // new snapshot — the auto namespace does not gain a duplicate ref.
+        run(&write_args(&dir, true)).unwrap();
+        assert_eq!(
+            count_auto_refs(&dir),
+            1,
+            "back-to-back run must not add a duplicate auto ref"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// CR-02 regression: a secret the user suppressed via `[ignore] paths`
     /// must be neither rewritten in source nor appended to `.env` under
     /// `--write`, while a NON-suppressed secret in the same run still is.
