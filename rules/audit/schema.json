@@ -1,0 +1,141 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://getdev.ai/schemas/audit-rule.json",
+  "title": "getdev audit rule",
+  "description": "JSON Schema every rule YAML under rules/audit/ (embedded) and any --rules <dir> user pack validates against at load time. Normative shape: docs/SPEC-RULES.md.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "id",
+    "severity",
+    "confidence",
+    "languages",
+    "description",
+    "message",
+    "remediation",
+    "refs",
+    "matchers",
+    "fixtures"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^(real|audit|review|ship)/[a-z0-9-]+$",
+      "minLength": 1
+    },
+    "severity": {
+      "enum": ["critical", "high", "medium", "low", "info"]
+    },
+    "confidence": {
+      "enum": ["high", "medium", "low"]
+    },
+    "languages": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "enum": ["javascript", "typescript", "tsx", "python"]
+      }
+    },
+    "frameworks": {
+      "type": "array",
+      "items": {
+        "enum": ["express", "nextjs", "fastapi", "flask"]
+      }
+    },
+    "path_glob": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1
+    },
+    "message": {
+      "type": "string",
+      "minLength": 1
+    },
+    "remediation": {
+      "type": "string",
+      "minLength": 1
+    },
+    "refs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "matchers": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["language", "query"],
+            "properties": {
+              "language": {
+                "enum": ["javascript", "typescript", "tsx", "python"]
+              },
+              "query": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["file_glob", "text_pattern"],
+            "properties": {
+              "file_glob": {
+                "type": "string",
+                "minLength": 1
+              },
+              "text_pattern": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["secret"],
+            "properties": {
+              "secret": {
+                "const": true
+              }
+            }
+          }
+        ]
+      }
+    },
+    "fixtures": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["positive", "negative"],
+      "properties": {
+        "positive": {
+          "type": "array",
+          "minItems": 3,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "negative": {
+          "type": "array",
+          "minItems": 3,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  }
+}

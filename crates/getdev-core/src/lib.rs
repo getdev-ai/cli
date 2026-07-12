@@ -12,6 +12,7 @@ pub mod models;
 pub mod mutate;
 pub mod real;
 pub mod report;
+pub mod rules;
 pub mod scan;
 pub mod secrets;
 pub mod suppress;

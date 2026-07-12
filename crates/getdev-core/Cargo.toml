@@ -14,8 +14,11 @@ workspace = true
 
 [dependencies]
 getdev-grammars = { workspace = true }
+globset = "0.4"
 humantime = { workspace = true }
 ignore = { workspace = true }
+include_dir = "0.7"
+jsonschema = "0.47"
 owo-colors = { workspace = true }
 pyproject-toml = "0.13"
 regex = { workspace = true }
