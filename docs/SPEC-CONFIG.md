@@ -23,6 +23,12 @@ Source: distilled from the project master plan (internal) §5.
   **3**. A typo that silently disables a check is worse than a loud failure, so
   `deny_unknown_fields` applies at every level.
 - Every section and every key is optional; defaults below apply per-key.
+- The config file (`.getdev.toml`, the global config, or a `--config` target) is read through a
+  **1 MiB size cap**, and the read is bounded at read time (not via a stat pre-check) so a file
+  that grows mid-read cannot slurp past the cap. A file over the cap, or a **non-regular file**
+  (FIFO/device/symlink to one), is rejected rather than read — `.getdev.toml` lives in the
+  scanned, attacker-controllable repo, so an unbounded read would be a denial-of-service. A
+  rejected config file is a hard error (exit code **3**), same as a malformed one.
 - `[[suppress]]` entries **require** `reason` — suppression without an audit trail is
   rejected at parse time. Suppressions are surfaced in `check -v` so they don't rot silently.
 - Inline suppression (in code): `// getdev-ignore <rule-id> -- <reason>` — reason required;

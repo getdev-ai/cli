@@ -47,7 +47,7 @@ detection
 | `getdev-core::rules` | Load embedded + user rule packs (YAML via `serde_yaml`, validated against JSON Schema), compile patterns | Rules embedded via `include_dir!`; `--rules` merges user packs |
 | `getdev-core::report` | Renderers: human terminal (grouped, colored via `anstream`/`owo-colors`, honors NO_COLOR), `--json`, markdown (`SHIP.md`, future); Ship Score computation | All renderers consume the same `Vec<Finding>` |
 | `getdev-core::config` | `.getdev.toml` + global `~/.getdev/config.toml` + flags precedence (flags > project > global > defaults) | `serde` + `toml` |
-| `getdev-core::mutate` | Shared safe-file-rewrite engine used by `env`/`ship`/`fix`: plan → atomic write (temp+rename) → verify reparse | Mutations always go through one audited path; auto-snap before any multi-file mutation |
+| `getdev-core::mutate` | Shared safe-file-rewrite engine used by `env`/`ship`/`fix`: plan → verify-reparse **in memory** → atomic write (temp+rename, owner-only perms) → rollback | Mutations always go through one audited path; nothing is written unless every rewrite reparses first; auto-snap before any multi-file mutation |
 | `getdev-cli::update` | Self-update (GitHub Releases, signature check), version pinning | `self_update` crate or hand-rolled |
 | `getdev-grammars` | tree-sitter grammar crates re-exported behind one crate boundary | Isolates the slowest-compiling deps so they build once and stay cached; keeps the `cargo check` inner loop fast |
 
@@ -62,10 +62,11 @@ Files are parsed **once** per invocation into a `ScanContext` (parsed ASTs cache
 All file mutations (`env --write`, `ship --write`, future `fix`) go through the single audited `core::mutate` path:
 
 1. **Plan** — compute the full change set before touching disk.
-2. **Atomic write** — temp file + rename; never partial in-place writes.
-3. **Reparse-verify** — post-write reparse must succeed, or **rollback**.
-4. **Auto-snap** — a snapshot precedes any multi-file mutation (`snap.auto_snap_before_fix`).
-5. **Dry-run fidelity** — `--dry-run` output must equal the actually applied diff.
+2. **Verify-first (in memory)** — every rewritten source must reparse cleanly **before any file is written**; a rewrite that would introduce a syntax error aborts the whole plan with nothing written. (The verify precedes the write — it is not a post-write check — so a bad rewrite never reaches disk.)
+3. **Atomic write** — temp file + rename; never partial in-place writes. The temp file is created owner-only (`0600`) before content is written, so a secret-bearing new file is never briefly world-readable.
+4. **Rollback** — if any write fails mid-plan, already-written files are restored to their prior content.
+5. **Auto-snap** — a snapshot precedes any multi-file mutation (`snap.auto_snap_before_fix`).
+6. **Dry-run fidelity** — `--dry-run` output must equal the actually applied diff.
 
 Commands never mutate files without explicit `--write`/`--fix` (safe by default).
 
@@ -123,6 +124,6 @@ Only **`getdev-registry`** and **`getdev-cli::update`** may touch the network. P
 ## Threat model (summary)
 
 Documented threats and mitigations (full doc: TBD — plan calls for a threat-model doc in `/docs`):
-- Malicious repo inputs (parser bombs) → size/time limits per file.
+- Malicious repo inputs (parser bombs, unbounded or special files) → per-file caps that bound the **read itself** (`take(cap+1)`, not just a `stat` pre-check that a growing file or a FIFO/`/proc`/device can defeat) and **reject non-regular files**; plus time limits per file. Applies to both scanned sources (`core::scan`) and the attacker-controllable `.getdev.toml` (`core::config`).
 - Cache poisoning → registry responses validated.
 - Hostile rule packs → `--rules` packs are declarative-only, no code execution.
