@@ -96,7 +96,21 @@ pub struct EnvPlan {
 /// Detect hardcoded secrets under `root` and plan their extraction.
 pub fn plan(root: &Path, options: &EnvOptions) -> Result<EnvPlan, EnvError> {
     let patterns = SecretPatterns::embedded()?;
-    let (assignments, skipped) = scan::collect_string_assignments(root)?;
+    let (mut assignments, skipped) = scan::collect_string_assignments(root)?;
+
+    // WR-03/02-env-REVIEW.md: `dedupe_name` assigns the `_2` suffix in the
+    // order it visits assignments, so which of two same-named secrets gets
+    // `API_KEY` vs `API_KEY_2` — a name→value binding written to `.env` —
+    // must not depend on filesystem walk order (`collect_string_assignments`
+    // yields `ignore::WalkBuilder` traversal order, which is OS/FS-dependent).
+    // Impose a stable total order (path, then byte offset within the file)
+    // before the dedupe loop so the same input always produces the same
+    // bindings — the non-negotiable deterministic-core guarantee (CLAUDE.md).
+    assignments.sort_by(|a, b| {
+        a.path
+            .cmp(&b.path)
+            .then_with(|| a.value_span.0.cmp(&b.value_span.0))
+    });
 
     let env_path = root.join(&options.env_file);
     let mut taken = existing_env_keys(&env_path);
@@ -814,6 +828,51 @@ mod tests {
         let debug_output = format!("{entry:?}");
         assert!(!debug_output.contains("sk_live_FAKEFAKEFAKE1234"));
         assert!(debug_output.contains("«redacted»"));
+    }
+
+    /// WR-03 regression: when two files assign the same base var name, which
+    /// gets `API_KEY` vs `API_KEY_2` (a name→value binding written to disk)
+    /// must be deterministic — pinned to path order, not filesystem walk
+    /// order. The alphabetically-first path always wins the un-suffixed name.
+    #[test]
+    fn dedupe_suffix_binding_is_deterministic_across_files() {
+        let dir = std::env::temp_dir().join(format!(
+            "getdev-env-wr03-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // same base name (`apiKey` → API_KEY) in two files, distinct values
+        std::fs::write(
+            dir.join("a.js"),
+            "const apiKey = \"9fQ4cA2e78bZ1dY6fX3aP5cV0e9K\";\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("b.js"),
+            "const apiKey = \"7kP2mN8qR4tW6vX1yZ3bC5dF9gH0\";\n",
+        )
+        .unwrap();
+
+        // repeat: the binding must be identical every run
+        for _ in 0..5 {
+            let plan = plan(&dir, &EnvOptions::default()).unwrap();
+            let name_for = |file: &str| -> String {
+                plan.entries
+                    .iter()
+                    .find(|e| e.file == file)
+                    .map(|e| e.var_name.clone())
+                    .unwrap_or_default()
+            };
+            assert_eq!(name_for("a.js"), "API_KEY", "first path wins the base name");
+            assert_eq!(name_for("b.js"), "API_KEY_2", "later path gets the suffix");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// WR-02 regression: a multi-line value (PEM key / triple-quoted literal)
