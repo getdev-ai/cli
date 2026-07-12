@@ -239,13 +239,21 @@ fn dedupe_name(base: &str, taken: &mut HashSet<String>) -> String {
     if taken.insert(base.to_owned()) {
         return base.to_owned();
     }
-    for n in 2.. {
+    // IN-01/02-env-REVIEW.md: bound the counter and never panic. The old
+    // `for n in 2..` used an inferred `i32` that would itself panic on
+    // overflow before the trailing `unreachable!` was reached — a latent
+    // panic path in library code, forbidden by CLAUDE.md hard rule 1.
+    // Exhaustion needs ~4 billion same-named secrets (practically
+    // impossible); on that theoretical ceiling, fall back to the base name
+    // (a duplicate .env key is harmless — last-wins — and far better than a
+    // crash across the crate boundary).
+    for n in 2u32..=u32::MAX {
         let candidate = format!("{base}_{n}");
         if taken.insert(candidate.clone()) {
             return candidate;
         }
     }
-    unreachable!("dedupe counter exhausted")
+    base.to_owned()
 }
 
 fn existing_env_keys(env_path: &Path) -> HashSet<String> {
@@ -655,6 +663,22 @@ mod tests {
             "STRIPE_SECRET_KEY_3"
         );
         assert_eq!(dedupe_name("OTHER", &mut taken), "OTHER");
+    }
+
+    /// IN-01 regression: the suffix loop must keep producing unique names via
+    /// the counter path without panicking, even after many collisions (the
+    /// old `for n in 2..` inferred an `i32` that would panic on overflow).
+    #[test]
+    fn dedupe_never_panics_over_many_collisions() {
+        let mut taken = HashSet::new();
+        let mut seen = HashSet::new();
+        for _ in 0..1000 {
+            let name = dedupe_name("KEY", &mut taken);
+            assert!(seen.insert(name), "each dedupe result must be unique");
+        }
+        // base name first, then KEY_2..KEY_1000 — all distinct, no panic
+        assert!(seen.contains("KEY"));
+        assert!(seen.contains("KEY_1000"));
     }
 
     /// C1 regression: `import os` must land AFTER any `from __future__
