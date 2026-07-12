@@ -1,0 +1,77 @@
+id: audit/cookie-insecure
+severity: medium
+confidence: medium
+languages: [javascript, typescript, python]
+description: >
+  A cookie is set without Secure/HttpOnly protection — an Express
+  res.cookie(name, value) call with no options object at all (or an explicit
+  secure: false), or a Flask/FastAPI response.set_cookie(key, value) call
+  with no secure kwarg at all (or an explicit secure=False) — the cookie is
+  sent over plain HTTP and/or readable by client-side JavaScript.
+message: "Cookie set without Secure/HttpOnly protection"
+remediation: >
+  Pass { secure: true, httpOnly: true } (Express) or secure=True,
+  httponly=True (Flask/FastAPI) when setting any cookie that carries a
+  session token or other sensitive value.
+refs:
+  - https://getdev.ai/rules/audit/cookie-insecure
+matchers:
+  # Express (JS/TS): res.cookie(name, value) — no third options argument at
+  # all (insecure by default).
+  - language: javascript
+    query: |
+      (call_expression
+        function: (member_expression
+          property: (property_identifier) @method (#eq? @method "cookie"))
+        arguments: (arguments . (string) @name . (_) @finding .))
+  - language: typescript
+    query: |
+      (call_expression
+        function: (member_expression
+          property: (property_identifier) @method (#eq? @method "cookie"))
+        arguments: (arguments . (string) @name . (_) @finding .))
+  # Express (JS/TS): res.cookie(name, value, { secure: false }).
+  - language: javascript
+    query: |
+      (call_expression
+        function: (member_expression
+          property: (property_identifier) @method (#eq? @method "cookie"))
+        arguments: (arguments (string) (object
+          (pair key: (property_identifier) @k (#eq? @k "secure")
+                value: (false) @finding))))
+  - language: typescript
+    query: |
+      (call_expression
+        function: (member_expression
+          property: (property_identifier) @method (#eq? @method "cookie"))
+        arguments: (arguments (string) (object
+          (pair key: (property_identifier) @k (#eq? @k "secure")
+                value: (false) @finding))))
+  # Flask/FastAPI (Python): response.set_cookie(key, value) — exactly two
+  # positional args, no secure kwarg at all.
+  - language: python
+    query: |
+      (call
+        function: (attribute attribute: (identifier) @method (#eq? @method "set_cookie"))
+        arguments: (argument_list . (string) @name . (string) @finding .))
+  # Flask/FastAPI (Python): response.set_cookie(key, value, secure=False).
+  - language: python
+    query: |
+      (call
+        function: (attribute attribute: (identifier) @method (#eq? @method "set_cookie"))
+        arguments: (argument_list
+          (keyword_argument
+            name: (identifier) @kw (#eq? @kw "secure")
+            value: (false) @finding)))
+fixtures:
+  positive:
+    - positive/cookie_insecure_express_no_opts_js.js
+    - positive/cookie_insecure_express_secure_false_js.js
+    - positive/cookie_insecure_express_no_opts_ts.ts
+    - positive/cookie_insecure_flask_no_opts_py.py
+    - positive/cookie_insecure_flask_secure_false_py.py
+  negative:
+    - negative/cookie_insecure_neg_secure_httponly_js.js
+    - negative/cookie_insecure_neg_secure_httponly_ts.ts
+    - negative/cookie_insecure_neg_flask_secure_py.py
+    - negative/cookie_insecure_neg_unrelated_call_js.js

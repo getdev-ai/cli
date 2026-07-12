@@ -1,0 +1,51 @@
+id: audit/cors-wildcard
+severity: high
+confidence: high
+languages: [javascript, typescript, python]
+description: >
+  CORS configured with a wildcard origin ("*") — an Express cors() call or a
+  FastAPI CORSMiddleware registration with allow_origins=["*"] — allowing any
+  website to call this API from a browser.
+message: "CORS allows any origin ('*')"
+remediation: >
+  Restrict allowed origins to your actual frontend domain(s). Wildcard
+  origins allow any website to call this API from a browser.
+refs:
+  - https://getdev.ai/rules/audit/cors-wildcard
+matchers:
+  # Express (JS/TS): cors({ origin: "*" }).
+  - language: javascript
+    query: |
+      (call_expression
+        function: (identifier) @fn (#eq? @fn "cors")
+        arguments: (arguments (object
+          (pair key: (property_identifier) @k (#eq? @k "origin")
+                value: (string) @v @finding (#eq? @v "\"*\"")))))
+  - language: typescript
+    query: |
+      (call_expression
+        function: (identifier) @fn (#eq? @fn "cors")
+        arguments: (arguments (object
+          (pair key: (property_identifier) @k (#eq? @k "origin")
+                value: (string) @v @finding (#eq? @v "\"*\"")))))
+  # FastAPI (Python): app.add_middleware(CORSMiddleware, allow_origins=["*"]).
+  - language: python
+    query: |
+      (call
+        function: (attribute attribute: (identifier) @method (#eq? @method "add_middleware"))
+        arguments: (argument_list
+          (identifier) @mw (#eq? @mw "CORSMiddleware")
+          (keyword_argument
+            name: (identifier) @kw (#eq? @kw "allow_origins")
+            value: (list (string) @v @finding (#eq? @v "\"*\"")))))
+fixtures:
+  positive:
+    - positive/cors_wildcard_express_js.js
+    - positive/cors_wildcard_express_ts.ts
+    - positive/cors_wildcard_fastapi_py.py
+    - positive/cors_wildcard_extra_opts_js.js
+  negative:
+    - negative/cors_wildcard_neg_specific_origin_js.js
+    - negative/cors_wildcard_neg_specific_origin_ts.ts
+    - negative/cors_wildcard_neg_fastapi_specific_py.py
+    - negative/cors_wildcard_neg_unrelated_call_js.js

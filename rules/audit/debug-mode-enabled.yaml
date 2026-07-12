@@ -1,0 +1,86 @@
+id: audit/debug-mode-enabled
+severity: medium
+confidence: high
+languages: [javascript, typescript, python]
+description: >
+  A framework or runtime is left in debug mode via a literal True/string
+  assignment — Flask's app.run(debug=True)/app.debug = True, a FastAPI/
+  Uvicorn call with debug=True, or an Express-style app.set("env",
+  "development")/process.env.NODE_ENV = "development" toggle — leaking
+  stack traces and internals if shipped to production.
+message: "Debug mode enabled via a literal assignment (leaks internals in production)"
+remediation: >
+  Never hardcode debug=True or a "development" environment toggle. Read the
+  value from an environment variable that defaults to a safe (non-debug)
+  value in production.
+refs:
+  - https://getdev.ai/rules/audit/debug-mode-enabled
+matchers:
+  # Python: <obj>.run(..., debug=True) — covers Flask's app.run and
+  # uvicorn.run without hardcoding either framework's name.
+  - language: python
+    query: |
+      (call
+        function: (attribute attribute: (identifier) @method (#eq? @method "run"))
+        arguments: (argument_list
+          (keyword_argument
+            name: (identifier) @kw (#eq? @kw "debug")
+            value: (true) @finding)))
+  # Python: Flask's app.debug = True attribute assignment.
+  - language: python
+    query: |
+      (assignment
+        left: (attribute attribute: (identifier) @attr (#eq? @attr "debug"))
+        right: (true) @finding)
+  # Python: FastAPI(debug=True) constructor call.
+  - language: python
+    query: |
+      (call
+        function: (identifier) @fn (#eq? @fn "FastAPI")
+        arguments: (argument_list
+          (keyword_argument
+            name: (identifier) @kw (#eq? @kw "debug")
+            value: (true) @finding)))
+  # JS/TS: Express app.set("env", "development").
+  - language: javascript
+    query: |
+      (call_expression
+        function: (member_expression
+          property: (property_identifier) @method (#eq? @method "set"))
+        arguments: (arguments
+          (string) @key (#eq? @key "\"env\"")
+          (string) @val @finding (#eq? @val "\"development\"")))
+  - language: typescript
+    query: |
+      (call_expression
+        function: (member_expression
+          property: (property_identifier) @method (#eq? @method "set"))
+        arguments: (arguments
+          (string) @key (#eq? @key "\"env\"")
+          (string) @val @finding (#eq? @val "\"development\"")))
+  # JS/TS: process.env.NODE_ENV = "development" literal assignment.
+  - language: javascript
+    query: |
+      (assignment_expression
+        left: (member_expression
+          property: (property_identifier) @prop (#eq? @prop "NODE_ENV"))
+        right: (string) @val @finding (#eq? @val "\"development\""))
+  - language: typescript
+    query: |
+      (assignment_expression
+        left: (member_expression
+          property: (property_identifier) @prop (#eq? @prop "NODE_ENV"))
+        right: (string) @val @finding (#eq? @val "\"development\""))
+fixtures:
+  positive:
+    - positive/debug_mode_flask_run_py.py
+    - positive/debug_mode_flask_attr_py.py
+    - positive/debug_mode_fastapi_ctor_py.py
+    - positive/debug_mode_express_set_js.js
+    - positive/debug_mode_node_env_js.js
+    - positive/debug_mode_node_env_ts.ts
+  negative:
+    - negative/debug_mode_neg_flask_prod_py.py
+    - negative/debug_mode_neg_fastapi_prod_py.py
+    - negative/debug_mode_neg_express_prod_js.js
+    - negative/debug_mode_neg_node_env_prod_js.js
