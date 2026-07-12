@@ -24,6 +24,7 @@ use super::{relative_display, ApiSurface, SurfaceError, SurfaceTier, UsageSite};
 
 #[derive(Debug, Default, Deserialize)]
 struct PackageJsonTypes {
+    name: Option<String>,
     types: Option<String>,
     typings: Option<String>,
 }
@@ -37,6 +38,19 @@ struct PackageJsonTypes {
 /// `statement_block` body — which is exactly what lets a non-wildcard
 /// `declare module "pkg" { export function f(): void; }` self-declaration
 /// contribute its exports without any extra recursion.
+///
+/// WR-02: matching at any depth also reaches exports inside a *foreign*
+/// module augmentation (`declare module "react" { … }`) or a `declare
+/// global { … }` block that a package may ship in its own `index.d.ts`.
+/// Those names belong to another module/the global scope, not to this
+/// package's own surface — attributing them here would let a genuinely
+/// nonexistent member that collides with an augmented/global name be judged
+/// "present" and silently escape `real/nonexistent-api`. `parse_dts_file`
+/// therefore filters captured exports whose nearest enclosing
+/// `ambient_declaration` is a foreign string-named module or `global` (an
+/// unquoted `declare namespace Foo`/`declare module Foo` or a
+/// self-named/relative `declare module "<own>"` is still this package's
+/// surface and is kept).
 const DTS_QUERY: &str = "(export_statement) @export\n(ambient_declaration) @ambient";
 
 struct ParsedDts {
@@ -63,7 +77,7 @@ pub fn enumerate_js(pkg_dir: &Path) -> Result<ApiSurface, SurfaceError> {
         return Ok(unreadable());
     };
 
-    surface_from_entry(&entry)
+    surface_from_entry(&entry, read_package_name(pkg_dir).as_deref())
 }
 
 /// Enumerate the surface of one JS subpath import (`react-dom/server`,
@@ -82,7 +96,21 @@ pub fn enumerate_js_subpath(pkg_dir: &Path, subpath: &str) -> Result<ApiSurface,
             tier: SurfaceTier::Dynamic,
         });
     };
-    surface_from_entry(&entry)
+    surface_from_entry(&entry, read_package_name(pkg_dir).as_deref())
+}
+
+/// The package's own declared module name (`package.json` `"name"`), used to
+/// tell a self-declaration (`declare module "<own>"`, this package's
+/// surface) from a foreign module augmentation (`declare module "react"`,
+/// another package's surface) — WR-02. Absent/unreadable `name` yields
+/// `None`, in which case ambiguous string-named ambient blocks are kept
+/// (conservative: a false negative is safer than a false positive here,
+/// docs/PLAN.md §9.2).
+fn read_package_name(pkg_dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(pkg_dir.join("package.json")).ok()?;
+    serde_json::from_str::<PackageJsonTypes>(&text)
+        .ok()
+        .and_then(|pkg| pkg.name)
 }
 
 /// Shared post-processing for an already-located `.d.ts` entry point: parse
@@ -90,8 +118,8 @@ pub fn enumerate_js_subpath(pkg_dir: &Path, subpath: &str) -> Result<ApiSurface,
 /// (Pitfall 6). Named re-exports (`export { a, b } from './y'`) need no
 /// cross-file work at all — the names are already in the export_clause
 /// itself.
-fn surface_from_entry(entry: &Path) -> Result<ApiSurface, SurfaceError> {
-    let parsed = match parse_dts_file(entry) {
+fn surface_from_entry(entry: &Path, own_module: Option<&str>) -> Result<ApiSurface, SurfaceError> {
+    let parsed = match parse_dts_file(entry, own_module) {
         Ok(parsed) => parsed,
         Err(
             ScanError::Read { .. }
@@ -111,7 +139,7 @@ fn surface_from_entry(entry: &Path) -> Result<ApiSurface, SurfaceError> {
 
     for spec in &parsed.star_reexports {
         match resolve_dts_target(entry, spec) {
-            Some(target) => match parse_dts_file(&target) {
+            Some(target) => match parse_dts_file(&target, own_module) {
                 Ok(target_parsed) => {
                     exported.extend(target_parsed.names);
                     // A second level of nesting we deliberately don't
@@ -262,7 +290,7 @@ fn normalize_dts_path(pkg_dir: &Path, types_field: &str) -> PathBuf {
     }
 }
 
-fn parse_dts_file(path: &Path) -> Result<ParsedDts, ScanError> {
+fn parse_dts_file(path: &Path, own_module: Option<&str>) -> Result<ParsedDts, ScanError> {
     let source = crate::scan::read_source_capped(path)?;
 
     let language = Lang::TypeScript.language();
@@ -290,6 +318,13 @@ fn parse_dts_file(path: &Path) -> Result<ParsedDts, ScanError> {
     while let Some(m) = matches.next() {
         for capture in m.captures {
             if Some(capture.index) == export_idx {
+                // WR-02: an export nested in a *foreign* module augmentation
+                // (`declare module "react" { … }`) or a `declare global`
+                // block is not part of this package's own surface — skip it
+                // so a colliding nonexistent member is still flagged.
+                if export_in_foreign_augmentation(capture.node, bytes, own_module) {
+                    continue;
+                }
                 inspect_export_statement(
                     capture.node,
                     bytes,
@@ -411,6 +446,81 @@ fn collect_export_clause_names(clause: Node, bytes: &[u8], names: &mut BTreeSet<
                 names.insert(strip_ts_string(text).unwrap_or_else(|| text.to_owned()));
             }
         }
+    }
+}
+
+/// WR-02: whether `export_node`'s nearest enclosing `ambient_declaration`
+/// (if any) is a *foreign* augmentation — a `declare module "<other>"` of a
+/// different package or a `declare global { … }` — whose exports must not be
+/// attributed to this package's own surface. A top-level export (no ambient
+/// ancestor), a self-named/relative `declare module "<own>"`, or an unquoted
+/// `declare namespace Foo`/`declare module Foo` is this package's surface and
+/// returns `false`.
+fn export_in_foreign_augmentation(
+    export_node: Node,
+    bytes: &[u8],
+    own_module: Option<&str>,
+) -> bool {
+    let mut current = export_node.parent();
+    while let Some(node) = current {
+        if node.kind() == "ambient_declaration" {
+            return !ambient_is_own_surface(node, bytes, own_module);
+        }
+        current = node.parent();
+    }
+    false
+}
+
+/// Whether an `ambient_declaration` contributes to *this* package's surface:
+/// an unquoted `declare namespace/module Foo` (internal namespace) or a
+/// `declare module "<spec>"` whose `<spec>` is relative or names this package
+/// itself. A `declare global` block and a foreign string-named module are
+/// not (WR-02).
+fn ambient_is_own_surface(ambient: Node, bytes: &[u8], own_module: Option<&str>) -> bool {
+    let mut cursor = ambient.walk();
+    for child in ambient.children(&mut cursor) {
+        match child.kind() {
+            // `declare global { … }` — augments the global scope, never this
+            // package's exported surface.
+            "global" => return false,
+            // `declare namespace Foo`/unquoted `declare module Foo` — an
+            // internal namespace of this package; keep (pre-existing
+            // behavior, not a foreign augmentation).
+            "internal_module" => return true,
+            "module" => {
+                let Some(name_node) = child.child_by_field_name("name") else {
+                    return true;
+                };
+                // An unquoted module name (`declare module Foo`) is an
+                // internal namespace, not a string-specifier augmentation.
+                if name_node.kind() != "string" {
+                    return true;
+                }
+                let spec = name_node.utf8_text(bytes).ok().and_then(strip_ts_string);
+                return match spec {
+                    Some(spec) => module_spec_is_self(&spec, own_module),
+                    None => true,
+                };
+            }
+            _ => {}
+        }
+    }
+    true
+}
+
+/// Whether a `declare module "<spec>"` names this package itself (a
+/// self-declaration) rather than a foreign module (an augmentation). A
+/// relative specifier is always self; a bare specifier matches when it
+/// equals the package's own name or is a subpath of it. With no known own
+/// name, err toward self (keep) — a false negative is safer than a false
+/// positive (docs/PLAN.md §9.2).
+fn module_spec_is_self(spec: &str, own_module: Option<&str>) -> bool {
+    if spec.starts_with('.') {
+        return true;
+    }
+    match own_module {
+        Some(own) => spec == own || spec.starts_with(&format!("{own}/")),
+        None => true,
     }
 }
 
@@ -737,6 +847,97 @@ mod tests {
         assert!(surface.exported.contains("a"));
         assert!(surface.exported.contains("c"));
         assert!(!surface.exported.contains("b")); // "b" was renamed to "c"
+    }
+
+    #[test]
+    fn foreign_module_augmentation_exports_are_not_this_packages_surface() {
+        // WR-02: a package that augments *another* module in its own
+        // index.d.ts must NOT have those foreign names counted as its own
+        // surface — else a colliding nonexistent member silently passes.
+        let dir = tempdir("foreign-augmentation");
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name":"my-lib","types":"index.d.ts"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("index.d.ts"),
+            "export function realFn(): void;\n\
+             declare module \"react\" {\n  export interface FakeAugmented {}\n}\n",
+        )
+        .unwrap();
+
+        let surface = enumerate_js(&dir).unwrap();
+        assert_eq!(surface.tier, SurfaceTier::Resolved);
+        assert!(surface.exported.contains("realFn"));
+        // The foreign augmentation's export must be absent from this
+        // package's surface.
+        assert!(!surface.exported.contains("FakeAugmented"));
+    }
+
+    #[test]
+    fn declare_global_exports_are_not_this_packages_surface() {
+        // WR-02: `declare global { … }` augments the global scope, not this
+        // package's exported surface.
+        let dir = tempdir("global-augmentation");
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name":"my-lib","types":"index.d.ts"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("index.d.ts"),
+            "export function realFn(): void;\n\
+             declare global {\n  export const leakedGlobal: number;\n}\n",
+        )
+        .unwrap();
+
+        let surface = enumerate_js(&dir).unwrap();
+        assert!(surface.exported.contains("realFn"));
+        assert!(!surface.exported.contains("leakedGlobal"));
+    }
+
+    #[test]
+    fn self_named_module_declaration_is_kept_as_surface() {
+        // WR-02: a package self-declaring its own module by name
+        // (`declare module "<own>"`) still contributes its exports — this is
+        // the case the any-depth query was designed for; the foreign-module
+        // filter must not regress it (avoiding a false positive).
+        let dir = tempdir("self-declaration");
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name":"mypkg","types":"index.d.ts"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("index.d.ts"),
+            "declare module \"mypkg\" {\n  export function selfFn(): void;\n}\n",
+        )
+        .unwrap();
+
+        let surface = enumerate_js(&dir).unwrap();
+        assert!(surface.exported.contains("selfFn"));
+    }
+
+    #[test]
+    fn internal_namespace_exports_are_still_collected() {
+        // WR-02 boundary: an unquoted `declare namespace Foo` is internal to
+        // this package (not a foreign string-named augmentation) and its
+        // exports remain part of the surface.
+        let dir = tempdir("internal-namespace");
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name":"ns-lib","types":"index.d.ts"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("index.d.ts"),
+            "declare namespace Foo {\n  export const nsMember: number;\n}\n",
+        )
+        .unwrap();
+
+        let surface = enumerate_js(&dir).unwrap();
+        assert!(surface.exported.contains("nsMember"));
     }
 
     #[test]
