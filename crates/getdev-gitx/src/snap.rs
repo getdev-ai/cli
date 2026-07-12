@@ -277,10 +277,12 @@ fn ensure_repo(root: &Path) -> Result<(), GitxError> {
 /// The next snapshot id, allocated from a SHARED monotonic counter across both
 /// `refs/getdev/snaps/` and `refs/getdev/auto/` — so a given id can never
 /// exist in both namespaces (Open Q1/A2). Retention budgets stay independent;
-/// only allocation is shared. Ids are never reused after prune (D-01) because
-/// the counter only ever moves forward past the highest ref ever seen — but
-/// note this reads only live refs, so it is monotonic across a session as long
-/// as refs are not resurrected out of band (they are not).
+/// only allocation is shared. Ids are never reused after prune (D-01): this
+/// reads only LIVE refs, but `enforce_retention` floors `keep` at 1 on every
+/// getdev-controlled path (WR-01), so the newest (highest-id) ref in a namespace
+/// can never be deleted by getdev — the live-refs max is therefore always the
+/// true monotonic high-water mark. The only way to empty a namespace is an
+/// out-of-band manual `git update-ref -d`, which is outside getdev's contract.
 fn next_id(root: &Path) -> Result<u32, GitxError> {
     let mut max_seen: u32 = 0;
     for prefix in [Namespace::Snaps.ref_prefix(), Namespace::Auto.ref_prefix()] {
@@ -381,7 +383,15 @@ fn enforce_retention(root: &Path, ns: Namespace, keep: u32) -> Result<PruneOutco
         .filter_map(|line| line.rsplit('/').next().and_then(|s| s.parse::<u32>().ok()))
         .collect();
     ids.sort_unstable();
-    let keep = keep as usize;
+    // Floor `keep` at 1 on EVERY getdev-controlled retention path (WR-01): a
+    // `keep = 0` (e.g. `[snap] keep = 0` in `.getdev.toml`) would otherwise let
+    // `snapshot()` delete the very ref it just created — including the auto-snap
+    // that is the mandated fail-closed undo point — while still returning `Ok`.
+    // Keeping the newest ref undeletable also makes `next_id`'s live-refs
+    // high-water mark monotonic across a full prune, so ids are never reused
+    // (WR-02 / D-01): the only way to empty a namespace becomes an out-of-band
+    // manual `git update-ref -d`, which is outside getdev's contract.
+    let keep = (keep as usize).max(1);
     if ids.len() <= keep {
         return Ok(PruneOutcome {
             deleted_ids: Vec::new(),

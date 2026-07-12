@@ -319,6 +319,49 @@ fn created_since_snapshot_with_non_ascii_name_is_removed_on_back() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// WR-01 / WR-02 regression: `keep` is floored at 1 on every getdev retention
+/// path, so even `prune(keep = 0)` keeps the newest ref, and `next_id` (which
+/// reads live refs) never restarts at 1 — ids are never reused after a prune
+/// cycle (D-01).
+#[test]
+fn ids_never_reused_across_prune() {
+    let dir = mixed_repo("no-reuse");
+
+    write(&dir, "tracked.txt", "v0\n");
+    let a = snapshot(&dir, Namespace::Snaps, "s0", false, 20).unwrap();
+    write(&dir, "tracked.txt", "v1\n");
+    let b = snapshot(&dir, Namespace::Snaps, "s1", false, 20).unwrap();
+    write(&dir, "tracked.txt", "v2\n");
+    let c = snapshot(&dir, Namespace::Snaps, "s2", false, 20).unwrap();
+    assert!(a.id < b.id && b.id < c.id, "ids allocate monotonically");
+
+    // Prune as hard as the config allows — `keep = 0` is floored to 1 (WR-01),
+    // so the newest (highest-id) ref must survive rather than emptying the ns.
+    let pruned = prune(&dir, Namespace::Snaps, 0).unwrap();
+    assert!(
+        !pruned.deleted_ids.contains(&c.id),
+        "the newest ref must survive the keep floor (WR-01)"
+    );
+    assert_eq!(
+        ref_count(&dir, "refs/getdev/snaps"),
+        1,
+        "keep = 0 must floor to 1, never emptying the namespace"
+    );
+
+    // The next snapshot must allocate a FRESH id above every id ever handed out,
+    // never restarting at 1 after the prune (WR-02 / D-01 no-reuse).
+    write(&dir, "tracked.txt", "v3\n");
+    let d = snapshot(&dir, Namespace::Snaps, "s3", false, 20).unwrap();
+    assert!(
+        d.id > c.id,
+        "id must not be reused after prune (WR-02 / D-01): got {} after {}",
+        d.id,
+        c.id
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// D-05 / T-05-09: a gitignored path created or modified after the snapshot
 /// keeps its post-mutation content on `back` — restore never reverts or removes
 /// it, because ignored paths never enter a tree and so are never classified.
