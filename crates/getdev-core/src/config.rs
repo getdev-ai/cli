@@ -20,6 +20,16 @@ pub const GLOBAL_CONFIG_FILE: &str = "config.toml";
 /// `getdev_registry::cache::cache_dir`).
 const GLOBAL_CONFIG_DIR_NAME: &str = ".getdev";
 
+/// Hard cap on the size of a config file this crate will read into memory
+/// (WR-02). `.getdev.toml` is a **project-local, attacker-controllable**
+/// file — it lives in the untrusted repo getdev is pointed at — so, exactly
+/// like the scan cap [`crate::scan::MAX_SCAN_FILE_BYTES`] (F7), config reads
+/// are size-checked BEFORE any buffer is allocated. A multi-GB `.getdev.toml`
+/// (or a `--config`/symlink target) must never be slurped whole into memory,
+/// which would OOM/kill the process on a constrained CI runner. 1 MiB is far
+/// beyond any legitimate TOML config.
+pub const MAX_CONFIG_FILE_BYTES: u64 = 1024 * 1024;
+
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     #[error("failed to read {path}: {source}")]
@@ -34,6 +44,44 @@ pub enum ConfigError {
         #[source]
         source: Box<toml::de::Error>,
     },
+    /// WR-02 — a config file above [`MAX_CONFIG_FILE_BYTES`] is never read
+    /// into memory (unbounded-read DoS on a hostile repo).
+    #[error("config {path} exceeds {MAX_CONFIG_FILE_BYTES} byte limit")]
+    TooLarge { path: PathBuf },
+}
+
+/// Read a config file, enforcing [`MAX_CONFIG_FILE_BYTES`] via a metadata
+/// pre-check BEFORE ever allocating a buffer for it (WR-02) — the same
+/// pattern as [`crate::scan::read_source_capped`]. A missing file yields
+/// `Ok(None)` (the caller substitutes defaults); an oversize file is a hard
+/// [`ConfigError::TooLarge`]. Every config read in this module goes through
+/// here rather than a bare `std::fs::read_to_string`.
+fn read_config_capped(path: &Path) -> Result<Option<String>, ConfigError> {
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(ConfigError::Read {
+                path: path.to_path_buf(),
+                source,
+            })
+        }
+    };
+    if metadata.len() > MAX_CONFIG_FILE_BYTES {
+        return Err(ConfigError::TooLarge {
+            path: path.to_path_buf(),
+        });
+    }
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        // a file that vanished between the stat and the read is a race, not a
+        // present-but-unreadable error — treat it as absent, same as above
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(ConfigError::Read {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -293,26 +341,18 @@ impl RawConfig {
 
     fn load(dir: &Path) -> Result<Self, ConfigError> {
         let path = dir.join(PROJECT_CONFIG_FILE);
-        let text = match std::fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Self::default());
-            }
-            Err(source) => return Err(ConfigError::Read { path, source }),
-        };
-        Self::parse(&text, &path)
+        match read_config_capped(&path)? {
+            Some(text) => Self::parse(&text, &path),
+            None => Ok(Self::default()),
+        }
     }
 
     fn load_global_at(dir: &Path) -> Result<Self, ConfigError> {
         let path = dir.join(GLOBAL_CONFIG_FILE);
-        let text = match std::fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Self::default());
-            }
-            Err(source) => return Err(ConfigError::Read { path, source }),
-        };
-        Self::parse(&text, &path)
+        match read_config_capped(&path)? {
+            Some(text) => Self::parse(&text, &path),
+            None => Ok(Self::default()),
+        }
     }
 
     fn load_global() -> Result<Self, ConfigError> {
@@ -325,14 +365,10 @@ impl Config {
     /// a malformed or unknown-key file is a hard error (CLI exit code 3).
     pub fn load(dir: &Path) -> Result<Self, ConfigError> {
         let path = dir.join(PROJECT_CONFIG_FILE);
-        let text = match std::fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Self::default());
-            }
-            Err(source) => return Err(ConfigError::Read { path, source }),
-        };
-        Self::parse(&text, &path)
+        match read_config_capped(&path)? {
+            Some(text) => Self::parse(&text, &path),
+            None => Ok(Self::default()),
+        }
     }
 
     pub fn parse(text: &str, path: &Path) -> Result<Self, ConfigError> {
@@ -358,14 +394,10 @@ impl Config {
     /// module for the rationale).
     pub fn load_global_at(dir: &Path) -> Result<Self, ConfigError> {
         let path = dir.join(GLOBAL_CONFIG_FILE);
-        let text = match std::fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Self::default());
-            }
-            Err(source) => return Err(ConfigError::Read { path, source }),
-        };
-        Self::parse(&text, &path)
+        match read_config_capped(&path)? {
+            Some(text) => Self::parse(&text, &path),
+            None => Ok(Self::default()),
+        }
     }
 
     /// Presence-based field-level precedence merge (B1 audit fix): a
@@ -484,9 +516,13 @@ impl Config {
     pub fn resolve(cli_config: Option<&Path>, dir: &Path) -> Result<Self, ConfigError> {
         let project = match cli_config {
             Some(path) => {
-                let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
+                // an explicitly-passed `--config <path>` that is missing must
+                // fail loudly (a typo in the flag is a user error, not a
+                // silent fall-back to defaults) — but it is still size-capped
+                // (WR-02) before being read.
+                let text = read_config_capped(path)?.ok_or_else(|| ConfigError::Read {
                     path: path.to_path_buf(),
-                    source,
+                    source: std::io::Error::from(std::io::ErrorKind::NotFound),
                 })?;
                 RawConfig::parse(&text, path)?
             }
@@ -623,6 +659,42 @@ reason = "test fixture key, not a real secret"
         std::fs::create_dir_all(&dir).unwrap();
         let config = Config::load(&dir).unwrap();
         assert_eq!(config, Config::default());
+    }
+
+    /// WR-02 regression: `.getdev.toml` is attacker-controllable (it lives in
+    /// the scanned repo). A file over [`MAX_CONFIG_FILE_BYTES`] must be
+    /// rejected via a metadata pre-check — never slurped whole into memory
+    /// (unbounded-read OOM DoS). We write one byte over the cap and assert the
+    /// typed `TooLarge` error rather than an allocation.
+    #[test]
+    fn oversized_project_config_is_rejected_not_read() {
+        let dir = tmp_dir("oversized");
+        let oversized =
+            "# ".to_owned() + &"x".repeat(usize::try_from(MAX_CONFIG_FILE_BYTES).unwrap() + 1);
+        std::fs::write(dir.join(PROJECT_CONFIG_FILE), oversized).unwrap();
+        let err = Config::load(&dir).unwrap_err();
+        assert!(matches!(err, ConfigError::TooLarge { .. }));
+        assert!(err.to_string().contains("byte limit"));
+    }
+
+    /// WR-02: the same cap guards the global config and the `--config`
+    /// target, not just the project file.
+    #[test]
+    fn oversized_global_and_explicit_config_are_rejected() {
+        let dir = tmp_dir("oversized-global");
+        let oversized = "x".repeat(usize::try_from(MAX_CONFIG_FILE_BYTES).unwrap() + 1);
+        std::fs::write(dir.join(GLOBAL_CONFIG_FILE), &oversized).unwrap();
+        assert!(matches!(
+            Config::load_global_at(&dir).unwrap_err(),
+            ConfigError::TooLarge { .. }
+        ));
+
+        let explicit = dir.join("explicit.toml");
+        std::fs::write(&explicit, &oversized).unwrap();
+        assert!(matches!(
+            Config::resolve(Some(&explicit), &dir).unwrap_err(),
+            ConfigError::TooLarge { .. }
+        ));
     }
 
     fn tmp_dir(label: &str) -> PathBuf {
