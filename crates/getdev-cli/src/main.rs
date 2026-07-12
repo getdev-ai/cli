@@ -279,7 +279,13 @@ fn run(cli: Cli) -> anyhow::Result<u8> {
             })
         }
         Command::Doctor => {
-            unreachable!("Command::Doctor is handled before config resolution above")
+            // Doctor is dispatched above (before config resolution) and
+            // returns, so this arm is unreachable today. It stays a
+            // non-panicking `bail!` rather than `unreachable!` so a future
+            // reorder of the two dispatch sites degrades to a clean CLI error
+            // (exit 2), never a panic across the crate boundary (CLAUDE.md
+            // rule 1). IN-01.
+            anyhow::bail!("internal: doctor should have been dispatched before config resolution")
         }
         Command::Spike { dir } => commands::spike::run(&dir).map(|()| 0),
     }
