@@ -1,0 +1,42 @@
+id: audit/client-only-validation
+severity: medium
+confidence: medium
+languages: [javascript, typescript]
+description: >
+  A call to a browser-only native form-validation API (Element.
+  checkValidity()/HTMLFormElement.reportValidity()) — these APIs exist only
+  in the browser DOM and can never have a server-side counterpart by
+  construction, so their presence as the apparent gate before submitting
+  data is a heuristic signal that validation stops at the client. This is
+  advisory, not a confirmed vulnerability: it cannot see whether the same
+  data is also re-validated server-side, which is why it is capped at
+  confidence: medium and always surfaces its reasoning via `detail`.
+message: "Form validated only via a browser-only native API (checkValidity/reportValidity)"
+remediation: >
+  Treat checkValidity()/reportValidity() as a UX nicety, never as the data
+  integrity gate. Re-validate the same data server-side (schema validation
+  in the API route/handler) before trusting or persisting it.
+refs:
+  - https://getdev.ai/rules/audit/client-only-validation
+matchers:
+  # JS/TS: element.checkValidity() / form.reportValidity() — a member-call,
+  # not a bare identifier call (so a same-named custom function is excluded).
+  - language: javascript
+    query: |
+      (call_expression
+        function: (member_expression
+          property: (property_identifier) @method (#any-of? @method "checkValidity" "reportValidity"))) @finding
+  - language: typescript
+    query: |
+      (call_expression
+        function: (member_expression
+          property: (property_identifier) @method (#any-of? @method "checkValidity" "reportValidity"))) @finding
+fixtures:
+  positive:
+    - positive/client_only_validation_form_check_js.js
+    - positive/client_only_validation_report_validity_ts.ts
+    - positive/client_only_validation_input_check_js.js
+  negative:
+    - negative/client_only_validation_neg_server_schema_js.js
+    - negative/client_only_validation_neg_unrelated_method_ts.ts
+    - negative/client_only_validation_neg_bare_function_js.js

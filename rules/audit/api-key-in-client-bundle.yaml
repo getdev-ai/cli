@@ -1,0 +1,55 @@
+id: audit/api-key-in-client-bundle
+severity: high
+confidence: medium
+languages: [javascript, typescript]
+description: >
+  A provider-key-shaped literal (Stripe, AWS, GitHub, Google, Slack,
+  SendGrid, or Twilio format) assigned to a bundler-exposed client
+  variable — a `NEXT_PUBLIC_`/`VITE_`/`REACT_APP_`-prefixed identifier or
+  object key. Bundlers (Next.js, Vite, Create React App) inline any
+  variable/key using one of these prefixes directly into the shipped
+  client-side JavaScript bundle, so a provider secret assigned this way is
+  readable by anyone who opens the browser's network/source tab, even
+  though the code never appears to leave the server-only-looking source
+  file.
+message: "Provider API key assigned to a client-bundle-exposed variable"
+remediation: >
+  Never assign a provider secret to a NEXT_PUBLIC_/VITE_/REACT_APP_-prefixed
+  variable or object key — those are inlined into the client bundle by
+  design. Keep provider secrets server-only (an un-prefixed env var used
+  only in server/API-route code) and proxy any client-side calls through
+  your own backend.
+refs:
+  - https://getdev.ai/rules/audit/api-key-in-client-bundle
+matchers:
+  # variable_declarator form: const NEXT_PUBLIC_STRIPE_KEY = "sk_live_...".
+  - language: javascript
+    query: |
+      (variable_declarator
+        name: (identifier) @name (#match? @name "^(NEXT_PUBLIC_|VITE_|REACT_APP_)")
+        value: (string) @finding (#match? @finding "sk_live_|AKIA|ghp_|AIza|xox[baprs]-|SG\\.|sk-ant-|sk-proj-"))
+  - language: typescript
+    query: |
+      (variable_declarator
+        name: (identifier) @name (#match? @name "^(NEXT_PUBLIC_|VITE_|REACT_APP_)")
+        value: (string) @finding (#match? @finding "sk_live_|AKIA|ghp_|AIza|xox[baprs]-|SG\\.|sk-ant-|sk-proj-"))
+  # object-property form: { NEXT_PUBLIC_STRIPE_KEY: "sk_live_..." }.
+  - language: javascript
+    query: |
+      (pair
+        key: (property_identifier) @name (#match? @name "^(NEXT_PUBLIC_|VITE_|REACT_APP_)")
+        value: (string) @finding (#match? @finding "sk_live_|AKIA|ghp_|AIza|xox[baprs]-|SG\\.|sk-ant-|sk-proj-"))
+  - language: typescript
+    query: |
+      (pair
+        key: (property_identifier) @name (#match? @name "^(NEXT_PUBLIC_|VITE_|REACT_APP_)")
+        value: (string) @finding (#match? @finding "sk_live_|AKIA|ghp_|AIza|xox[baprs]-|SG\\.|sk-ant-|sk-proj-"))
+fixtures:
+  positive:
+    - positive/api_key_client_nextjs_var_js.js
+    - positive/api_key_client_vite_var_ts.ts
+    - positive/api_key_client_reactapp_object_js.js
+  negative:
+    - negative/api_key_client_neg_env_reference_js.js
+    - negative/api_key_client_neg_server_only_ts.ts
+    - negative/api_key_client_neg_prefixed_placeholder_js.js
