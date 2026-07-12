@@ -355,11 +355,20 @@ pub fn collect_string_assignments(
             Err(err @ (ScanError::Grammar(_) | ScanError::Query(_))) => return Err(err),
             Err(err) => skipped.push(err),
         }
-    }
+        Ok(())
+    })?;
 
     Ok((results, skipped))
 }
 
+/// Parse `path` and extract its string assignments. This is a convenience
+/// wrapper that owns its own `Parser::parse` — do NOT call it on a hot path
+/// where the same file has already been parsed (e.g. alongside
+/// [`scan_file`]), or that file would be parsed twice per invocation,
+/// violating the parse-once invariant (CLAUDE.md rule 5). A caller that
+/// already holds a `Tree` must reuse [`string_assignments_from_tree`]
+/// instead; the parse-once seam is regression-pinned by
+/// `tree_reuse_matches_fresh_parse` (IN-06).
 fn assignments_in_file(path: &Path, lang: Lang) -> Result<Vec<StringAssignment>, ScanError> {
     let source = read_source_capped(path)?;
 
@@ -521,6 +530,36 @@ mod tests {
         let debug_output = format!("{assignment:?}");
         assert!(!debug_output.contains("sk_live_FAKEFAKEFAKE1234"));
         assert!(debug_output.contains("«redacted»"));
+    }
+
+    /// IN-06 regression: the parse-once seam. A caller that has ALREADY
+    /// parsed a file must be able to extract string assignments from that one
+    /// `Tree` via `string_assignments_from_tree`, with a result identical to
+    /// the parsing wrapper `assignments_in_file` — proving a single cached
+    /// parse is sufficient and no consumer needs a second parse of the same
+    /// file (CLAUDE.md rule 5).
+    #[test]
+    fn tree_reuse_matches_fresh_parse() {
+        let dir = unique_tempdir("parse_once");
+        let src = "const apiKey = \"sk_live_abc\";\nfunction f() {}\n";
+        let path = dir.join("t.js");
+        std::fs::write(&path, src).unwrap();
+
+        // reuse an externally-parsed tree — no re-read, no re-parse
+        let mut parser = Parser::new();
+        parser.set_language(&Lang::JavaScript.language()).unwrap();
+        let tree = parser.parse(src, None).unwrap();
+        let reused = string_assignments_from_tree(&tree, src, Lang::JavaScript, &path).unwrap();
+
+        // the parsing wrapper (its own parse) must agree exactly
+        let fresh = assignments_in_file(&path, Lang::JavaScript).unwrap();
+
+        assert_eq!(reused.len(), 1, "one string assignment expected");
+        assert_eq!(reused.len(), fresh.len());
+        assert_eq!(reused[0].name, "apiKey");
+        assert_eq!(reused[0].name, fresh[0].name);
+        assert_eq!(reused[0].value, fresh[0].value);
+        assert_eq!(reused[0].value_span, fresh[0].value_span);
     }
 
     #[test]
