@@ -4,7 +4,7 @@ mod commands;
 mod update;
 
 use clap::{Args, Parser, Subcommand};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use getdev_core::config::{self, Config};
 use getdev_core::findings::Severity;
@@ -186,9 +186,15 @@ fn run(cli: Cli) -> anyhow::Result<u8> {
     // leniently (falls back to defaults) and separately reports the same
     // parse failure as a failed row via its own `Config::load` check.
     if matches!(cli.command, Command::Doctor) {
-        let cfg = Config::resolve(cli.global.config.as_deref(), Path::new(".")).unwrap_or_default();
+        // IN-02: honor the global `--path` like every other command — doctor
+        // validates the config at the target directory, not an unconditional
+        // CWD. `--path` defaults to "." so unqualified `getdev doctor` is
+        // unchanged.
+        let cfg =
+            Config::resolve(cli.global.config.as_deref(), &cli.global.path).unwrap_or_default();
         let offline = config::offline_resolved(cli.global.offline, &cfg);
         return commands::doctor::run(&commands::doctor::DoctorArgs {
+            path: cli.global.path.clone(),
             offline,
             fix: cli.global.fix,
             json: cli.global.json,

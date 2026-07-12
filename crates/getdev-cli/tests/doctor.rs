@@ -209,6 +209,41 @@ fn doctor_survives_a_malformed_config_and_reports_it_as_a_failed_row() {
 }
 
 #[test]
+fn doctor_honors_the_global_path_flag_for_the_config_check() {
+    // IN-02 regression: doctor validates the `.getdev.toml` under `--path`,
+    // not an unconditional CWD. We put a malformed config in a target dir,
+    // run doctor from a *clean* CWD (a fresh temp dir with no `.getdev.toml`),
+    // and point `--path` at the target — the malformed config must surface as
+    // a failed row. Before IN-02, doctor hardcoded the CWD and would have
+    // reported the config valid, silently missing the problem.
+    let clean_cwd = tmp_dir("path-clean-cwd");
+    std::fs::create_dir_all(&clean_cwd).unwrap();
+    let target = tmp_dir("path-target");
+    std::fs::create_dir_all(&target).unwrap();
+    let cache_dir = clean_cwd.join("cache");
+    std::fs::write(
+        target.join(".getdev.toml"),
+        "[check]\nfail_onn = \"high\"\n",
+    )
+    .unwrap();
+
+    let assert = getdev()
+        .current_dir(&clean_cwd)
+        .env("GETDEV_CACHE_DIR", &cache_dir)
+        .arg("doctor")
+        .arg("--offline")
+        .arg("--path")
+        .arg(&target)
+        .assert()
+        .failure();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    assert!(
+        stdout.contains("FAIL") && stdout.contains("config:"),
+        "doctor must validate the config at --path, not the CWD, got:\n{stdout}"
+    );
+}
+
+#[test]
 fn fix_refuses_to_delete_a_cache_dir_with_unexpected_contents() {
     // F3(b): --fix must only ever delete a directory that actually looks
     // like a getdev cache — a misconfigured GETDEV_CACHE_DIR pointing at an

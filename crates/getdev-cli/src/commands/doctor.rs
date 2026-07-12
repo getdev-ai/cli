@@ -1,5 +1,5 @@
 use std::io::IsTerminal;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use owo_colors::OwoColorize;
@@ -24,6 +24,10 @@ const CACHE_HEALTH_PROBE_NAME: &str = "__getdev_doctor_health_probe__";
 const DOCTOR_SCHEMA_VERSION: &str = "1";
 
 pub struct DoctorArgs {
+    /// Directory whose `.getdev.toml` the config-validity check inspects
+    /// (the global `--path`, default "."). IN-02: doctor honors `--path`
+    /// like every other command instead of hardcoding the CWD.
+    pub path: PathBuf,
     pub offline: bool,
     pub fix: bool,
     /// B4: machine-readable pass/fail table (global flag, docs/PLAN.md §2.2).
@@ -54,12 +58,12 @@ struct DoctorReport {
 pub fn run(args: &DoctorArgs) -> anyhow::Result<u8> {
     let mut checks: Vec<DoctorCheck> = Vec::new();
 
-    // config validity (.getdev.toml in CWD; missing file is fine). B3: a
-    // malformed config must never kill doctor before it can diagnose
-    // anything — doctor resolves config leniently here (a ConfigError
-    // becomes a failed row, not a process exit) while every other command
-    // keeps the hard exit-3 in main.rs.
-    match Config::load(Path::new(".")) {
+    // config validity (`.getdev.toml` under the `--path` dir, default CWD;
+    // missing file is fine). B3: a malformed config must never kill doctor
+    // before it can diagnose anything — doctor resolves config leniently here
+    // (a ConfigError becomes a failed row, not a process exit) while every
+    // other command keeps the hard exit-3 in main.rs. IN-02: honors `--path`.
+    match Config::load(&args.path) {
         Ok(_) => checks.push(row(true, "config (.getdev.toml valid or absent)")),
         Err(err) => checks.push(row(false, &format!("config: {err}"))),
     }
