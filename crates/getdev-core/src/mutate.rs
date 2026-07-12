@@ -7,8 +7,12 @@
 //! 3. **Rollback**: if any write fails mid-plan, already-written files are
 //!    restored from their kept originals (best effort, reported).
 //!
-//! Auto-snap before multi-file mutations arrives with `getdev-gitx` snap
-//! support (P4); until then callers surface "no snapshot yet" in their UX.
+//! Auto-snap before multi-file mutations is wired here via the injected
+//! [`PreMutateHook`]: [`apply`] fires it once, before any I/O, iff the plan
+//! touches more than one file. The trait is defined in this crate and
+//! implemented in `getdev-cli` with a `getdev-gitx`-backed snapshot, so the
+//! auto-snap call lives inside this audited path without a
+//! `getdev-core → getdev-gitx` dependency edge.
 
 use std::path::{Path, PathBuf};
 
@@ -128,8 +132,21 @@ pub struct Applied {
 /// rolling back on mid-plan failure.
 pub fn apply(
     writes: Vec<PlannedWrite>,
-    _hook: Option<&dyn PreMutateHook>,
+    hook: Option<&dyn PreMutateHook>,
 ) -> Result<Applied, MutateError> {
+    // phase 0: auto-snap gate. A multi-file plan (D-07 trigger) fires the
+    // injected hook exactly once BEFORE any verify or I/O; a single-file plan
+    // is already covered by verify → atomic-write → rollback, so it is skipped.
+    // A hook error aborts the whole plan here, before anything is written
+    // (fail closed).
+    if writes.len() > 1 {
+        if let Some(hook) = hook {
+            let paths: Vec<&Path> = writes.iter().map(PlannedWrite::path).collect();
+            hook.before_multi_file_write(&paths)
+                .map_err(|reason| MutateError::AutoSnapFailed { reason })?;
+        }
+    }
+
     // phase 1: verify all rewritten source reparses BEFORE touching disk
     for write in &writes {
         if let PlannedWrite::RewriteSource {
