@@ -1,6 +1,13 @@
 id: audit/supabase-permissive-rls
 severity: high
-confidence: high
+# IN-04: this rule fires purely on the LEXICAL name/text of createClient's
+# 2nd argument (a literal sb_secret_… key, or an identifier/env-var whose
+# name matches (?i)service_?role) — it cannot see whether e.g. a helper
+# named getServiceRoleKey actually returns the anon key. A name-based
+# heuristic must not claim `confidence: high`; `medium` matches its true
+# strength and (via core::audit's is_heuristic gate) surfaces the rule's
+# `detail` reasoning so a reviewer can judge the match.
+confidence: medium
 languages: [javascript, typescript, tsx]
 description: >
   A Supabase `createClient(url, key)` call whose second argument is (or
