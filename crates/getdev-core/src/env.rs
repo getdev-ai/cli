@@ -426,12 +426,18 @@ fn accessor(lang: Lang, var_name: &str) -> String {
 fn ensure_os_import(content: &str) -> String {
     let has_os_import = content.lines().any(|line| {
         let line = line.trim_start();
+        // Only forms that actually bind the name `os` satisfy the
+        // requirement. `import os.path` still binds `os` (and the submodule),
+        // so it counts. `from os import getenv` / `from os.path import join`
+        // bind `getenv`/`join` — NOT `os` — so they must NOT count
+        // (CR-01/02-env-REVIEW.md): treating them as satisfied suppressed the
+        // `import os` injection, leaving the injected `os.environ[...]`
+        // referencing an unbound name → `NameError` at runtime, while
+        // reparse-verify (syntax-only) still passed.
         line == "import os"
             || line.starts_with("import os ")
             || line.starts_with("import os,")
             || line.starts_with("import os.")
-            || line.starts_with("from os import")
-            || line.starts_with("from os.")
     });
     if has_os_import {
         return content.to_owned();
@@ -587,6 +593,114 @@ mod tests {
         parser.set_language(&Lang::Python.language()).unwrap();
         let tree = parser.parse(&out, None).unwrap();
         assert!(!tree.root_node().has_error());
+    }
+
+    fn parses_clean(src: &str) -> bool {
+        let mut parser = getdev_grammars::tree_sitter::Parser::new();
+        parser.set_language(&Lang::Python.language()).unwrap();
+        let tree = parser.parse(src, None).unwrap();
+        !tree.root_node().has_error()
+    }
+
+    /// CR-01 regression: `from os import getenv` binds `getenv`, NOT `os`, so
+    /// it must NOT satisfy the `import os` requirement. Without the injected
+    /// `import os`, the rewritten `os.environ["…"]` raises `NameError: name
+    /// 'os' is not defined` at runtime — a silently-broken module that
+    /// reparse-verify (syntax-only) never catches.
+    #[test]
+    fn ensure_os_import_injects_when_only_from_os_import_present() {
+        let content = "from os import getenv\n\nvalue = 1\n";
+        let out = ensure_os_import(content);
+        assert!(
+            out.lines().any(|l| l.trim() == "import os"),
+            "import os must be injected even though `from os import …` is present, got:\n{out}"
+        );
+        assert!(
+            parses_clean(&out),
+            "rewritten module must parse cleanly:\n{out}"
+        );
+    }
+
+    /// `from os.path import join` likewise binds `join`, not `os`.
+    #[test]
+    fn ensure_os_import_injects_when_only_from_os_path_import_present() {
+        let content = "from os.path import join\n\nvalue = 1\n";
+        let out = ensure_os_import(content);
+        assert!(
+            out.lines().any(|l| l.trim() == "import os"),
+            "import os must be injected for `from os.path import …`, got:\n{out}"
+        );
+        assert!(
+            parses_clean(&out),
+            "rewritten module must parse cleanly:\n{out}"
+        );
+    }
+
+    /// End-to-end through `apply`: a Python module that only does
+    /// `from os import getenv` and hardcodes a secret must, after --write,
+    /// gain a real `import os` and reference it via `os.environ[...]` —
+    /// binding `os` so the module still runs.
+    #[test]
+    fn apply_injects_import_os_for_from_os_import_module() {
+        let dir = std::env::temp_dir().join(format!(
+            "getdev-env-cr01-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("config.py"),
+            "from os import getenv\n\naws_key = \"AKIAFAKEFAKEFAKEFAKE\"\n",
+        )
+        .unwrap();
+
+        let plan = plan(&dir, &EnvOptions::default()).unwrap();
+        apply(&dir, &plan, &EnvOptions::default()).unwrap();
+
+        let rewritten = std::fs::read_to_string(dir.join("config.py")).unwrap();
+        assert!(
+            rewritten.lines().any(|l| l.trim() == "import os"),
+            "apply must inject `import os`, got:\n{rewritten}"
+        );
+        assert!(
+            rewritten.contains("os.environ[\"AWS_ACCESS_KEY_ID\"]"),
+            "apply must rewrite the literal to os.environ[...], got:\n{rewritten}"
+        );
+        // the `from os import getenv` must survive; `os` must now be bound
+        assert!(rewritten.contains("from os import getenv"));
+        assert!(
+            parses_clean(&rewritten),
+            "rewritten module must parse cleanly:\n{rewritten}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A genuine `import os` must NOT be duplicated.
+    #[test]
+    fn ensure_os_import_not_duplicated_when_os_truly_bound() {
+        let content = "import os\n\nvalue = 1\n";
+        let out = ensure_os_import(content);
+        assert_eq!(
+            out.matches("import os").count(),
+            1,
+            "must not duplicate import os:\n{out}"
+        );
+    }
+
+    /// `import os.path` binds `os` too — still counts, no second import.
+    #[test]
+    fn ensure_os_import_respects_import_os_submodule() {
+        let content = "import os.path\n\nvalue = 1\n";
+        let out = ensure_os_import(content);
+        assert_eq!(
+            out, content,
+            "import os.path already binds os; nothing to inject"
+        );
     }
 
     /// C6 regression: `{:?}` on a `PlanEntry` must never print the raw
