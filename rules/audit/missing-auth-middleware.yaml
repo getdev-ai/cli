@@ -35,6 +35,19 @@ remediation: >
   token check at the top of the Next.js API-route handler.
 refs:
   - https://getdev.ai/rules/audit/missing-auth-middleware
+# IN-01 (by-design, judged): this path_glob is intentionally broad. Express
+# `app.get(...)`, FastAPI/Flask route decorators live in ARBITRARY files, not
+# only under an api/ directory, so project-wide per-extension coverage
+# (**/*.js|ts|py) is REQUIRED — scoping to api/ paths would silently disable
+# framework detection for every non-Next.js app. path_glob is per-RULE (not
+# per-matcher), so the Next.js handler / `export GET` matchers do fire on any
+# JS/TS file (a plain `function handler(){}` anywhere trips the rule); that
+# over-fire is an accepted heuristic limitation, already mitigated by this
+# rule's `info` severity sitting BELOW the default `[audit] severity_min =
+# "low"` floor (silent unless `--severity info`). The two api/ entries are
+# NOT redundant with the per-extension globs above: `**/*.tsx` is deliberately
+# absent from that list, so `**/pages/api/**` and `**/app/api/**/route.{…tsx}`
+# are what admit Next.js route.tsx / pages/api *.tsx handlers for scanning.
 path_glob:
   - "**/*.js"
   - "**/*.mjs"
