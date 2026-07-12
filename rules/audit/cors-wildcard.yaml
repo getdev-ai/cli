@@ -1,7 +1,7 @@
 id: audit/cors-wildcard
 severity: high
 confidence: high
-languages: [javascript, typescript, python]
+languages: [javascript, typescript, tsx, python]
 description: >
   CORS configured with a wildcard origin ("*") — an Express cors() call or a
   FastAPI CORSMiddleware registration with allow_origins=["*"] — allowing any
@@ -29,6 +29,14 @@ matchers:
           (pair key: (property_identifier) @k (#eq? @k "origin")
                 value: (string) @v @finding (#eq? @v "\"*\"")))))
   # FastAPI (Python): app.add_middleware(CORSMiddleware, allow_origins=["*"]).
+  - language: tsx
+    query: |
+      (call_expression
+        function: (identifier) @fn (#eq? @fn "cors")
+        arguments: (arguments (object
+          (pair key: (property_identifier) @k (#eq? @k "origin")
+                value: (string) @v @finding (#eq? @v "\"*\"")))))
+  # FastAPI (Python): app.add_middleware(CORSMiddleware, allow_origins=["*"]).
   - language: python
     query: |
       (call
@@ -44,6 +52,7 @@ fixtures:
     - positive/cors_wildcard_express_ts.ts
     - positive/cors_wildcard_fastapi_py.py
     - positive/cors_wildcard_extra_opts_js.js
+    - positive/cors_wildcard_express_tsx.tsx
   negative:
     - negative/cors_wildcard_neg_specific_origin_js.js
     - negative/cors_wildcard_neg_specific_origin_ts.ts

@@ -1,7 +1,7 @@
 id: audit/eval-user-input
 severity: high
 confidence: high
-languages: [javascript, typescript, python]
+languages: [javascript, typescript, tsx, python]
 description: >
   eval() called with a non-literal argument (a variable, property access, or
   the result of another call) instead of a constant string — arbitrary code
@@ -26,6 +26,12 @@ matchers:
         function: (identifier) @fn (#eq? @fn "eval")
         arguments: (arguments (identifier) @finding))
   # JS/TS: eval(<member expression>) — a property access, e.g. req.body.code.
+  - language: tsx
+    query: |
+      (call_expression
+        function: (identifier) @fn (#eq? @fn "eval")
+        arguments: (arguments (identifier) @finding))
+  # JS/TS: eval(<member expression>) — a property access, e.g. req.body.code.
   - language: javascript
     query: |
       (call_expression
@@ -37,12 +43,24 @@ matchers:
         function: (identifier) @fn (#eq? @fn "eval")
         arguments: (arguments (member_expression) @finding))
   # JS/TS: eval(<call expression>) — the result of another function call.
+  - language: tsx
+    query: |
+      (call_expression
+        function: (identifier) @fn (#eq? @fn "eval")
+        arguments: (arguments (member_expression) @finding))
+  # JS/TS: eval(<call expression>) — the result of another function call.
   - language: javascript
     query: |
       (call_expression
         function: (identifier) @fn (#eq? @fn "eval")
         arguments: (arguments (call_expression) @finding))
   - language: typescript
+    query: |
+      (call_expression
+        function: (identifier) @fn (#eq? @fn "eval")
+        arguments: (arguments (call_expression) @finding))
+  # Python: eval(<identifier>) — a variable, not a literal.
+  - language: tsx
     query: |
       (call_expression
         function: (identifier) @fn (#eq? @fn "eval")
@@ -71,6 +89,7 @@ fixtures:
     - positive/eval_user_input_js_member.js
     - positive/eval_user_input_py_variable.py
     - positive/eval_user_input_py_call.py
+    - positive/eval_user_input_tsx.tsx
   negative:
     - negative/eval_user_input_neg_constant_js.js
     - negative/eval_user_input_neg_constant_py.py

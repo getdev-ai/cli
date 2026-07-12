@@ -1,7 +1,7 @@
 id: audit/supabase-permissive-rls
 severity: high
 confidence: high
-languages: [javascript, typescript]
+languages: [javascript, typescript, tsx]
 description: >
   A Supabase `createClient(url, key)` call whose second argument is (or
   plausibly resolves to) the project's service_role key — a literal
@@ -29,11 +29,17 @@ matchers:
       (call_expression
         function: (identifier) @fn (#eq? @fn "createClient")
         arguments: (arguments (_) (_) @finding (#match? @finding "(?i)service_?role|sb_secret_")))
+  - language: tsx
+    query: |
+      (call_expression
+        function: (identifier) @fn (#eq? @fn "createClient")
+        arguments: (arguments (_) (_) @finding (#match? @finding "(?i)service_?role|sb_secret_")))
 fixtures:
   positive:
     - positive/supabase_rls_service_role_literal_js.js
     - positive/supabase_rls_service_role_env_ts.ts
     - positive/supabase_rls_service_role_var_js.js
+    - positive/supabase_rls_tsx.tsx
   negative:
     - negative/supabase_rls_neg_anon_key_js.js
     - negative/supabase_rls_neg_anon_key_env_ts.ts

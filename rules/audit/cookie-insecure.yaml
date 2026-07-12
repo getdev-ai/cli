@@ -1,7 +1,7 @@
 id: audit/cookie-insecure
 severity: medium
 confidence: medium
-languages: [javascript, typescript, python]
+languages: [javascript, typescript, tsx, python]
 description: >
   A cookie is set without Secure/HttpOnly protection — an Express
   res.cookie(name, value) call with no options object at all (or an explicit
@@ -31,6 +31,13 @@ matchers:
           property: (property_identifier) @method (#eq? @method "cookie"))
         arguments: (arguments . (string) @name . (_) @finding .))
   # Express (JS/TS): res.cookie(name, value, { secure: false }).
+  - language: tsx
+    query: |
+      (call_expression
+        function: (member_expression
+          property: (property_identifier) @method (#eq? @method "cookie"))
+        arguments: (arguments . (string) @name . (_) @finding .))
+  # Express (JS/TS): res.cookie(name, value, { secure: false }).
   - language: javascript
     query: |
       (call_expression
@@ -40,6 +47,16 @@ matchers:
           (pair key: (property_identifier) @k (#eq? @k "secure")
                 value: (false) @finding))))
   - language: typescript
+    query: |
+      (call_expression
+        function: (member_expression
+          property: (property_identifier) @method (#eq? @method "cookie"))
+        arguments: (arguments (string) (object
+          (pair key: (property_identifier) @k (#eq? @k "secure")
+                value: (false) @finding))))
+  # Flask/FastAPI (Python): response.set_cookie(key, value) — exactly two
+  # positional args, no secure kwarg at all.
+  - language: tsx
     query: |
       (call_expression
         function: (member_expression
@@ -70,6 +87,7 @@ fixtures:
     - positive/cookie_insecure_express_no_opts_ts.ts
     - positive/cookie_insecure_flask_no_opts_py.py
     - positive/cookie_insecure_flask_secure_false_py.py
+    - positive/cookie_insecure_express_tsx.tsx
   negative:
     - negative/cookie_insecure_neg_secure_httponly_js.js
     - negative/cookie_insecure_neg_secure_httponly_ts.ts

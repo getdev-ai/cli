@@ -1,7 +1,7 @@
 id: audit/client-only-validation
 severity: medium
 confidence: medium
-languages: [javascript, typescript]
+languages: [javascript, typescript, tsx]
 description: >
   A call to a browser-only native form-validation API (Element.
   checkValidity()/HTMLFormElement.reportValidity()) — these APIs exist only
@@ -31,11 +31,17 @@ matchers:
       (call_expression
         function: (member_expression
           property: (property_identifier) @method (#any-of? @method "checkValidity" "reportValidity"))) @finding
+  - language: tsx
+    query: |
+      (call_expression
+        function: (member_expression
+          property: (property_identifier) @method (#any-of? @method "checkValidity" "reportValidity"))) @finding
 fixtures:
   positive:
     - positive/client_only_validation_form_check_js.js
     - positive/client_only_validation_report_validity_ts.ts
     - positive/client_only_validation_input_check_js.js
+    - positive/client_only_validation_tsx.tsx
   negative:
     - negative/client_only_validation_neg_server_schema_js.js
     - negative/client_only_validation_neg_unrelated_method_ts.ts

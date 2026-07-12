@@ -16,7 +16,7 @@ id: audit/missing-auth-middleware
 # needed to move for this rule to actually drop out of the FP-budget count.
 severity: info
 confidence: medium
-languages: [javascript, typescript, python]
+languages: [javascript, typescript, tsx, python]
 frameworks: [express, fastapi, flask, nextjs]
 description: >
   A route handler declared with no auth-looking guard in its immediate
@@ -56,6 +56,16 @@ matchers:
           property: (property_identifier) @method (#any-of? @method "get" "post" "put" "delete" "patch"))
         arguments: (arguments . (string) @route . (identifier) @finding .))
   - language: typescript
+    query: |
+      (call_expression
+        function: (member_expression
+          object: (identifier) @app (#any-of? @app "app" "router")
+          property: (property_identifier) @method (#any-of? @method "get" "post" "put" "delete" "patch"))
+        arguments: (arguments . (string) @route . (identifier) @finding .))
+  # FastAPI / modern-Flask (Python): @app.get("/route") with exactly one
+  # decorator (no stacked auth decorator) and exactly one positional arg
+  # (no dependencies=[Depends(...)] kwarg).
+  - language: tsx
     query: |
       (call_expression
         function: (member_expression
@@ -108,12 +118,25 @@ matchers:
           parameters: (formal_parameters) @finding))
   # Next.js Pages Router (JS/TS): a `handler(req, res)` function declaration
   # under pages/api/** — again, file selection is path_glob, not AST.
+  - language: tsx
+    query: |
+      (export_statement
+        declaration: (function_declaration
+          name: (identifier) @fn (#any-of? @fn "GET" "POST" "PUT" "DELETE" "PATCH")
+          parameters: (formal_parameters) @finding))
+  # Next.js Pages Router (JS/TS): a `handler(req, res)` function declaration
+  # under pages/api/** — again, file selection is path_glob, not AST.
   - language: javascript
     query: |
       (function_declaration
         name: (identifier) @fn (#eq? @fn "handler")
         parameters: (formal_parameters) @finding)
   - language: typescript
+    query: |
+      (function_declaration
+        name: (identifier) @fn (#eq? @fn "handler")
+        parameters: (formal_parameters) @finding)
+  - language: tsx
     query: |
       (function_declaration
         name: (identifier) @fn (#eq? @fn "handler")
@@ -125,6 +148,8 @@ fixtures:
     - positive/missing_auth_flask_py.py
     - positive/pages/api/missing_auth_nextjs_pages.ts
     - positive/app/api/missing_auth_nextjs_approuter/route.ts
+    - positive/app/api/missing_auth_tsx/route.tsx
+    - positive/pages/api/missing_auth_tsx.tsx
   negative:
     - negative/missing_auth_neg_express_js.js
     - negative/missing_auth_neg_fastapi_py.py

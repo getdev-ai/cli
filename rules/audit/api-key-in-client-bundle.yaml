@@ -1,7 +1,7 @@
 id: audit/api-key-in-client-bundle
 severity: high
 confidence: medium
-languages: [javascript, typescript]
+languages: [javascript, typescript, tsx]
 description: >
   A provider-key-shaped literal (Stripe, AWS, GitHub, Google, Slack,
   SendGrid, or Twilio format) assigned to a bundler-exposed client
@@ -34,6 +34,12 @@ matchers:
         name: (identifier) @name (#match? @name "^(NEXT_PUBLIC_|VITE_|REACT_APP_)")
         value: (string) @finding (#match? @finding "sk_live_|AKIA|ghp_|AIza|xox[baprs]-|SG\\.|sk-ant-|sk-proj-"))
   # object-property form: { NEXT_PUBLIC_STRIPE_KEY: "sk_live_..." }.
+  - language: tsx
+    query: |
+      (variable_declarator
+        name: (identifier) @name (#match? @name "^(NEXT_PUBLIC_|VITE_|REACT_APP_)")
+        value: (string) @finding (#match? @finding "sk_live_|AKIA|ghp_|AIza|xox[baprs]-|SG\\.|sk-ant-|sk-proj-"))
+  # object-property form: { NEXT_PUBLIC_STRIPE_KEY: "sk_live_..." }.
   - language: javascript
     query: |
       (pair
@@ -44,11 +50,17 @@ matchers:
       (pair
         key: (property_identifier) @name (#match? @name "^(NEXT_PUBLIC_|VITE_|REACT_APP_)")
         value: (string) @finding (#match? @finding "sk_live_|AKIA|ghp_|AIza|xox[baprs]-|SG\\.|sk-ant-|sk-proj-"))
+  - language: tsx
+    query: |
+      (pair
+        key: (property_identifier) @name (#match? @name "^(NEXT_PUBLIC_|VITE_|REACT_APP_)")
+        value: (string) @finding (#match? @finding "sk_live_|AKIA|ghp_|AIza|xox[baprs]-|SG\\.|sk-ant-|sk-proj-"))
 fixtures:
   positive:
     - positive/api_key_client_nextjs_var_js.js
     - positive/api_key_client_vite_var_ts.ts
     - positive/api_key_client_reactapp_object_js.js
+    - positive/api_key_client_tsx.tsx
   negative:
     - negative/api_key_client_neg_env_reference_js.js
     - negative/api_key_client_neg_server_only_ts.ts

@@ -1,7 +1,7 @@
 id: audit/exec-user-input
 severity: high
 confidence: high
-languages: [javascript, typescript, python]
+languages: [javascript, typescript, tsx, python]
 description: >
   A shell-invoking function (child_process.exec/execSync, the bare exec/
   execSync import, Python's exec()/os.system(), or subprocess.call/run/Popen
@@ -31,12 +31,26 @@ matchers:
           property: (property_identifier) @method (#any-of? @method "exec" "execSync"))
         arguments: (arguments (identifier) @finding))
   # JS/TS: bare exec/execSync(<identifier>) — the destructured-import form.
+  - language: tsx
+    query: |
+      (call_expression
+        function: (member_expression
+          object: (identifier) @obj (#eq? @obj "child_process")
+          property: (property_identifier) @method (#any-of? @method "exec" "execSync"))
+        arguments: (arguments (identifier) @finding))
+  # JS/TS: bare exec/execSync(<identifier>) — the destructured-import form.
   - language: javascript
     query: |
       (call_expression
         function: (identifier) @fn (#any-of? @fn "exec" "execSync")
         arguments: (arguments (identifier) @finding))
   - language: typescript
+    query: |
+      (call_expression
+        function: (identifier) @fn (#any-of? @fn "exec" "execSync")
+        arguments: (arguments (identifier) @finding))
+  # Python: the exec() builtin called with a variable.
+  - language: tsx
     query: |
       (call_expression
         function: (identifier) @fn (#any-of? @fn "exec" "execSync")
@@ -75,6 +89,7 @@ fixtures:
     - positive/exec_user_input_py_builtin.py
     - positive/exec_user_input_py_os_system.py
     - positive/exec_user_input_py_subprocess_shell.py
+    - positive/exec_user_input_tsx.tsx
   negative:
     - negative/exec_user_input_neg_constant_js.js
     - negative/exec_user_input_neg_constant_py.py

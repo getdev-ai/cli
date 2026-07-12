@@ -1,7 +1,7 @@
 id: audit/debug-mode-enabled
 severity: medium
 confidence: high
-languages: [javascript, typescript, python]
+languages: [javascript, typescript, tsx, python]
 description: >
   A framework or runtime is left in debug mode via a literal True/string
   assignment — Flask's app.run(debug=True)/app.debug = True, a FastAPI/
@@ -59,6 +59,15 @@ matchers:
           (string) @key (#eq? @key "\"env\"")
           (string) @val @finding (#eq? @val "\"development\"")))
   # JS/TS: process.env.NODE_ENV = "development" literal assignment.
+  - language: tsx
+    query: |
+      (call_expression
+        function: (member_expression
+          property: (property_identifier) @method (#eq? @method "set"))
+        arguments: (arguments
+          (string) @key (#eq? @key "\"env\"")
+          (string) @val @finding (#eq? @val "\"development\"")))
+  # JS/TS: process.env.NODE_ENV = "development" literal assignment.
   - language: javascript
     query: |
       (assignment_expression
@@ -66,6 +75,12 @@ matchers:
           property: (property_identifier) @prop (#eq? @prop "NODE_ENV"))
         right: (string) @val @finding (#eq? @val "\"development\""))
   - language: typescript
+    query: |
+      (assignment_expression
+        left: (member_expression
+          property: (property_identifier) @prop (#eq? @prop "NODE_ENV"))
+        right: (string) @val @finding (#eq? @val "\"development\""))
+  - language: tsx
     query: |
       (assignment_expression
         left: (member_expression
@@ -79,6 +94,7 @@ fixtures:
     - positive/debug_mode_express_set_js.js
     - positive/debug_mode_node_env_js.js
     - positive/debug_mode_node_env_ts.ts
+    - positive/debug_mode_tsx.tsx
   negative:
     - negative/debug_mode_neg_flask_prod_py.py
     - negative/debug_mode_neg_fastapi_prod_py.py

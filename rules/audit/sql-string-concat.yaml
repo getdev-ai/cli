@@ -1,7 +1,7 @@
 id: audit/sql-string-concat
 severity: high
 confidence: high
-languages: [javascript, typescript, python]
+languages: [javascript, typescript, tsx, python]
 description: >
   SQL query text built by string concatenation (+/%) or f-string/template-
   literal interpolation directly inside a database execute/executemany/query
@@ -61,7 +61,21 @@ matchers:
           property: (property_identifier) @method
           (#any-of? @method "execute" "query"))
         arguments: (arguments (binary_expression) @finding))
+  - language: tsx
+    query: |
+      (call_expression
+        function: (member_expression
+          property: (property_identifier) @method
+          (#any-of? @method "execute" "query"))
+        arguments: (arguments (binary_expression) @finding))
   - language: typescript
+    query: |
+      (call_expression
+        function: (member_expression
+          property: (property_identifier) @method
+          (#any-of? @method "execute" "query"))
+        arguments: (arguments (template_string (template_substitution) @finding)))
+  - language: tsx
     query: |
       (call_expression
         function: (member_expression
@@ -75,6 +89,7 @@ fixtures:
     - positive/sql_concat_plus_js.js
     - positive/sql_concat_template_js.js
     - positive/sql_concat_plus_ts.ts
+    - positive/sql_concat_tsx.tsx
   negative:
     - negative/sql_concat_neg_parameterized_py.py
     - negative/sql_concat_neg_placeholder_js.js

@@ -1,7 +1,7 @@
 id: audit/shell-interpolation
 severity: high
 confidence: high
-languages: [javascript, typescript]
+languages: [javascript, typescript, tsx]
 description: >
   child_process.exec/execSync invoked with a template literal that
   interpolates a runtime value — shell metacharacters in the interpolated
@@ -28,11 +28,19 @@ matchers:
           object: (identifier) @obj (#eq? @obj "child_process")
           property: (property_identifier) @method (#any-of? @method "exec" "execSync"))
         arguments: (arguments (template_string (template_substitution) @finding)))
+  - language: tsx
+    query: |
+      (call_expression
+        function: (member_expression
+          object: (identifier) @obj (#eq? @obj "child_process")
+          property: (property_identifier) @method (#any-of? @method "exec" "execSync"))
+        arguments: (arguments (template_string (template_substitution) @finding)))
 fixtures:
   positive:
     - positive/shell_interp_exec_js.js
     - positive/shell_interp_execsync_js.js
     - positive/shell_interp_exec_ts.ts
+    - positive/shell_interp_tsx.tsx
   negative:
     - negative/shell_interp_neg_static_js.js
     - negative/shell_interp_neg_execfile_args_js.js
