@@ -741,6 +741,7 @@ name = "getdev-gitx"
 version = "0.1.0-dev"
 dependencies = [
  "proptest",
+ "sha2",
  "thiserror 2.0.18",
 ]
 
