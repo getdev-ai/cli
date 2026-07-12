@@ -1,0 +1,84 @@
+id: audit/exec-user-input
+severity: high
+confidence: high
+languages: [javascript, typescript, python]
+description: >
+  A shell-invoking function (child_process.exec/execSync, the bare exec/
+  execSync import, Python's exec()/os.system(), or subprocess.call/run/Popen
+  with shell=True) called with a non-literal (variable) command argument —
+  command injection risk if the value is influenced by user input.
+message: "Shell command executed with a non-literal argument (command injection risk)"
+remediation: >
+  Pass the command and its arguments as a separate array to execFile/spawn
+  (JS) or subprocess.run([...], shell=False) (Python) instead of building
+  and executing a single shell command string from a variable.
+refs:
+  - https://getdev.ai/rules/audit/exec-user-input
+matchers:
+  # JS/TS: child_process.exec/execSync(<identifier>).
+  - language: javascript
+    query: |
+      (call_expression
+        function: (member_expression
+          object: (identifier) @obj (#eq? @obj "child_process")
+          property: (property_identifier) @method (#any-of? @method "exec" "execSync"))
+        arguments: (arguments (identifier) @finding))
+  - language: typescript
+    query: |
+      (call_expression
+        function: (member_expression
+          object: (identifier) @obj (#eq? @obj "child_process")
+          property: (property_identifier) @method (#any-of? @method "exec" "execSync"))
+        arguments: (arguments (identifier) @finding))
+  # JS/TS: bare exec/execSync(<identifier>) — the destructured-import form.
+  - language: javascript
+    query: |
+      (call_expression
+        function: (identifier) @fn (#any-of? @fn "exec" "execSync")
+        arguments: (arguments (identifier) @finding))
+  - language: typescript
+    query: |
+      (call_expression
+        function: (identifier) @fn (#any-of? @fn "exec" "execSync")
+        arguments: (arguments (identifier) @finding))
+  # Python: the exec() builtin called with a variable.
+  - language: python
+    query: |
+      (call
+        function: (identifier) @fn (#eq? @fn "exec")
+        arguments: (argument_list (identifier) @finding))
+  # Python: os.system(<identifier>).
+  - language: python
+    query: |
+      (call
+        function: (attribute
+          object: (identifier) @obj (#eq? @obj "os")
+          attribute: (identifier) @method (#eq? @method "system"))
+        arguments: (argument_list (identifier) @finding))
+  # Python: subprocess.call/run/Popen(<identifier>, shell=True).
+  - language: python
+    query: |
+      (call
+        function: (attribute
+          object: (identifier) @obj (#eq? @obj "subprocess")
+          attribute: (identifier) @method (#any-of? @method "call" "run" "Popen"))
+        arguments: (argument_list
+          (identifier) @finding
+          (keyword_argument
+            name: (identifier) @kw (#eq? @kw "shell")
+            value: (true))))
+fixtures:
+  positive:
+    - positive/exec_user_input_js_child_process.js
+    - positive/exec_user_input_js_execsync.js
+    - positive/exec_user_input_js_destructured.js
+    - positive/exec_user_input_py_builtin.py
+    - positive/exec_user_input_py_os_system.py
+    - positive/exec_user_input_py_subprocess_shell.py
+  negative:
+    - negative/exec_user_input_neg_constant_js.js
+    - negative/exec_user_input_neg_constant_py.py
+    - negative/exec_user_input_neg_os_system_constant_py.py
+    - negative/exec_user_input_neg_subprocess_array_py.py
+    - negative/exec_user_input_neg_subprocess_no_shell_py.py
+    - negative/exec_user_input_neg_unrelated_identifier_js.js

@@ -1,0 +1,78 @@
+id: audit/eval-user-input
+severity: high
+confidence: high
+languages: [javascript, typescript, python]
+description: >
+  eval() called with a non-literal argument (a variable, property access, or
+  the result of another call) instead of a constant string — arbitrary code
+  execution if the value is influenced by user input.
+message: "eval() called with a non-literal argument (arbitrary code execution risk)"
+remediation: >
+  Avoid eval() entirely. If dynamic evaluation is unavoidable, never pass it
+  a value derived from user input; use JSON.parse/ast.literal_eval or a
+  purpose-built parser instead.
+refs:
+  - https://getdev.ai/rules/audit/eval-user-input
+matchers:
+  # JS/TS: eval(<identifier>) — a variable, not a literal.
+  - language: javascript
+    query: |
+      (call_expression
+        function: (identifier) @fn (#eq? @fn "eval")
+        arguments: (arguments (identifier) @finding))
+  - language: typescript
+    query: |
+      (call_expression
+        function: (identifier) @fn (#eq? @fn "eval")
+        arguments: (arguments (identifier) @finding))
+  # JS/TS: eval(<member expression>) — a property access, e.g. req.body.code.
+  - language: javascript
+    query: |
+      (call_expression
+        function: (identifier) @fn (#eq? @fn "eval")
+        arguments: (arguments (member_expression) @finding))
+  - language: typescript
+    query: |
+      (call_expression
+        function: (identifier) @fn (#eq? @fn "eval")
+        arguments: (arguments (member_expression) @finding))
+  # JS/TS: eval(<call expression>) — the result of another function call.
+  - language: javascript
+    query: |
+      (call_expression
+        function: (identifier) @fn (#eq? @fn "eval")
+        arguments: (arguments (call_expression) @finding))
+  - language: typescript
+    query: |
+      (call_expression
+        function: (identifier) @fn (#eq? @fn "eval")
+        arguments: (arguments (call_expression) @finding))
+  # Python: eval(<identifier>) — a variable, not a literal.
+  - language: python
+    query: |
+      (call
+        function: (identifier) @fn (#eq? @fn "eval")
+        arguments: (argument_list (identifier) @finding))
+  # Python: eval(<attribute access>).
+  - language: python
+    query: |
+      (call
+        function: (identifier) @fn (#eq? @fn "eval")
+        arguments: (argument_list (attribute) @finding))
+  # Python: eval(<call>) — the result of another function call.
+  - language: python
+    query: |
+      (call
+        function: (identifier) @fn (#eq? @fn "eval")
+        arguments: (argument_list (call) @finding))
+fixtures:
+  positive:
+    - positive/eval_user_input_js_variable.js
+    - positive/eval_user_input_js_member.js
+    - positive/eval_user_input_py_variable.py
+    - positive/eval_user_input_py_call.py
+  negative:
+    - negative/eval_user_input_neg_constant_js.js
+    - negative/eval_user_input_neg_constant_py.py
+    - negative/eval_user_input_neg_unrelated_identifier_js.js
+    - negative/eval_user_input_neg_not_eval_call_py.py
