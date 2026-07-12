@@ -93,7 +93,14 @@ fn read_json(path: &Path) -> Result<Option<Value>, DepsError> {
 }
 
 /// `dependencies`/`devDependencies`/`optionalDependencies`/`peerDependencies`
-/// — names only, version ranges are irrelevant to declaration.
+/// — the public-registry package name of every entry whose specifier
+/// actually targets npmjs.org. C4: an entry whose specifier points somewhere
+/// else (`workspace:`/`file:`/`link:`/`portal:`/git/github/tarball-url) is
+/// dropped — 404-checking a monorepo sibling or private/local source against
+/// the public registry is a guaranteed false "package does not exist"
+/// positive. An `npm:` alias is checked under its aliased TARGET, not the
+/// key. Mirrors the VCS/local-path filtering `requirements.txt` already does
+/// (`manifest_py::requirement_line_name`).
 fn package_json_deps(pkg: &Value) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     for group in [
@@ -103,10 +110,105 @@ fn package_json_deps(pkg: &Value) -> BTreeSet<String> {
         "peerDependencies",
     ] {
         if let Some(obj) = pkg.get(group).and_then(Value::as_object) {
-            names.extend(obj.keys().cloned());
+            for (key, specifier) in obj {
+                if let Some(name) = registry_name_for_dep(key, specifier) {
+                    names.insert(name);
+                }
+            }
         }
     }
     names
+}
+
+/// The public-registry package name to existence-check for one
+/// `package.json` dependency entry — `(key, specifier)` — or `None` when the
+/// specifier resolves OUTSIDE the public npm registry and must never be
+/// 404-checked against npmjs.org (C4: a workspace/monorepo sibling, local
+/// path, git/github source, tarball URL, or portal is not a "nonexistent
+/// package").
+///
+/// `npm:` aliases (`"foo": "npm:real-pkg@1.2.3"`) resolve to their ALIASED
+/// TARGET (`real-pkg`): the registry package is the alias target, not the
+/// dependency key — checking `foo` would both miss the real target and
+/// spuriously check a name that is not a dependency.
+fn registry_name_for_dep(key: &str, specifier: &Value) -> Option<String> {
+    let spec = specifier.as_str().unwrap_or("").trim();
+    if let Some(alias) = spec.strip_prefix("npm:") {
+        return npm_alias_target(alias);
+    }
+    if is_non_registry_specifier(spec) {
+        return None;
+    }
+    Some(key.to_owned())
+}
+
+/// Extract the aliased registry package name from an `npm:` alias body
+/// (everything after `npm:`): `real-pkg@1.2.3` -> `real-pkg`,
+/// `@scope/pkg@1.2.3` -> `@scope/pkg`, a bare `real-pkg` -> `real-pkg`. The
+/// version suffix is the `@` AFTER the scope for a scoped target (the first
+/// `@` is the scope marker). Uses `split_once` throughout — never byte-index
+/// slicing — so it cannot panic on a non-char-boundary.
+fn npm_alias_target(alias: &str) -> Option<String> {
+    let alias = alias.trim();
+    let name = match alias.strip_prefix('@') {
+        // Scoped `@scope/name@version`: reattach the scope, drop version.
+        Some(scoped) => {
+            let base = scoped.split_once('@').map_or(scoped, |(name, _)| name);
+            format!("@{base}")
+        }
+        // Unscoped `name@version`: keep the part before the version `@`.
+        None => alias
+            .split_once('@')
+            .map_or(alias, |(name, _)| name)
+            .to_owned(),
+    };
+    let name = name.trim();
+    if name.is_empty() || name == "@" {
+        None
+    } else {
+        Some(name.to_owned())
+    }
+}
+
+/// True when a package.json / pnpm version specifier points somewhere OTHER
+/// than the public npm registry — a workspace/monorepo sibling, a local
+/// path, a git/github/gitlab/bitbucket source, a tarball URL, or a yarn
+/// portal — none of which must ever be existence-checked (404-ed) against
+/// npmjs.org (C4).
+///
+/// `npm:` ALIASES are NOT handled here (they DO target the registry, under a
+/// different name) — callers resolve those via [`npm_alias_target`] BEFORE
+/// calling this, which is also why the bare-`/` github-shorthand heuristic
+/// below is safe (the one registry specifier form that contains `/` is an
+/// `npm:` alias, already stripped away).
+fn is_non_registry_specifier(spec: &str) -> bool {
+    const NON_REGISTRY_PREFIXES: &[&str] = &[
+        "workspace:",
+        "file:",
+        "link:",
+        "portal:",
+        "git+",
+        "git:",
+        "git@",
+        "github:",
+        "gist:",
+        "bitbucket:",
+        "gitlab:",
+        "http://",
+        "https://",
+    ];
+    if NON_REGISTRY_PREFIXES
+        .iter()
+        .any(|prefix| spec.starts_with(prefix))
+    {
+        return true;
+    }
+    // Bare `owner/repo[#ref]` GitHub shorthand npm/pnpm accept as a
+    // specifier (`"dep": "expressjs/express"`). A semver range never
+    // contains `/`; a scoped-package NAME (`@scope/pkg`) does, but that only
+    // ever appears as a dependency KEY, never as a version specifier. So a
+    // `/` here is a github slug, not a registry range.
+    spec.contains('/')
 }
 
 /// Branches on `lockfileVersion`: v2/v3 walk the flat `packages` map, v1 (or
@@ -191,13 +293,41 @@ fn pnpm_lock_deps(text: &str, path: &Path) -> Result<BTreeSet<String>, DepsError
 fn collect_pnpm_dep_group_names(node: &serde_yaml::Value, out: &mut BTreeSet<String>) {
     for group in ["dependencies", "devDependencies", "optionalDependencies"] {
         if let Some(map) = node.get(group).and_then(serde_yaml::Value::as_mapping) {
-            for key in map.keys() {
-                if let Some(name) = key.as_str() {
-                    out.insert(name.to_owned());
+            for (key, value) in map {
+                let Some(name) = key.as_str() else { continue };
+                // C4: honor the specifier so a workspace/file/link/git/url
+                // dep is never 404-checked against npmjs.org, and an `npm:`
+                // alias resolves to its aliased target — same rules as
+                // `package.json`, applied to pnpm monorepos' importer entries.
+                let specifier = pnpm_dep_specifier(value).trim();
+                if let Some(alias) = specifier.strip_prefix("npm:") {
+                    if let Some(target) = npm_alias_target(alias) {
+                        out.insert(target);
+                    }
+                    continue;
                 }
+                if is_non_registry_specifier(specifier) {
+                    continue;
+                }
+                out.insert(name.to_owned());
             }
         }
     }
+}
+
+/// The version specifier of one pnpm importer/dependency entry: the
+/// `specifier` field of a pnpm-lock v6 importer mapping (`{specifier,
+/// version}`), or the bare version string of a v5/top-level entry. Any other
+/// shape yields an empty specifier — treated as a plain registry dep (fail
+/// open: keep the name rather than silently drop a real dependency).
+fn pnpm_dep_specifier(value: &serde_yaml::Value) -> &str {
+    if let Some(spec) = value.as_str() {
+        return spec;
+    }
+    value
+        .get("specifier")
+        .and_then(serde_yaml::Value::as_str)
+        .unwrap_or("")
 }
 
 fn pnpm_package_name(raw: &str) -> Option<String> {
@@ -223,6 +353,18 @@ fn yarn_lock_deps(text: &str, path: &Path) -> Result<BTreeSet<String>, DepsError
     Ok(lockfile
         .entries
         .iter()
+        // C4: drop an entry whose EVERY descriptor range resolves outside
+        // the public registry (yarn-berry `workspace:`/`file:`/`link:`/
+        // `portal:`/git deps) — those must never be 404-checked against
+        // npmjs.org. An entry with no parsed descriptors is kept (fail open:
+        // a redundant existence check beats dropping a real dependency).
+        .filter(|entry| {
+            entry.descriptors.is_empty()
+                || !entry
+                    .descriptors
+                    .iter()
+                    .all(|(_, range)| is_non_registry_specifier(range.trim()))
+        })
         .map(|entry| entry.name.to_owned())
         .collect())
 }
@@ -477,5 +619,110 @@ mod tests {
         let (names, _direct, skipped) = declared_npm(&dir).unwrap();
         assert!(skipped.is_empty());
         assert!(names.is_empty());
+    }
+
+    #[test]
+    fn package_json_skips_non_registry_specifiers() {
+        // C4: a workspace/file/link/git/github/url/portal dep must NEVER be
+        // existence-checked against npmjs.org — a monorepo sibling or private
+        // source is not a "nonexistent package". Only the plain registry dep
+        // ("lodash") survives, in `names` AND `direct`.
+        let dir = tempdir("non-registry-specifiers");
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{
+                "dependencies": {
+                    "lodash": "^4.17.21",
+                    "@myorg/utils": "workspace:*",
+                    "local-lib": "file:../local-lib",
+                    "linked": "link:../linked",
+                    "from-git": "git+https://github.com/o/r.git",
+                    "from-git-ssh": "git@github.com:o/r.git",
+                    "from-github": "github:owner/repo",
+                    "shorthand": "owner/repo#semver:^1.0.0",
+                    "tarball": "https://example.com/pkg.tgz",
+                    "portaled": "portal:../portaled"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let (names, direct, skipped) = declared_npm(&dir).unwrap();
+        assert!(skipped.is_empty());
+        assert_eq!(names, BTreeSet::from(["lodash".to_owned()]));
+        assert_eq!(direct, BTreeSet::from(["lodash".to_owned()]));
+    }
+
+    #[test]
+    fn package_json_npm_alias_resolves_to_aliased_target() {
+        // C4: `"foo": "npm:real-pkg@1.2.3"` targets the registry package
+        // `real-pkg`, NOT the key `foo`. Existence is checked under the
+        // aliased target; the key itself is neither checked nor declared.
+        let dir = tempdir("npm-alias");
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{
+                "dependencies": {
+                    "foo": "npm:real-pkg@1.2.3",
+                    "bar": "npm:@scope/aliased@^2.0.0",
+                    "baz": "npm:no-version"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let (names, direct, skipped) = declared_npm(&dir).unwrap();
+        assert!(skipped.is_empty());
+        let expected = BTreeSet::from([
+            "real-pkg".to_owned(),
+            "@scope/aliased".to_owned(),
+            "no-version".to_owned(),
+        ]);
+        assert_eq!(names, expected);
+        assert_eq!(direct, expected);
+        assert!(!names.contains("foo"));
+        assert!(!names.contains("bar"));
+        assert!(!names.contains("baz"));
+    }
+
+    #[test]
+    fn pnpm_importers_skip_workspace_and_resolve_alias() {
+        // C4 for pnpm monorepos: an importer dep with a `workspace:`
+        // specifier is never registry-checked, and an `npm:` alias resolves
+        // to its target — even though package.json (always parsed) may also
+        // list the same workspace dep.
+        let dir = tempdir("pnpm-workspace");
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"dependencies": {"fastify": "^4.0.0", "@myorg/utils": "workspace:*"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("pnpm-lock.yaml"),
+            "lockfileVersion: '6.0'\n\
+             importers:\n\
+             \x20\x20.:\n\
+             \x20\x20\x20\x20dependencies:\n\
+             \x20\x20\x20\x20\x20\x20fastify:\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20specifier: ^4.0.0\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20version: 4.26.2\n\
+             \x20\x20\x20\x20\x20\x20'@myorg/utils':\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20specifier: 'workspace:*'\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20version: link:../utils\n\
+             \x20\x20\x20\x20\x20\x20aliased:\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20specifier: 'npm:real-pkg@^1.0.0'\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20version: real-pkg@1.0.0\n",
+        )
+        .unwrap();
+
+        let (names, _direct, skipped) = declared_npm(&dir).unwrap();
+        assert!(skipped.is_empty());
+        assert!(
+            !names.contains("@myorg/utils"),
+            "workspace dep must not be registry-checked (from package.json OR importers)"
+        );
+        assert!(names.contains("fastify"));
+        assert!(names.contains("real-pkg"));
+        assert!(!names.contains("aliased"));
     }
 }
