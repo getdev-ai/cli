@@ -17,7 +17,7 @@ const EMBEDDED_MODELS: &str = include_str!("../../../rules/models.json");
 pub enum ModelsError {
     #[error("invalid models dataset: {0}")]
     Parse(#[from] serde_json::Error),
-    /// An empty or whitespace-only `families`/`call_sites` entry — WR-02
+    /// An empty or whitespace-only `families`/`call_sites` entry — WR-04
     /// (03-REVIEW.md P2). An empty family prefix would make
     /// `literal.starts_with("")` match every literal, silently disabling all
     /// `real/unknown-model-string` detection. A bad embedded dataset row is
@@ -107,7 +107,7 @@ impl ModelMatcher {
     }
 }
 
-/// WR-02 (03-REVIEW.md P2): a dataset entry that is empty or whitespace-only
+/// WR-04 (03-REVIEW.md P2): a dataset entry that is empty or whitespace-only
 /// is rejected at load. An empty family prefix would make
 /// `literal.starts_with("")` true for every literal — silently disabling all
 /// unknown-model detection while tests stay green — so a stray blank row in
@@ -157,7 +157,7 @@ mod tests {
 
     #[test]
     fn empty_family_entry_is_rejected_at_load() {
-        // WR-02 (P2): an empty family prefix would make starts_with("") match
+        // WR-04 (P2): an empty family prefix would make starts_with("") match
         // every literal, silently disabling ALL unknown-model detection — it
         // must fail loudly at parse instead.
         let err =
@@ -182,7 +182,7 @@ mod tests {
 
     #[test]
     fn a_blank_family_row_never_disables_unknown_model_detection() {
-        // The failure mode WR-02 guards: had the empty family been accepted,
+        // The failure mode WR-04 guards: had the empty family been accepted,
         // this hallucinated family would be silently swallowed. Rejecting at
         // load means `embedded()`/`parse` never yields a match-all matcher.
         assert!(ModelMatcher::parse(
