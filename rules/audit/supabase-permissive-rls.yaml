@@ -1,0 +1,40 @@
+id: audit/supabase-permissive-rls
+severity: high
+confidence: high
+languages: [javascript, typescript]
+description: >
+  A Supabase `createClient(url, key)` call whose second argument is (or
+  plausibly resolves to) the project's service_role key — a literal
+  `sb_secret_...` key, or an identifier/property-access/env-var reference
+  whose name contains "service_role" (any casing, with or without an
+  underscore, e.g. SUPABASE_SERVICE_ROLE_KEY / serviceRoleKey). The
+  service_role key bypasses every Row Level Security policy; a client
+  bundle must only ever use the anon/public key, never service_role.
+message: "Supabase client created with a service_role key (bypasses RLS)"
+remediation: >
+  Use the Supabase anon/public key (SUPABASE_ANON_KEY) for any
+  createClient() call reachable from client code. The service_role key must
+  only be used in trusted server-side code (an API route/server action),
+  never shipped to or referenced by client-side JavaScript.
+refs:
+  - https://getdev.ai/rules/audit/supabase-permissive-rls
+matchers:
+  - language: javascript
+    query: |
+      (call_expression
+        function: (identifier) @fn (#eq? @fn "createClient")
+        arguments: (arguments (_) (_) @finding (#match? @finding "(?i)service_?role|sb_secret_")))
+  - language: typescript
+    query: |
+      (call_expression
+        function: (identifier) @fn (#eq? @fn "createClient")
+        arguments: (arguments (_) (_) @finding (#match? @finding "(?i)service_?role|sb_secret_")))
+fixtures:
+  positive:
+    - positive/supabase_rls_service_role_literal_js.js
+    - positive/supabase_rls_service_role_env_ts.ts
+    - positive/supabase_rls_service_role_var_js.js
+  negative:
+    - negative/supabase_rls_neg_anon_key_js.js
+    - negative/supabase_rls_neg_anon_key_env_ts.ts
+    - negative/supabase_rls_neg_options_object_js.js

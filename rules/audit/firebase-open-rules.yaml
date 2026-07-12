@@ -1,0 +1,39 @@
+id: audit/firebase-open-rules
+severity: critical
+confidence: high
+# `languages` is schema-required (minItems: 1) but unused by this rule: every
+# matcher here is `{file_glob, text_pattern}` (text-regex kind), which
+# core::audit dispatches independent of `languages` (no tree-sitter grammar
+# is involved at all for a `.rules`/`.rules.json` file). javascript is a
+# harmless placeholder value, never actually consulted.
+languages: [javascript]
+description: >
+  A Firebase security-rules file (firestore.rules, storage.rules, or
+  database.rules.json) grants unconditional read and/or write access — an
+  `allow read/write: if true;` rule (Firestore/Storage) or a `".read":
+  "true"`/`".write": "true"` rule (Realtime Database) — meaning anyone on
+  the internet can read or overwrite the entire database/bucket with no
+  authentication check at all. Detected via the text-regex matcher kind
+  (no tree-sitter grammar exists for the Firebase Rules DSL or for scanning
+  raw JSON text; v0.1 grammars are JS/TS/Python only).
+message: "Firebase security rules grant unconditional read/write access"
+remediation: >
+  Never leave `if true` (or `".read"/".write": "true"`) in a shipped
+  Firebase rules file. Require authentication at minimum (`if request.auth
+  != null`) and scope access to the requesting user's own data.
+refs:
+  - https://getdev.ai/rules/audit/firebase-open-rules
+matchers:
+  - file_glob: "**/{firestore,storage}.rules"
+    text_pattern: 'allow\s+(read|write|read\s*,\s*write)\s*:\s*if\s+true\s*;'
+  - file_glob: "**/database.rules.json"
+    text_pattern: '"\.read"\s*:\s*"true"|"\.write"\s*:\s*"true"'
+fixtures:
+  positive:
+    - positive/firebase_open_rules/firestore.rules
+    - positive/firebase_open_rules/storage.rules
+    - positive/firebase_open_rules/database.rules.json
+  negative:
+    - negative/firebase_open_rules_neg/firestore.rules
+    - negative/firebase_open_rules_neg/storage.rules
+    - negative/firebase_open_rules_neg/database.rules.json
