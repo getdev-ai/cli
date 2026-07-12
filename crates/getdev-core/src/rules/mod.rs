@@ -410,12 +410,20 @@ pub fn merge(mut embedded: RulePack, user: Vec<Rule>) -> (RulePack, Vec<String>)
         // is never compiled (BL-01), so the embedded pattern would run under
         // the user's metadata.
         embedded.query_cache.remove_rule(&rule.id);
-        // Already validated to compile once by `load_user_pack`; re-insert
-        // into the embedded cache so the merged pack's queries are actually
-        // usable. Compilation is pure/deterministic, so a second failure
-        // here would only mean the first validation was wrong — swallow it
-        // rather than re-surfacing an already-cleared error path.
-        compile_rule(&mut embedded.query_cache, &rule, "user-pack").ok();
+        // Re-insert into the embedded cache so the merged pack's queries are
+        // actually usable. `load_user_pack` already validated this rule
+        // compiles (into a scratch cache), and compilation is pure/
+        // deterministic, so a failure here "can't happen" on that path — but
+        // now that BL-01's fix has EVICTED any colliding embedded query
+        // first, a swallowed error would leave the rule AST-dead with no
+        // diagnostic (IN-05). Surface it as a warning instead of `.ok()`, so
+        // a recompile failure is visible rather than a silent no-op.
+        if let Err(err) = compile_rule(&mut embedded.query_cache, &rule, "user-pack") {
+            warnings.push(format!(
+                "rule '{}': failed to recompile on merge (its AST matchers will not fire): {err}",
+                rule.id
+            ));
+        }
 
         if let Some(existing) = embedded.rules.iter().position(|r| r.id == rule.id) {
             warnings.push(format!(
