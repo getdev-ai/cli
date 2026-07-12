@@ -370,6 +370,18 @@ pub fn apply(
     let mut vars_written = Vec::new();
     let mut vars_skipped_stale = Vec::new();
     let mut new_lines = String::new();
+    // IN-04/02-env-REVIEW.md: `entry.value` is the VERBATIM inner text of the
+    // source literal — `scan::strip_string_delimiters` removes the quotes but
+    // does NOT decode escapes (`\n`, `\x41`, `\uXXXX`). This is intentional
+    // and load-bearing: the staleness guard above (`content.get(span)` must
+    // still `.contains(entry.value)`) compares against the on-disk source
+    // bytes, so the value must stay in source form. The trade-off is that a
+    // secret literal containing backslash escapes is emitted to `.env` in its
+    // escaped source form, which can differ from the program's runtime value.
+    // Impact is negligible in practice — provider keys and high-entropy
+    // fallbacks are escape-free — and decoding correctly is language-specific
+    // (JS vs Python escape grammars) and belongs in the scan/parse layer, not
+    // here. Documented as a known limitation rather than half-decoded.
     for entry in &plan.entries {
         if existing_env_keys.contains(&entry.var_name) {
             vars_skipped_stale.push(entry.var_name.clone());
@@ -923,6 +935,51 @@ mod tests {
         assert_eq!(line.matches('\n').count(), 1, "one trailing newline only");
         // carriage returns are escaped too
         assert!(!dotenv_quote("a\r\nb").contains('\r'));
+    }
+
+    /// IN-04 characterization: `entry.value` is the verbatim source literal
+    /// (escapes NOT decoded), by design — the staleness guard compares against
+    /// on-disk source bytes. A secret whose literal contains a `\n` escape is
+    /// therefore emitted to `.env` in its escaped source form, and apply still
+    /// succeeds (no spurious Stale error). This pins the documented behavior;
+    /// decoding escapes would be a language-specific scan-layer change.
+    #[test]
+    fn env_value_is_written_verbatim_escapes_not_decoded() {
+        let dir = std::env::temp_dir().join(format!(
+            "getdev-env-in04-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // the JS source literal contains a two-char `\n` escape (backslash + n),
+        // NOT an actual newline; the value is high-entropy + secret-ish name.
+        std::fs::write(
+            dir.join("cfg.js"),
+            "const apiToken = \"9fQ4cA2e78bZ1\\ndY6fX3aP5cV0e9K\";\n",
+        )
+        .unwrap();
+
+        let plan = plan(&dir, &EnvOptions::default()).unwrap();
+        assert_eq!(
+            plan.entries.len(),
+            1,
+            "value with a \\n escape still classifies"
+        );
+        // apply must not raise Stale — the verbatim value matches source bytes
+        apply(&dir, &plan, &EnvOptions::default()).unwrap();
+
+        let env_file = std::fs::read_to_string(dir.join(".env")).unwrap();
+        // written in escaped source form (literal backslash-n), NOT a newline
+        assert!(
+            env_file.contains("9fQ4cA2e78bZ1\\ndY6fX3aP5cV0e9K"),
+            "value emitted verbatim (escapes not decoded), got:\n{env_file}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
