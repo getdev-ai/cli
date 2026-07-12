@@ -499,12 +499,15 @@ mod tests {
         let path = dir.join("a.js");
         std::fs::write(&path, "const k = \"old\";\n").unwrap();
 
-        let applied = apply(vec![PlannedWrite::RewriteSource {
-            path: path.clone(),
-            lang: Lang::JavaScript,
-            original: "const k = \"old\";\n".into(),
-            new_content: "const k = process.env.K;\n".into(),
-        }], None)
+        let applied = apply(
+            vec![PlannedWrite::RewriteSource {
+                path: path.clone(),
+                lang: Lang::JavaScript,
+                original: "const k = \"old\";\n".into(),
+                new_content: "const k = process.env.K;\n".into(),
+            }],
+            None,
+        )
         .unwrap();
 
         assert_eq!(applied.files_written.len(), 1);
@@ -523,20 +526,23 @@ mod tests {
         let env_file = dir.join(".env");
         std::fs::write(&js, "const k = \"old\";\n").unwrap();
 
-        let err = apply(vec![
-            // plain file first in the plan — must NOT be written either
-            PlannedWrite::WriteFile {
-                path: env_file.clone(),
-                original: None,
-                new_content: "K=old\n".into(),
-            },
-            PlannedWrite::RewriteSource {
-                path: js.clone(),
-                lang: Lang::JavaScript,
-                original: "const k = \"old\";\n".into(),
-                new_content: "const k = process.env.((;\n".into(),
-            },
-        ], None)
+        let err = apply(
+            vec![
+                // plain file first in the plan — must NOT be written either
+                PlannedWrite::WriteFile {
+                    path: env_file.clone(),
+                    original: None,
+                    new_content: "K=old\n".into(),
+                },
+                PlannedWrite::RewriteSource {
+                    path: js.clone(),
+                    lang: Lang::JavaScript,
+                    original: "const k = \"old\";\n".into(),
+                    new_content: "const k = process.env.((;\n".into(),
+                },
+            ],
+            None,
+        )
         .unwrap_err();
 
         assert!(matches!(err, MutateError::VerifyFailed { .. }));
@@ -553,12 +559,15 @@ mod tests {
         let path = dir.join("b.py");
         std::fs::write(&path, "def oops(:\n").unwrap();
 
-        apply(vec![PlannedWrite::RewriteSource {
-            path,
-            lang: Lang::Python,
-            original: "def oops(:\n".into(),
-            new_content: "def oops(:  # still broken\n".into(),
-        }], None)
+        apply(
+            vec![PlannedWrite::RewriteSource {
+                path,
+                lang: Lang::Python,
+                original: "def oops(:\n".into(),
+                new_content: "def oops(:  # still broken\n".into(),
+            }],
+            None,
+        )
         .unwrap();
     }
 
@@ -574,12 +583,15 @@ mod tests {
         let link = dir.join("linked.py");
         std::os::unix::fs::symlink(&real_target, &link).unwrap();
 
-        apply(vec![PlannedWrite::RewriteSource {
-            path: link.clone(),
-            lang: Lang::Python,
-            original: "aws_key = \"old\"\n".into(),
-            new_content: "aws_key = os.environ[\"AWS_KEY\"]\n".into(),
-        }], None)
+        apply(
+            vec![PlannedWrite::RewriteSource {
+                path: link.clone(),
+                lang: Lang::Python,
+                original: "aws_key = \"old\"\n".into(),
+                new_content: "aws_key = os.environ[\"AWS_KEY\"]\n".into(),
+            }],
+            None,
+        )
         .unwrap();
 
         // the link itself is still a symlink, pointing at the same real file
@@ -618,12 +630,15 @@ mod tests {
         let path = dir.join("shared.js");
         std::fs::write(&path, "const k = \"old\";\n").unwrap();
 
-        apply(vec![PlannedWrite::RewriteSource {
-            path: path.clone(),
-            lang: Lang::JavaScript,
-            original: "const k = \"old\";\n".into(),
-            new_content: "const k = process.env.K;\n".into(),
-        }], None)
+        apply(
+            vec![PlannedWrite::RewriteSource {
+                path: path.clone(),
+                lang: Lang::JavaScript,
+                original: "const k = \"old\";\n".into(),
+                new_content: "const k = process.env.K;\n".into(),
+            }],
+            None,
+        )
         .unwrap();
 
         // the temp file, had it survived, would have carried this process's
@@ -648,11 +663,14 @@ mod tests {
 
         let dir = tempdir("perms");
         let path = dir.join(".env");
-        apply(vec![PlannedWrite::WriteFile {
-            path: path.clone(),
-            original: None,
-            new_content: "STRIPE=sk_live_FAKEFAKEFAKE1234\n".into(),
-        }], None)
+        apply(
+            vec![PlannedWrite::WriteFile {
+                path: path.clone(),
+                original: None,
+                new_content: "STRIPE=sk_live_FAKEFAKEFAKE1234\n".into(),
+            }],
+            None,
+        )
         .unwrap();
 
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
@@ -666,11 +684,14 @@ mod tests {
     fn new_file_write_and_rollback_removal() {
         let dir = tempdir("newfile");
         let path = dir.join(".gitignore");
-        apply(vec![PlannedWrite::WriteFile {
-            path: path.clone(),
-            original: None,
-            new_content: ".env\n".into(),
-        }], None)
+        apply(
+            vec![PlannedWrite::WriteFile {
+                path: path.clone(),
+                original: None,
+                new_content: ".env\n".into(),
+            }],
+            None,
+        )
         .unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), ".env\n");
     }
