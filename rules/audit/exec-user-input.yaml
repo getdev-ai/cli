@@ -90,6 +90,8 @@ fixtures:
     - positive/exec_user_input_py_os_system.py
     - positive/exec_user_input_py_subprocess_shell.py
     - positive/exec_user_input_tsx.tsx
+    - positive/exec_user_input_ts_child_process.ts
+    - positive/exec_user_input_ts_destructured.ts
   negative:
     - negative/exec_user_input_neg_constant_js.js
     - negative/exec_user_input_neg_constant_py.py

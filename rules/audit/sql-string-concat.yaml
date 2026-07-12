@@ -90,6 +90,7 @@ fixtures:
     - positive/sql_concat_template_js.js
     - positive/sql_concat_plus_ts.ts
     - positive/sql_concat_tsx.tsx
+    - positive/sql_concat_template_ts.ts
   negative:
     - negative/sql_concat_neg_parameterized_py.py
     - negative/sql_concat_neg_placeholder_js.js

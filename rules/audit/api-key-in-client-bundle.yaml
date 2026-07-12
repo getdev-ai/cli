@@ -61,6 +61,7 @@ fixtures:
     - positive/api_key_client_vite_var_ts.ts
     - positive/api_key_client_reactapp_object_js.js
     - positive/api_key_client_tsx.tsx
+    - positive/api_key_client_object_ts.ts
   negative:
     - negative/api_key_client_neg_env_reference_js.js
     - negative/api_key_client_neg_server_only_ts.ts

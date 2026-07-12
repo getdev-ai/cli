@@ -150,6 +150,9 @@ fixtures:
     - positive/app/api/missing_auth_nextjs_approuter/route.ts
     - positive/app/api/missing_auth_tsx/route.tsx
     - positive/pages/api/missing_auth_tsx.tsx
+    - positive/app/api/missing_auth_js/route.js
+    - positive/pages/api/missing_auth_js.js
+    - positive/missing_auth_express_ts.ts
   negative:
     - negative/missing_auth_neg_express_js.js
     - negative/missing_auth_neg_fastapi_py.py

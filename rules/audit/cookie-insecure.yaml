@@ -88,6 +88,7 @@ fixtures:
     - positive/cookie_insecure_flask_no_opts_py.py
     - positive/cookie_insecure_flask_secure_false_py.py
     - positive/cookie_insecure_express_tsx.tsx
+    - positive/cookie_insecure_express_secure_false_ts.ts
   negative:
     - negative/cookie_insecure_neg_secure_httponly_js.js
     - negative/cookie_insecure_neg_secure_httponly_ts.ts

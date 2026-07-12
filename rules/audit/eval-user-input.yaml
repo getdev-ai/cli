@@ -90,6 +90,11 @@ fixtures:
     - positive/eval_user_input_py_variable.py
     - positive/eval_user_input_py_call.py
     - positive/eval_user_input_tsx.tsx
+    - positive/eval_user_input_js_call.js
+    - positive/eval_user_input_py_attribute.py
+    - positive/eval_user_input_ts_variable.ts
+    - positive/eval_user_input_ts_member.ts
+    - positive/eval_user_input_ts_call.ts
   negative:
     - negative/eval_user_input_neg_constant_js.js
     - negative/eval_user_input_neg_constant_py.py

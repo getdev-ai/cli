@@ -95,6 +95,7 @@ fixtures:
     - positive/debug_mode_node_env_js.js
     - positive/debug_mode_node_env_ts.ts
     - positive/debug_mode_tsx.tsx
+    - positive/debug_mode_express_set_ts.ts
   negative:
     - negative/debug_mode_neg_flask_prod_py.py
     - negative/debug_mode_neg_fastapi_prod_py.py
