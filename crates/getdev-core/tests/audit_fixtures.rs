@@ -21,7 +21,8 @@ use std::path::PathBuf;
 
 use getdev_core::audit::{self, AuditOptions};
 use getdev_core::frameworks::DetectedFrameworks;
-use getdev_core::rules::{self, Framework, Matcher, Rule};
+use getdev_core::rules::{self, Framework, Matcher, Rule, RulePack};
+use getdev_core::scan::Lang;
 
 fn fixtures_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/fixtures/audit")
@@ -131,6 +132,108 @@ fn coverage_every_rule_meets_the_three_plus_three_fixture_floor() {
             rule.id
         );
     }
+}
+
+/// Isolate a single AST matcher into its own one-matcher `RulePack`: keep
+/// the rule's id/severity/frameworks/path_glob (so scanning + gating behave
+/// exactly as in the full pack) but replace `matchers` with just this one
+/// entry. `rules::merge` into an empty pack compiles the query into the
+/// returned pack's `query_cache` — the same public path `--rules` uses — so
+/// the matcher's query is exercised STANDALONE, never merged with its
+/// same-language siblings.
+fn single_matcher_pack(rule: &Rule, language: Lang, query: &str) -> (RulePack, Vec<String>) {
+    let synthetic = Rule {
+        id: rule.id.clone(),
+        severity: rule.severity,
+        confidence: rule.confidence,
+        languages: vec![language],
+        frameworks: rule.frameworks.clone(),
+        path_glob: rule.path_glob.clone(),
+        description: rule.description.clone(),
+        message: rule.message.clone(),
+        remediation: rule.remediation.clone(),
+        refs: rule.refs.clone(),
+        matchers: vec![Matcher::Ast {
+            language,
+            query: query.to_owned(),
+        }],
+        fixtures: rule.fixtures.clone(),
+    };
+    rules::merge(RulePack::new(), vec![synthetic])
+}
+
+/// STRUCTURAL gate (the e3e2c19 lesson): `every_positive_fixture_fires` and
+/// `coverage_…` only prove that SOME finding fires per fixture / that a rule
+/// accumulates >= 3 hits — neither can see a rule that ships an AST matcher
+/// NO fixture ever exercises. That is exactly how e3e2c19 (and its 7-rule
+/// blast radius) slipped the net: a silently-dropped/broken matcher whose
+/// twin is in no fixture stays green.
+///
+/// This test compiles EACH AST matcher standalone (per language, isolated
+/// from its same-language siblings via `single_matcher_pack`) and asserts at
+/// least one of that rule's positive fixtures OF THAT LANGUAGE triggers THAT
+/// matcher. If any AST matcher is unexercised, the test FAILS naming the
+/// rule, matcher index, language, and query — so a future rule author cannot
+/// ship an untested (and possibly broken) matcher. A genuinely unexercisable
+/// matcher must be reported and fixtured, never silenced by weakening this
+/// gate.
+#[test]
+fn every_ast_matcher_has_an_exercising_positive_fixture() {
+    let pack = rules::load_embedded().unwrap();
+    let root = fixtures_root();
+
+    let mut unexercised: Vec<String> = Vec::new();
+
+    for rule in &pack.rules {
+        let frameworks = frameworks_for(rule);
+        for (matcher_index, matcher) in rule.matchers.iter().enumerate() {
+            let Matcher::Ast { language, query } = matcher else {
+                continue;
+            };
+
+            let (single_pack, warnings) = single_matcher_pack(rule, *language, query);
+            assert!(
+                warnings.is_empty(),
+                "rule {} matcher #{matcher_index}: standalone compile warned: {warnings:?}",
+                rule.id
+            );
+
+            let (findings, skipped) =
+                audit::run(&root, &single_pack, &frameworks, &AuditOptions::default()).unwrap();
+            assert!(
+                skipped.is_empty(),
+                "rule {} matcher #{matcher_index}: fixtures were skipped: {skipped:?}",
+                rule.id
+            );
+
+            // A positive fixture "of this language" that produced a finding
+            // for this rule id. Because the isolated pack holds only this one
+            // language matcher, any positive that fires necessarily exercised
+            // THIS matcher.
+            let exercised = rule.fixtures.positive.iter().any(|positive| {
+                Lang::from_path(std::path::Path::new(positive)) == Some(*language)
+                    && findings
+                        .iter()
+                        .any(|f| f.id == rule.id && f.file == *positive)
+            });
+
+            if !exercised {
+                unexercised.push(format!(
+                    "rule {} matcher #{matcher_index} (language {language:?}) has no positive \
+                     fixture of that language that triggers it — query:\n{query}",
+                    rule.id
+                ));
+            }
+        }
+    }
+
+    assert!(
+        unexercised.is_empty(),
+        "{} AST matcher(s) ship with no exercising positive fixture (add one, or report a \
+         genuinely unexercisable matcher — do NOT weaken this gate):\n\n{}",
+        unexercised.len(),
+        unexercised.join("\n\n")
+    );
 }
 
 /// Pitfall 6: for every rule wrapping the secret matcher, its positive
