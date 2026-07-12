@@ -205,7 +205,17 @@ pub fn identifier_to_env_key(identifier: &str) -> String {
     }
     let out = out.trim_matches('_').to_owned();
     if out.is_empty() {
-        "SECRET".to_owned()
+        return "SECRET".to_owned();
+    }
+    // WR-01/02-env-REVIEW.md: a leading digit (e.g. from the string-keyed
+    // object shape `{"2fa_token": …}`) would produce `process.env.2FA_TOKEN`
+    // — a JS syntax error whose reparse-verify failure aborts the ENTIRE
+    // `--write`, stranding every other valid extraction — and a non-POSIX
+    // shell name that can't be `export`ed. Both a JS identifier and a POSIX
+    // env name may begin with `_` but never a digit, so prefix one: sanitize
+    // the entry rather than let it block the whole plan.
+    if out.starts_with(|c: char| c.is_ascii_digit()) {
+        format!("_{out}")
     } else {
         out
     }
@@ -537,6 +547,69 @@ mod tests {
         assert_eq!(identifier_to_env_key("db-password"), "DB_PASSWORD");
         assert_eq!(identifier_to_env_key("AWS_SECRET"), "AWS_SECRET");
         assert_eq!(identifier_to_env_key("_"), "SECRET");
+    }
+
+    /// WR-01 regression: a name starting with a digit must be sanitized to a
+    /// valid JS identifier / POSIX env name (leading `_`), not left as
+    /// `2FA_TOKEN` which would compile to `process.env.2FA_TOKEN`.
+    #[test]
+    fn identifier_naming_prefixes_leading_digit() {
+        assert_eq!(identifier_to_env_key("2fa_token"), "_2FA_TOKEN");
+        assert_eq!(identifier_to_env_key("3d-secret"), "_3D_SECRET");
+        // a digit that only appears mid-name is fine, unchanged
+        assert_eq!(identifier_to_env_key("oauth2Token"), "OAUTH2_TOKEN");
+    }
+
+    /// WR-01 end-to-end: a secret whose object key starts with a digit must
+    /// NOT abort the whole `--write`. Both it and a normal secret in the same
+    /// file get extracted, and the rewritten source parses cleanly (apply's
+    /// reparse-verify would reject `process.env.2FA_TOKEN`).
+    #[test]
+    fn apply_sanitizes_leading_digit_name_without_aborting_plan() {
+        let dir = std::env::temp_dir().join(format!(
+            "getdev-env-wr01-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // digit-leading object key (entropy secret) + a normal provider key
+        std::fs::write(
+            dir.join("cfg.js"),
+            "const stripeKey = \"sk_live_FAKEFAKEFAKE1234\";\n\
+             const cfg = { \"2fa_token\": \"9fQ4cA2e78bZ1dY6fX3aP5cV0e9K\" };\n",
+        )
+        .unwrap();
+
+        let plan = plan(&dir, &EnvOptions::default()).unwrap();
+        // both secrets planned — neither dropped
+        assert_eq!(plan.entries.len(), 2, "both secrets must be planned");
+        let names: Vec<&str> = plan.entries.iter().map(|e| e.var_name.as_str()).collect();
+        assert!(
+            names.contains(&"_2FA_TOKEN"),
+            "leading digit sanitized: {names:?}"
+        );
+        assert!(names.contains(&"STRIPE_SECRET_KEY"), "{names:?}");
+
+        // apply must succeed — mutate's reparse-verify rejects invalid JS, so
+        // Ok here proves `process.env._2FA_TOKEN` is syntactically valid.
+        apply(&dir, &plan, &EnvOptions::default()).unwrap();
+
+        let rewritten = std::fs::read_to_string(dir.join("cfg.js")).unwrap();
+        assert!(rewritten.contains("process.env._2FA_TOKEN"), "{rewritten}");
+        assert!(
+            rewritten.contains("process.env.STRIPE_SECRET_KEY"),
+            "{rewritten}"
+        );
+
+        let env_file = std::fs::read_to_string(dir.join(".env")).unwrap();
+        assert!(env_file.contains("_2FA_TOKEN="), "{env_file}");
+        assert!(env_file.contains("STRIPE_SECRET_KEY="), "{env_file}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
