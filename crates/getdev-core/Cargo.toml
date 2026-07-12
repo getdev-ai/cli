@@ -30,3 +30,14 @@ streaming-iterator = { workspace = true }
 thiserror = { workspace = true }
 toml = { workspace = true }
 yarn-lock-parser = "0.14"
+
+[dev-dependencies]
+# Dev-only benchmark harness (04-07): pre-approved project decision, never
+# shipped in the binary — see CLAUDE.md line 17 / docs/TESTING.md line 19
+# (`cargo bench -p getdev-core`), exempt from the 04-01-style third-party
+# legitimacy checkpoint (04-07-PLAN.md Task 2 rationale).
+criterion = "0.5"
+
+[[bench]]
+name = "audit"
+harness = false
