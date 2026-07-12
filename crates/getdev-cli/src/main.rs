@@ -142,6 +142,21 @@ enum Command {
         #[arg(long, value_name = "DIR")]
         rules: Option<PathBuf>,
     },
+    /// Working-tree checkpoints under `refs/getdev/` (git-hidden; never touches
+    /// user branches/index/stash). `snap [-m <msg>] | list | diff <id> | prune`
+    Snap {
+        /// Label for the snapshot
+        #[arg(short = 'm', long, value_name = "MSG")]
+        message: Option<String>,
+        #[command(subcommand)]
+        action: Option<SnapAction>,
+    },
+    /// Restore the latest manual snapshot (or a specific `<id>`) — always
+    /// reversible (takes a pre-restore auto-snap first)
+    Back {
+        /// Snapshot id to restore (default: the most recent manual snapshot)
+        id: Option<u32>,
+    },
     /// Self-diagnostics: toolchain, git availability, grammar integrity
     Doctor,
     /// P0 de-risking spike: walk + parse + query a directory (dev-only)
@@ -151,6 +166,23 @@ enum Command {
         #[arg(default_value = ".")]
         dir: PathBuf,
     },
+}
+
+/// The `getdev snap` sub-actions. Ids are typed `u32` so clap rejects
+/// non-integer/negative input as a clean parse error and relative addressing is
+/// structurally impossible (D-03, V5) — no custom parser, no extra flags
+/// (CLAUDE.md hard rule 6).
+#[derive(Subcommand)]
+enum SnapAction {
+    /// List snapshots (id, age, message, files changed)
+    List,
+    /// Summarize the changes since snapshot `<id>`
+    Diff {
+        /// Snapshot id
+        id: u32,
+    },
+    /// Enforce retention (keep the newest `[snap] keep`, delete the rest)
+    Prune,
 }
 
 fn main() -> std::process::ExitCode {
@@ -284,6 +316,33 @@ fn run(cli: Cli) -> anyhow::Result<u8> {
                 verbose,
             })
         }
+        Command::Snap { message, action } => {
+            // Map the clap sub-action onto the command layer's clap-free mirror
+            // so `commands/snap.rs` stays a plain args struct like every other
+            // command (doctor precedent).
+            let action = action.map(|a| match a {
+                SnapAction::List => commands::snap::SnapAction::List,
+                SnapAction::Diff { id } => commands::snap::SnapAction::Diff { id },
+                SnapAction::Prune => commands::snap::SnapAction::Prune,
+            });
+            commands::snap::run(&commands::snap::SnapArgs {
+                path,
+                json,
+                no_color,
+                quiet,
+                keep: cfg.snap.keep,
+                message,
+                action,
+            })
+        }
+        Command::Back { id } => commands::back::run(&commands::back::BackArgs {
+            path,
+            json,
+            no_color,
+            quiet,
+            keep: cfg.snap.keep,
+            id,
+        }),
         Command::Doctor => {
             // Doctor is dispatched above (before config resolution) and
             // returns, so this arm is unreachable today. It stays a
