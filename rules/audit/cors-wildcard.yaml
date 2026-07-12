@@ -3,39 +3,50 @@ severity: high
 confidence: high
 languages: [javascript, typescript, tsx, python]
 description: >
-  CORS configured with a wildcard origin ("*") — an Express cors() call or a
-  FastAPI CORSMiddleware registration with allow_origins=["*"] — allowing any
-  website to call this API from a browser.
+  CORS configured with a wildcard origin ("*") — an Express cors() call with
+  origin set to "*" (either quote style: cors({ origin: "*" }) or
+  cors({ origin: '*' })) or a FastAPI CORSMiddleware registration with
+  allow_origins=["*"] — allowing any website to call this API from a browser.
 message: "CORS allows any origin ('*')"
 remediation: >
   Restrict allowed origins to your actual frontend domain(s). Wildcard
   origins allow any website to call this API from a browser.
 refs:
   - https://getdev.ai/rules/audit/cors-wildcard
+# IN-03 note: a bare `cors()` (no options) also defaults to reflecting every
+# origin, but detecting it was deliberately NOT added — it fires on
+# node-express-boilerplate's `app.use(cors())` / `app.options('*', cors())`
+# and pushes this rule past the 5% per-rule sentinel FP budget (SC5,
+# docs/PLAN.md §9.2, corpus.rs audit_fp_budget_stays_under_5_percent_per_rule
+# measured 6.5%). The single-quote fix below is a pure false-negative
+# improvement with no such FP cost, so only it was taken.
 matchers:
-  # Express (JS/TS): cors({ origin: "*" }).
+  # Express (JS): cors({ origin: "*" }) / cors({ origin: '*' }). The #match?
+  # (not #eq? "\"*\"") accepts BOTH quote styles — the string node's text
+  # includes its delimiters, so ^['"]\*['"]$ matches "*" and '*' alike.
   - language: javascript
     query: |
       (call_expression
         function: (identifier) @fn (#eq? @fn "cors")
         arguments: (arguments (object
           (pair key: (property_identifier) @k (#eq? @k "origin")
-                value: (string) @v @finding (#eq? @v "\"*\"")))))
+                value: (string) @v @finding (#match? @v "^['\"]\\*['\"]$")))))
+  # Express (TS): object-origin wildcard, both quote styles.
   - language: typescript
     query: |
       (call_expression
         function: (identifier) @fn (#eq? @fn "cors")
         arguments: (arguments (object
           (pair key: (property_identifier) @k (#eq? @k "origin")
-                value: (string) @v @finding (#eq? @v "\"*\"")))))
-  # FastAPI (Python): app.add_middleware(CORSMiddleware, allow_origins=["*"]).
+                value: (string) @v @finding (#match? @v "^['\"]\\*['\"]$")))))
+  # Express (TSX): object-origin wildcard, both quote styles.
   - language: tsx
     query: |
       (call_expression
         function: (identifier) @fn (#eq? @fn "cors")
         arguments: (arguments (object
           (pair key: (property_identifier) @k (#eq? @k "origin")
-                value: (string) @v @finding (#eq? @v "\"*\"")))))
+                value: (string) @v @finding (#match? @v "^['\"]\\*['\"]$")))))
   # FastAPI (Python): app.add_middleware(CORSMiddleware, allow_origins=["*"]).
   - language: python
     query: |
@@ -53,6 +64,7 @@ fixtures:
     - positive/cors_wildcard_fastapi_py.py
     - positive/cors_wildcard_extra_opts_js.js
     - positive/cors_wildcard_express_tsx.tsx
+    - positive/cors_wildcard_single_quote_js.js
   negative:
     - negative/cors_wildcard_neg_specific_origin_js.js
     - negative/cors_wildcard_neg_specific_origin_ts.ts
