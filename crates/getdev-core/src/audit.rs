@@ -86,11 +86,18 @@ pub fn run(
         }
         let path = entry.path();
         let rel = relative_display(path, root);
+        // IN-02: glob text-regex `file_glob` against the SAME base the AST
+        // `path_glob` gate uses — the project-relative path — not the
+        // absolute `entry.path()`. Previously text matchers globbed the
+        // absolute path while `path_glob_gate` globbed `rel`, so a
+        // root-relative `file_glob` (e.g. "config/*.rules") silently never
+        // matched (shipped firebase globs only worked via their `**/` prefix).
+        let rel_path = Path::new(rel.as_str());
         let lang = Lang::from_path(path);
 
         let candidate_text: Vec<&TextRule<'_>> = text_rules
             .iter()
-            .filter(|tr| tr.matcher.glob_matches(path))
+            .filter(|tr| tr.matcher.glob_matches(rel_path))
             .collect();
 
         // Nothing in the pack could possibly apply to this file — skip it
@@ -116,7 +123,7 @@ pub fn run(
             if !path_glob_gate(path_globs[tr.rule_index].as_ref(), &rel) {
                 continue;
             }
-            if tr.matcher.is_match(path, bytes) {
+            if tr.matcher.is_match(rel_path, bytes) {
                 findings.push(text_hit_to_finding(tr.rule, &rel));
             }
         }
@@ -806,6 +813,55 @@ fixtures:
         let json = serde_json::to_string(&findings).unwrap();
         assert!(!json.contains("FAKEFAKEFAKE1234"));
         assert!(json.contains("sk_live_…1234"));
+    }
+
+    const TEXT_REGEX_RELATIVE_GLOB_YAML: &str = r#"
+id: audit/test-text-relative-glob
+severity: high
+confidence: high
+languages: [javascript]
+description: test rule — root-relative file_glob text matcher
+message: "relative-glob text hit"
+remediation: fix it
+refs: []
+matchers:
+  - file_glob: "config/*.rules"
+    text_pattern: "allow all"
+fixtures:
+  positive: [a.rules, b.rules, c.rules]
+  negative: [d.rules, e.rules, f.rules]
+"#;
+
+    /// IN-02: a text-regex `file_glob` written root-relative (no `**/`
+    /// prefix) must match against the project-relative path, exactly like the
+    /// AST `path_glob` gate. Pre-fix the matcher globbed the ABSOLUTE path, so
+    /// `config/*.rules` never matched and the rule was silently dead.
+    #[test]
+    fn text_matcher_globs_against_relative_path() {
+        let rules_dir = tempdir("text-rel-rules");
+        std::fs::write(rules_dir.join("rule.yaml"), TEXT_REGEX_RELATIVE_GLOB_YAML).unwrap();
+        let pack = build_pack(&rules_dir);
+
+        let project = tempdir("text-rel-project");
+        std::fs::create_dir_all(project.join("config")).unwrap();
+        std::fs::write(project.join("config/firestore.rules"), "allow all\n").unwrap();
+        // Same content, outside config/ — the relative glob must NOT match it.
+        std::fs::write(project.join("elsewhere.rules"), "allow all\n").unwrap();
+
+        let (findings, skipped) = run(
+            &project,
+            &pack,
+            &DetectedFrameworks::default(),
+            &AuditOptions::default(),
+        )
+        .unwrap();
+        assert!(skipped.is_empty());
+        assert_eq!(
+            findings.len(),
+            1,
+            "relative file_glob must fire: {findings:?}"
+        );
+        assert_eq!(findings[0].file, "config/firestore.rules");
     }
 
     #[test]
