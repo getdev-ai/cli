@@ -83,11 +83,30 @@ pub fn run(args: &EnvArgs) -> anyhow::Result<u8> {
     // F4: apply before printing (never `?` here) so that on failure the
     // findings still print before the error exit — the apply error is
     // propagated only after rendering below.
+    //
+    // 05-05: gate a getdev-gitx-backed `AutoSnapHook` on
+    // `snap.auto_snap_before_fix` (default true). When enabled, a multi-file
+    // `env --write` records an invisible, deduped safety snapshot under
+    // `refs/getdev/auto/<N>` BEFORE any file is mutated (D-06/D-07/D-08);
+    // `core::mutate::apply` fires the hook only for multi-file plans and aborts
+    // closed if the snapshot fails. When the toggle is off (or dry-run), pass
+    // `None`. The hook is built into a `let` so it outlives the `apply` call.
+    let hook = if args.write && args.cfg.snap.auto_snap_before_fix {
+        Some(AutoSnapHook {
+            root: &args.path,
+            keep: args.cfg.snap.keep,
+        })
+    } else {
+        None
+    };
     let applied_result = if args.write && !plan.entries.is_empty() {
-        // 05-05 swaps this `None` for a getdev-gitx-backed AutoSnapHook so
-        // multi-file `env --write` mutations auto-snapshot first; a placeholder
-        // for now keeps the workspace green.
-        Some(env::apply(&args.path, &plan, &options, None))
+        Some(env::apply(
+            &args.path,
+            &plan,
+            &options,
+            hook.as_ref()
+                .map(|h| h as &dyn getdev_core::mutate::PreMutateHook),
+        ))
     } else {
         None
     };
@@ -253,6 +272,41 @@ fn env_file_committed_finding(env_file: &str) -> Finding {
 
 fn display_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
+}
+
+/// The concrete `PreMutateHook` that closes the Phase 2 carry-forward: it backs
+/// `core::mutate`'s auto-snap seam (05-02) with a real `getdev-gitx` snapshot
+/// (05-01). This is the ONLY place that imports both
+/// `getdev_core::mutate::PreMutateHook` and `getdev_gitx::snap` — the
+/// dependency-inversion seam that keeps `getdev-core` free of a
+/// `getdev-gitx` edge.
+///
+/// Before a multi-file `env --write` mutates anything, `before_multi_file_write`
+/// records a deduped snapshot under the `Auto` namespace
+/// (`refs/getdev/auto/<N>`, D-06) so the user always has an undo point. `dedupe`
+/// makes an unchanged tree a no-op (D-07) — back-to-back writes never churn the
+/// auto namespace. The message records the trigger (D-08); the snapshot commit's
+/// committer time supplies the timestamp, so no wall-clock string is embedded.
+/// Any `GitxError` is stringified so `core::mutate` turns it into
+/// `MutateError::AutoSnapFailed`, aborting the plan closed (a security tool must
+/// not mutate multiple files with no undo path).
+struct AutoSnapHook<'a> {
+    root: &'a Path,
+    keep: u32,
+}
+
+impl getdev_core::mutate::PreMutateHook for AutoSnapHook<'_> {
+    fn before_multi_file_write(&self, _paths: &[&Path]) -> Result<(), String> {
+        getdev_gitx::snap::snapshot(
+            self.root,
+            getdev_gitx::snap::Namespace::Auto,
+            "auto: before env --write",
+            true,
+            self.keep,
+        )
+        .map(|_outcome| ())
+        .map_err(|e| e.to_string())
+    }
 }
 
 #[cfg(test)]
