@@ -53,9 +53,23 @@ fixtures:
 | `message` | yes | string | Short finding message shown to the user |
 | `remediation` | yes | string | Actionable fix guidance |
 | `refs` | yes | list | Documentation links — per-rule page at `https://getdev.ai/rules/<id>` (generated from this YAML) |
-| `matchers` | yes | list | Each entry: `language` + tree-sitter `query`. Matcher types are defined in `core::rules` (v0.1: tree-sitter query matchers; secret rules additionally use provider regexes + Shannon-entropy fallback — exact YAML encoding for regex/entropy matchers: TBD in `core::rules`) |
+| `frameworks` | no | list | Optional project-level framework gate, parallel to `languages`: `express` \| `nextjs` \| `fastapi` \| `flask`. The rule only activates at all if the project's static, declared-dependency-based framework detection reports at least one listed framework present — never a hardcoded `if is_express` branch in an analyzer (CLAUDE.md rule 7) |
+| `path_glob` | no | list | Optional list of glob patterns (`globset` syntax) restricting which file paths the rule's matchers run against — for path-convention-scoped rules (e.g. Next.js API routes: `pages/api/**`, `app/api/**/route.ts`) where the tree-sitter query alone cannot see the file's path |
+| `matchers` | yes | list | Each entry is **exactly one** of three matcher kinds (`oneOf`, enforced by `rules/audit/schema.json`): **AST** — `language` (`javascript` \| `typescript` \| `tsx` \| `python`) + tree-sitter `query`; **text-regex** — `file_glob` (glob, `globset` syntax) + `text_pattern` (whole-file regex evaluated over capped file bytes, no tree-sitter grammar — for config files with no supported grammar, e.g. Firebase `.rules`/`database.rules.json`); **secret** — `secret: true` (wraps `core::secrets`'s existing provider-regex + Shannon-entropy classifier; used only by `audit/hardcoded-secret`). A matcher entry that mixes fields from more than one kind (e.g. both `query` and `text_pattern` present) is a schema violation, rejected at load time |
 | `fixtures.positive` | yes | list | ≥ 3 files that MUST trigger the rule |
 | `fixtures.negative` | yes | list | ≥ 3 files that MUST NOT trigger the rule |
+
+## Predicate support
+
+A `query:` matcher's tree-sitter predicates (`#eq?`, `#match?`, `#any-of?`, etc.) are evaluated **automatically** by the Rust `tree-sitter` binding inside `QueryCursor::matches()` — `core::rules` contains no custom predicate evaluator. Only the following predicate names are auto-evaluated and therefore usable in a rule's `query:`:
+
+`#eq?` `#not-eq?` `#any-eq?` `#any-not-eq?` `#match?` `#not-match?` `#any-match?` `#any-not-match?` `#is?` `#is-not?` `#any-of?` `#not-any-of?`
+
+Any other predicate name — a typo (`#matches?`) or a genuinely unsupported predicate — is rejected as a load-time error (`RuleLoadError::UnsupportedPredicate`) naming the offending predicate. It is never silently ignored: an unevaluated predicate would otherwise make the surrounding pattern match unconditionally, turning a typo into a rule that fires on everything.
+
+## Pack merge & collisions
+
+A `--rules <dir>` user pack is merged with the embedded pack at load time (`core::rules::merge`). A user rule whose `id` matches an embedded rule's `id` **overrides** the embedded rule entirely (severity, matchers, fixtures — the whole rule), and a load-time warning is emitted naming the collision. Collisions are never silently ambiguous.
 
 ## Fixture requirements (no exceptions)
 

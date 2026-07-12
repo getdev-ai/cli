@@ -85,7 +85,7 @@ These scopes are contractual. Text is carried over essentially verbatim from the
 
 | Category | Rules |
 |---|---|
-| Secrets | `hardcoded-secret` (provider-specific regexes: AWS, Stripe, OpenAI, Anthropic, GitHub, Supabase, etc. + Shannon-entropy fallback), `secret-in-git-history` (HEAD-adjacent only in v0.1) — `env-file-committed` is NOT an `audit/` rule; it's implemented (and owned) by `getdev env`, see that section below (sanctioned F1) |
+| Secrets | `hardcoded-secret` (provider-specific regexes: AWS, Stripe, OpenAI, Anthropic, GitHub, Supabase, etc. + Shannon-entropy fallback); `secret-in-git-history` DEFERRED to Phase 5 (needs gitx diff extraction that lands there) — not shipped in the v0.1 audit pack — `env-file-committed` is NOT an `audit/` rule; it's implemented (and owned) by `getdev env`, see that section below (sanctioned F1) |
 | Injection | `sql-string-concat`, `eval-user-input`, `exec-user-input`, `shell-interpolation` |
 | Web config | `cors-wildcard`, `debug-mode-enabled`, `cookie-insecure`, `missing-auth-middleware` (framework-aware: Express, FastAPI, Flask, Next.js API routes) |
 | Client/server | `client-only-validation` (form handlers with no matching server check — heuristic, `medium` max), `api-key-in-client-bundle` |
