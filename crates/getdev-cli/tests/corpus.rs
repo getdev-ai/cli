@@ -152,6 +152,56 @@ fn real_findings(report: &Value) -> Vec<&Value> {
         .collect()
 }
 
+/// Mirrors [`run_real`] exactly but invokes `getdev audit --json --path
+/// <app_dir>` instead of `getdev real`. No cache seeding is needed or
+/// performed — `getdev audit` is offline by contract (imports no
+/// `getdev_registry` type at all, 04-06-SUMMARY.md D7) — so this helper
+/// sets no `GETDEV_OFFLINE`/`GETDEV_CACHE_DIR` env var. A clean exit-0 run
+/// with valid JSON produced across every sentinel app, achieved with zero
+/// registry seeding, is itself the corpus-level hermeticity proof
+/// (docs/PLAN.md §9.2/REQ-privacy) that complements 04-06's single-file
+/// `plain_run_succeeds_offline_with_no_registry_seeding_needed` CLI test.
+fn run_audit(app_dir: &Path, label: &str) -> Value {
+    let assert = getdev()
+        .arg("audit")
+        .arg("--json")
+        .arg("--path")
+        .arg(app_dir)
+        .timeout(Duration::from_secs(30))
+        .assert();
+
+    let output = assert.get_output();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Same recall-gate hardening as `run_real`: a crash or unexpected
+    // non-zero exit on ONE sentinel app must fail the whole gate loudly. No
+    // `--fail-on` is ever passed, so a clean `audit` run must always exit 0.
+    let code = output.status.code();
+    assert_eq!(
+        code,
+        Some(0),
+        "getdev audit crashed or exited non-zero for {label} ({}) — exit={code:?} \
+         stdout={stdout} stderr={stderr}",
+        app_dir.display(),
+    );
+    serde_json::from_str(&stdout).unwrap_or_else(|err| {
+        panic!(
+            "stdout was not valid JSON ({err}) for {label} ({}): stdout={stdout} stderr={stderr}",
+            app_dir.display(),
+        )
+    })
+}
+
+/// Every `audit/*` finding in a parsed report — mirrors [`real_findings`].
+fn audit_findings(report: &Value) -> Vec<&Value> {
+    report["findings"]
+        .as_array()
+        .expect("findings is an array")
+        .iter()
+        .filter(|f| f["id"].as_str().is_some_and(|id| id.starts_with("audit/")))
+        .collect()
+}
+
 fn list_app_dirs(dir: &Path) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = std::fs::read_dir(dir)
         .unwrap_or_else(|err| panic!("read {}: {err}", dir.display()))
@@ -349,6 +399,88 @@ fn sentinels_stay_quiet() {
         "per-rule sentinel false-positive rate exceeds the 5% budget (docs/PLAN.md §9.2):\n{}\n\n\
          per-rule breakdown ({total_files} source files scanned across {} sentinels):\n{}\n\n\
          every finding:\n{}",
+        failures.join("\n"),
+        apps.len(),
+        table.join("\n"),
+        offenders.join("\n")
+    );
+}
+
+/// SC5 (04-07-PLAN.md, resolves 04-RESEARCH.md Open Question 3): the exact
+/// per-rule-id sentinel false-positive methodology `sentinels_stay_quiet`
+/// established for `real/*` above, extended to `audit/*` and reusing the
+/// same `is_warning_plus`/`count_source_files` helpers unchanged — every
+/// `audit/*` rule's warning+ finding rate across the sentinel corpus must
+/// stay under 5%, computed PER RULE ID (never a diluted aggregate across
+/// rules) and divided by the total source-file count across the whole
+/// sentinel set. No new sentinel corpus construction (Open Q3): this reuses
+/// `testdata/corpus/sentinels/` unchanged. Selectable via
+/// `cargo test -p getdev-cli --test corpus -- audit_fp_budget`.
+#[test]
+fn audit_fp_budget_stays_under_5_percent_per_rule() {
+    let apps = sentinel_apps();
+    assert!(
+        apps.len() >= 10,
+        "expected >= 10 sentinel snapshots, found {}",
+        apps.len()
+    );
+
+    let mut total_files = 0usize;
+    let mut per_rule_counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut offenders = Vec::new();
+
+    for app_dir in &apps {
+        let label = app_label(app_dir);
+        let report = run_audit(app_dir, &label);
+        let findings = audit_findings(&report);
+        total_files += count_source_files(app_dir);
+        for f in &findings {
+            let id = f["id"].as_str().unwrap_or("?").to_owned();
+            let counted = is_warning_plus(f);
+            if counted {
+                *per_rule_counts.entry(id.clone()).or_insert(0) += 1;
+            }
+            offenders.push(format!(
+                "{label}: {id} [{}/{}]{} {}:{} :: {}",
+                f["severity"].as_str().unwrap_or("?"),
+                f["confidence"].as_str().unwrap_or("?"),
+                if counted {
+                    ""
+                } else {
+                    " (info — excluded from the budget)"
+                },
+                f["file"].as_str().unwrap_or("?"),
+                f["line"]
+                    .as_u64()
+                    .map(|n| n.to_string())
+                    .unwrap_or_default(),
+                f["message"].as_str().unwrap_or("?"),
+            ));
+        }
+    }
+
+    let denom = total_files.max(1) as f64;
+    let mut table = Vec::new();
+    let mut failures = Vec::new();
+    for (rule_id, count) in &per_rule_counts {
+        let rate = *count as f64 / denom;
+        table.push(format!(
+            "  {rule_id}: {count}/{total_files} files = {:.1}%",
+            rate * 100.0
+        ));
+        if rate >= 0.05 {
+            failures.push(format!(
+                "{rule_id}: {:.1}% ({count}/{total_files} files) >= the 5% budget",
+                rate * 100.0
+            ));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "per-rule audit sentinel false-positive rate exceeds the 5% budget (docs/PLAN.md §9.2, \
+         SC5):\n{}\n\nper-rule breakdown ({total_files} source files scanned across {} \
+         sentinels):\n{}\n\nevery finding:\n{}",
         failures.join("\n"),
         apps.len(),
         table.join("\n"),

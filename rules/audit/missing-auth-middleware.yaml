@@ -1,5 +1,20 @@
 id: audit/missing-auth-middleware
-severity: high
+# Demoted 04-07 (docs/SPEC-RULES.md "False-positive policy tie-in"): the
+# sentinel corpus measured this rule at 16.1% warning+ FP (5/31 files across
+# fastapi-bigger-applications + flask-tutorial-flaskr, corpus.rs
+# audit_fp_budget_stays_under_5_percent_per_rule) — the shape-only heuristic
+# (single-arg handler / single-decorator route) cannot see auth enforced one
+# layer up (an app-wide before_request/dependency-injected auth wrapper,
+# both real in these two OSS apps), so it over-fires on exactly that
+# legitimate pattern. Demoted all the way to `info` (not merely `low`) per
+# policy's "low/info" option: `low` still counts as warning+ under is_
+# warning_plus (only `info` is excluded, matching real/nonexistent-api's own
+# A3 precedent), and `info` is also below the `[audit] severity_min = "low"`
+# default floor, so it stays silent unless a user explicitly opts in with
+# `--severity info`. confidence stays `medium` (already heuristic, already
+# surfacing `detail` via core::audit's is_heuristic gate) — only severity
+# needed to move for this rule to actually drop out of the FP-budget count.
+severity: info
 confidence: medium
 languages: [javascript, typescript, python]
 frameworks: [express, fastapi, flask, nextjs]
