@@ -17,6 +17,13 @@ const EMBEDDED_MODELS: &str = include_str!("../../../rules/models.json");
 pub enum ModelsError {
     #[error("invalid models dataset: {0}")]
     Parse(#[from] serde_json::Error),
+    /// An empty or whitespace-only `families`/`call_sites` entry — WR-02
+    /// (03-REVIEW.md P2). An empty family prefix would make
+    /// `literal.starts_with("")` match every literal, silently disabling all
+    /// `real/unknown-model-string` detection. A bad embedded dataset row is
+    /// release-blocking (mirrors `Datasets::embedded`), never a match-all.
+    #[error("invalid models dataset: `{0}` contains an empty or whitespace-only entry")]
+    EmptyEntry(&'static str),
 }
 
 #[derive(Debug, Deserialize)]
@@ -55,6 +62,8 @@ impl ModelMatcher {
 
     pub fn parse(json: &str) -> Result<Self, ModelsError> {
         let file: ModelsFile = serde_json::from_str(json)?;
+        reject_empty_entries("families", &file.families)?;
+        reject_empty_entries("call_sites", &file.call_sites)?;
         Ok(Self {
             families: file.families,
             call_sites: file.call_sites,
@@ -98,6 +107,18 @@ impl ModelMatcher {
     }
 }
 
+/// WR-02 (03-REVIEW.md P2): a dataset entry that is empty or whitespace-only
+/// is rejected at load. An empty family prefix would make
+/// `literal.starts_with("")` true for every literal — silently disabling all
+/// unknown-model detection while tests stay green — so a stray blank row in
+/// the release-refreshed `rules/models.json` fails loudly instead.
+fn reject_empty_entries(field: &'static str, entries: &[String]) -> Result<(), ModelsError> {
+    if entries.iter().any(|entry| entry.trim().is_empty()) {
+        return Err(ModelsError::EmptyEntry(field));
+    }
+    Ok(())
+}
+
 /// Heuristic model-id shape: lowercase ASCII alphanumerics plus `-`/`.`/`:`,
 /// containing at least one hyphen or digit. Rules out plain English words
 /// at a model call site (e.g. `"production"`) from firing a wall of false
@@ -132,6 +153,42 @@ mod tests {
         let m = matcher();
         assert!(!m.families.is_empty());
         assert!(!m.call_sites.is_empty());
+    }
+
+    #[test]
+    fn empty_family_entry_is_rejected_at_load() {
+        // WR-02 (P2): an empty family prefix would make starts_with("") match
+        // every literal, silently disabling ALL unknown-model detection — it
+        // must fail loudly at parse instead.
+        let err =
+            ModelMatcher::parse(r#"{"version":1,"families":["gpt-",""],"call_sites":["model"]}"#)
+                .unwrap_err();
+        assert!(matches!(err, ModelsError::EmptyEntry("families")));
+    }
+
+    #[test]
+    fn whitespace_only_family_entry_is_rejected_at_load() {
+        let err = ModelMatcher::parse(r#"{"version":1,"families":["  "],"call_sites":["model"]}"#)
+            .unwrap_err();
+        assert!(matches!(err, ModelsError::EmptyEntry("families")));
+    }
+
+    #[test]
+    fn empty_call_site_entry_is_rejected_at_load() {
+        let err = ModelMatcher::parse(r#"{"version":1,"families":["gpt-"],"call_sites":[""]}"#)
+            .unwrap_err();
+        assert!(matches!(err, ModelsError::EmptyEntry("call_sites")));
+    }
+
+    #[test]
+    fn a_blank_family_row_never_disables_unknown_model_detection() {
+        // The failure mode WR-02 guards: had the empty family been accepted,
+        // this hallucinated family would be silently swallowed. Rejecting at
+        // load means `embedded()`/`parse` never yields a match-all matcher.
+        assert!(ModelMatcher::parse(
+            r#"{"version":1,"families":["claude-",""],"call_sites":["model"]}"#
+        )
+        .is_err());
     }
 
     #[test]
