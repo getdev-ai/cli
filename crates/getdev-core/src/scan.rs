@@ -144,18 +144,39 @@ pub const MAX_SCAN_FILE_BYTES: u64 = 5 * 1024 * 1024;
 /// `ignore` never even descends into them, belt-and-braces alongside
 /// `.gitignore` handling (which is skipped entirely on non-git trees without
 /// this).
+///
+/// W5 (05-REVIEW.md): this list is now restricted to UNAMBIGUOUS
+/// artifact/vendor names only. Previously it also pruned the bare names
+/// `env`, `venv`, `build`, and `dist` at any depth — a silent
+/// false-negative for a security scanner, since a legitimate first-party
+/// source dir such as `src/env/config.ts` was skipped whole and any
+/// hardcoded secret in it shipped while getdev reported "clean". Those four
+/// names are handled differently now:
+///   * `env`/`venv` — a real Python virtualenv is detected STRUCTURALLY by
+///     its `pyvenv.cfg` marker (see [`is_not_excluded_dir`]), so it is
+///     pruned whatever it is named, without pruning same-named source dirs.
+///   * `build`/`dist` — no longer pruned by bare name at all. Scanning
+///     bundled/generated output is desirable for a security scanner: it is
+///     exactly where `audit/api-key-in-client-bundle` finds a provider key
+///     that was inlined into the shipped client bundle. The trade-off is
+///     that a finding may surface both in source and in its build output;
+///     that duplication is accepted to avoid the false-negative of a secret
+///     that only appears in the built artifact.
 const EXCLUDED_DIR_NAMES: &[&str] = &[
     "node_modules",
     ".venv",
-    "venv",
-    "env",
     "site-packages",
     "__pycache__",
     ".git",
-    "dist",
-    "build",
     "target",
 ];
+
+/// Marker file that unambiguously identifies the root of a Python virtual
+/// environment (PEP 405). Its mere presence in a directory means that
+/// directory is a venv regardless of what it is named (`env`, `venv`,
+/// `.env`, or anything custom), so it is pruned structurally rather than by
+/// name (W5).
+const VENV_MARKER: &str = "pyvenv.cfg";
 
 /// The single walker constructor every project-source walk in this crate
 /// must build on (A7): `.gitignore` is honored even outside a git repo
@@ -173,13 +194,30 @@ pub fn project_walker(root: &Path) -> WalkBuilder {
     builder
 }
 
-/// `WalkBuilder::filter_entry` predicate backing [`project_walker`]. Only
-/// ever prunes directories by exact name match; files are never filtered
-/// here (extension filtering happens at each call site).
+/// `WalkBuilder::filter_entry` predicate backing [`project_walker`]. Prunes
+/// directories either by exact name match against [`EXCLUDED_DIR_NAMES`] or
+/// structurally when they are a Python virtualenv (they contain a
+/// [`VENV_MARKER`]); files are never filtered here (extension filtering
+/// happens at each call site).
+///
+/// W5: the bias is deliberately toward NOT pruning. Anything not clearly a
+/// vendor/artifact tree is walked, because for a security scanner a silently
+/// skipped first-party source file is the worst outcome. The `pyvenv.cfg`
+/// stat below never errors into a prune: `Path::is_file` returns `false` on
+/// any I/O error, so an unreadable directory is scanned, not skipped.
 fn is_not_excluded_dir(entry: &ignore::DirEntry) -> bool {
     if entry.file_type().is_some_and(|t| t.is_dir()) {
         if let Some(name) = entry.file_name().to_str() {
-            return !EXCLUDED_DIR_NAMES.contains(&name);
+            if EXCLUDED_DIR_NAMES.contains(&name) {
+                return false;
+            }
+        }
+        // Structural virtualenv detection (W5): a `pyvenv.cfg` marker at the
+        // directory root means this is a Python venv whatever its name, so
+        // prune it — this replaces the old bare-name pruning of `env`/`venv`
+        // that also swallowed legitimate `src/env/...` source.
+        if entry.path().join(VENV_MARKER).is_file() {
+            return false;
         }
     }
     true
@@ -538,13 +576,13 @@ mod tests {
         assert_eq!(scans[0].path, dir.join("app.js"));
     }
 
-    /// A7 belt-and-braces: the same exclusion set covers Python's venv/
-    /// site-packages/__pycache__ trees, and applies uniformly whether or not
-    /// `.gitignore` would already have caught them.
+    /// A7 belt-and-braces: the unambiguous vendor/artifact trees
+    /// (`.venv`/`site-packages`/`__pycache__`) are pruned by name at any
+    /// depth, whether or not `.gitignore` would already have caught them.
     #[test]
     fn project_walker_excludes_python_vendor_dirs() {
-        let dir = tempdir();
-        for vendor in [".venv", "venv", "env", "site-packages", "__pycache__"] {
+        let dir = unique_tempdir("vendor_dirs");
+        for vendor in [".venv", "site-packages", "__pycache__"] {
             std::fs::create_dir_all(dir.join(vendor)).unwrap();
             std::fs::write(dir.join(vendor).join("vendored.py"), "def x(): pass\n").unwrap();
         }
@@ -554,6 +592,78 @@ mod tests {
         assert!(skipped.is_empty());
         assert_eq!(scans.len(), 1);
         assert_eq!(scans[0].path, dir.join("app.py"));
+    }
+
+    /// W5 regression: a legitimate first-party source directory that merely
+    /// happens to be named `env` (e.g. `src/env/config.ts`) must NOT be
+    /// pruned. The old bare-name pruning of `env`/`venv` silently skipped
+    /// real source, so a hardcoded secret in it shipped while getdev reported
+    /// a clean scan — the worst outcome for a security scanner.
+    #[test]
+    fn project_walker_scans_first_party_env_dir() {
+        let dir = unique_tempdir("w5_first_party_env");
+        std::fs::create_dir_all(dir.join("src/env")).unwrap();
+        std::fs::write(
+            dir.join("src/env/leak.ts"),
+            "const KEY = \"sk_live_leak\";\nfunction f() {}\n",
+        )
+        .unwrap();
+
+        let (scans, skipped) = scan_path(&dir).unwrap();
+        assert!(skipped.is_empty());
+        assert_eq!(
+            scans.len(),
+            1,
+            "a first-party `env` source dir must be scanned, not pruned"
+        );
+        assert_eq!(scans[0].path, dir.join("src/env/leak.ts"));
+    }
+
+    /// W5: a real Python virtualenv is detected STRUCTURALLY by its
+    /// `pyvenv.cfg` marker, so it is still pruned whatever it is named —
+    /// `venv`, `env`, or anything custom — even though those bare names are
+    /// no longer on the exclusion list.
+    #[test]
+    fn project_walker_prunes_structural_virtualenv() {
+        let dir = unique_tempdir("w5_structural_venv");
+        for venv_name in ["venv", "env", "my_custom_venv"] {
+            let venv = dir.join(venv_name);
+            std::fs::create_dir_all(venv.join("lib")).unwrap();
+            std::fs::write(venv.join("pyvenv.cfg"), "home = /usr/bin\n").unwrap();
+            std::fs::write(venv.join("lib/vendored.py"), "def x(): pass\n").unwrap();
+        }
+        std::fs::write(dir.join("app.py"), "def first_party(): pass\n").unwrap();
+
+        let (scans, skipped) = scan_path(&dir).unwrap();
+        assert!(skipped.is_empty());
+        assert_eq!(
+            scans.len(),
+            1,
+            "dirs carrying a pyvenv.cfg marker must be pruned as virtualenvs"
+        );
+        assert_eq!(scans[0].path, dir.join("app.py"));
+    }
+
+    /// W5: `build`/`dist` are no longer pruned by bare name — scanning
+    /// bundled/generated output is desirable (that is exactly what
+    /// `audit/api-key-in-client-bundle` targets: a provider key inlined into
+    /// the shipped client bundle).
+    #[test]
+    fn project_walker_scans_build_and_dist_output() {
+        let dir = unique_tempdir("w5_build_dist");
+        for out in ["build", "dist"] {
+            std::fs::create_dir_all(dir.join(out)).unwrap();
+            std::fs::write(dir.join(out).join("bundle.js"), "function b() {}\n").unwrap();
+        }
+        std::fs::write(dir.join("app.js"), "function a() {}\n").unwrap();
+
+        let (scans, skipped) = scan_path(&dir).unwrap();
+        assert!(skipped.is_empty());
+        assert_eq!(
+            scans.len(),
+            3,
+            "build/ and dist/ output must be scanned, not pruned by name"
+        );
     }
 
     /// F7: a file over the scan cap is skipped with a reason, never read
@@ -579,6 +689,17 @@ mod tests {
             std::process::id(),
             std::thread::current().id()
         ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A per-test-name unique, freshly-cleared tempdir — needed by the W5
+    /// tests, several of which assert an exact scan count and so must not
+    /// inherit leftover files from a sibling test that reused the same
+    /// thread-keyed [`tempdir`].
+    fn unique_tempdir(name: &str) -> PathBuf {
+        let dir = tempdir().join(name);
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
