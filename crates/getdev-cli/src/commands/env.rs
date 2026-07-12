@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io::IsTerminal;
 use std::path::Path;
 
@@ -30,8 +31,16 @@ pub fn run(args: &EnvArgs) -> anyhow::Result<u8> {
     let options = EnvOptions {
         env_file: args.env_file.clone(),
     };
-    let plan = env::plan(&args.path, &options)?;
+    let mut plan = env::plan(&args.path, &options)?;
     let mut findings = env::findings(&plan, &options);
+
+    // CR-02: fingerprints of the per-secret findings, computed BEFORE the
+    // committed-file finding is pushed. `env::findings` maps over
+    // `plan.entries` directly, so this list is 1:1 with `plan.entries` and
+    // in the same order — the index alignment relied on below. We reuse
+    // these to gate what `--write` mutates on the exact same suppression
+    // decision that hides findings from the report.
+    let entry_fingerprints: Vec<String> = findings.iter().map(suppress::fingerprint).collect();
 
     // the env file being in git history is its own critical finding —
     // getdev never rewrites history automatically (rotation guidance instead)
@@ -42,6 +51,33 @@ pub fn run(args: &EnvArgs) -> anyhow::Result<u8> {
 
     // B2(b): `[ignore] rules`/`paths` and `[[suppress]]` actually filter now.
     let filter_outcome = suppress::filter_findings(findings, &args.cfg);
+
+    // CR-02: suppression previously touched ONLY this display list while
+    // `env::apply` ran on the full `plan.entries` — a secret the user
+    // explicitly suppressed ([[suppress]] "test fixture key…") or ignored
+    // ([ignore]) still got its literal rewritten and its value appended to
+    // `.env`, mutating a file against explicit user intent. Gate the plan on
+    // the SAME outcome: drop every entry whose finding was suppressed, so
+    // detect/report and mutate agree. Identity is the finding fingerprint
+    // (rule id + file + line), which suppress uses and which is 1:1 with a
+    // plan entry.
+    let suppressed_fingerprints: HashSet<String> = filter_outcome
+        .suppressed
+        .iter()
+        .map(|s| suppress::fingerprint(&s.finding))
+        .collect();
+    let mut idx = 0usize;
+    plan.entries.retain(|_| {
+        // `Vec::retain` visits entries once, in order — same order as
+        // `entry_fingerprints`. Keep an entry unless its finding was
+        // suppressed above.
+        let keep = entry_fingerprints
+            .get(idx)
+            .is_none_or(|fp| !suppressed_fingerprints.contains(fp));
+        idx += 1;
+        keep
+    });
+
     let findings = filter_outcome.kept;
 
     // F4: apply before printing (never `?` here) so that on failure the
@@ -214,4 +250,100 @@ fn env_file_committed_finding(env_file: &str) -> Finding {
 
 fn display_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use getdev_core::config::Config;
+
+    fn unique_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "getdev-env-cli-{tag}-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// CR-02 regression: a secret the user suppressed via `[ignore] paths`
+    /// must be neither rewritten in source nor appended to `.env` under
+    /// `--write`, while a NON-suppressed secret in the same run still is.
+    /// The bug was that suppression filtered only the reported findings; the
+    /// full `plan.entries` was still applied.
+    #[test]
+    fn write_never_mutates_a_suppressed_secret() {
+        let dir = unique_dir("suppress");
+        // suppressed: lives under the ignored path prefix
+        std::fs::write(
+            dir.join("fixture.js"),
+            "const awsKey = \"AKIAFIXTUREFIXTURE01\";\n",
+        )
+        .unwrap();
+        // reported: must still be extracted
+        std::fs::write(
+            dir.join("keep.js"),
+            "const stripeKey = \"sk_live_KEEPKEEPKEEPKEEP01\";\n",
+        )
+        .unwrap();
+
+        let mut cfg = Config::default();
+        cfg.ignore.paths = vec!["fixture.js".to_owned()];
+
+        let args = EnvArgs {
+            path: dir.clone(),
+            json: false,
+            no_color: true,
+            fail_on: None,
+            env_file: ".env".to_owned(),
+            write: true,
+            cfg,
+            quiet: true,
+            verbose: 0,
+        };
+        run(&args).unwrap();
+
+        // the suppressed source is untouched — raw literal still there, no
+        // env accessor injected
+        let fixture = std::fs::read_to_string(dir.join("fixture.js")).unwrap();
+        assert!(
+            fixture.contains("\"AKIAFIXTUREFIXTURE01\""),
+            "suppressed secret must not be rewritten in source, got:\n{fixture}"
+        );
+        assert!(
+            !fixture.contains("process.env"),
+            "suppressed source must not gain an env accessor, got:\n{fixture}"
+        );
+
+        // the non-suppressed source WAS rewritten
+        let keep = std::fs::read_to_string(dir.join("keep.js")).unwrap();
+        assert!(
+            keep.contains("process.env.STRIPE_SECRET_KEY"),
+            "reported secret should be extracted, got:\n{keep}"
+        );
+
+        // .env holds the reported secret's value but NOT the suppressed one's
+        let env_file = std::fs::read_to_string(dir.join(".env")).unwrap();
+        assert!(
+            env_file.contains("sk_live_KEEPKEEPKEEPKEEP01"),
+            "reported secret value should be written to .env, got:\n{env_file}"
+        );
+        assert!(
+            !env_file.contains("AKIAFIXTUREFIXTURE01"),
+            "suppressed secret value must NEVER reach .env, got:\n{env_file}"
+        );
+        assert!(
+            !env_file.contains("AWS_ACCESS_KEY_ID"),
+            "suppressed secret's var must not be written to .env, got:\n{env_file}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
