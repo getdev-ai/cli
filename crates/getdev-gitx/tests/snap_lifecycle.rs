@@ -13,7 +13,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use getdev_gitx::snap::{restore, snapshot, Namespace};
+use getdev_gitx::snap::{list, prune, restore, snapshot, Namespace};
 
 fn nanos() -> u128 {
     std::time::SystemTime::now()
@@ -308,6 +308,95 @@ fn gitignored_paths_survive_back_untouched() {
     assert_eq!(
         content, "sensitive post-snapshot content\n",
         "a gitignored path must keep its post-mutation content (never reverted or removed)"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `snap list` shows manual snapshots ONLY (D-06 — the auto safety net stays
+/// invisible): with 2 manual and 2 auto snaps interleaved over the shared id
+/// counter, `list` returns exactly the 2 manual rows, ordered ascending by id,
+/// each carrying its original message.
+#[test]
+fn list_reports_manual_only() {
+    let dir = mixed_repo("list-manual");
+
+    // Interleave manual/auto over the shared counter; distinct content per snap
+    // so every call creates a fresh ref (no dedupe collisions).
+    write(&dir, "tracked.txt", "m0\n");
+    snapshot(&dir, Namespace::Snaps, "manual one", false, 20).unwrap();
+    write(&dir, "tracked.txt", "a0\n");
+    snapshot(&dir, Namespace::Auto, "auto one", false, 20).unwrap();
+    write(&dir, "tracked.txt", "m1\n");
+    snapshot(&dir, Namespace::Snaps, "manual two", false, 20).unwrap();
+    write(&dir, "tracked.txt", "a1\n");
+    snapshot(&dir, Namespace::Auto, "auto two", false, 20).unwrap();
+
+    let rows = list(&dir).unwrap();
+
+    assert_eq!(
+        rows.len(),
+        2,
+        "list must return only the 2 manual snapshots, never auto (D-06)"
+    );
+    assert!(
+        rows[0].id < rows[1].id,
+        "rows must be ordered ascending by id"
+    );
+    assert_eq!(rows[0].message, "manual one");
+    assert_eq!(rows[1].message, "manual two");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `snap prune` is idempotent and refs-only (D-09/D-10): pruning 5 manual snaps
+/// to `keep=2` deletes the 3 oldest and keeps 2; a second prune deletes nothing.
+/// Neither prune repacks the object store or writes a `gc.log` (A1 / D-10 — ref
+/// deletes only, never `git gc`/`prune`/`repack`).
+#[test]
+fn prune_is_idempotent_refs_only() {
+    let dir = mixed_repo("prune-idem");
+    let pack_dir = dir.join(".git/objects/pack");
+    let gc_log = dir.join(".git/gc.log");
+
+    // Create 5 manual snapshots that all survive creation (high keep), so prune
+    // has real work to do.
+    for i in 0..5 {
+        write(&dir, "tracked.txt", &format!("v{i}\n"));
+        snapshot(&dir, Namespace::Snaps, &format!("s{i}"), false, 20).unwrap();
+    }
+    assert_eq!(
+        ref_count(&dir, "refs/getdev/snaps"),
+        5,
+        "precondition: 5 manual refs before prune"
+    );
+
+    let packs_before = count_entries(&pack_dir);
+
+    // First prune to keep=2: the 3 oldest deleted, the 2 newest kept.
+    let first = prune(&dir, Namespace::Snaps, 2).unwrap();
+    assert_eq!(first.deleted_ids.len(), 3, "3 oldest refs must be pruned");
+    assert_eq!(first.kept, 2, "2 newest refs must be kept");
+    assert_eq!(ref_count(&dir, "refs/getdev/snaps"), 2);
+
+    // Second prune over the already-trimmed namespace is a no-op (idempotent).
+    let second = prune(&dir, Namespace::Snaps, 2).unwrap();
+    assert!(
+        second.deleted_ids.is_empty(),
+        "a second prune must delete nothing (idempotent)"
+    );
+    assert_eq!(second.kept, 2);
+    assert_eq!(ref_count(&dir, "refs/getdev/snaps"), 2);
+
+    // D-10: refs-only — no repack, no gc across either prune (A1 assertion).
+    let packs_after = count_entries(&pack_dir);
+    assert_eq!(
+        packs_before, packs_after,
+        "prune must not repack the object store (D-10)"
+    );
+    assert!(
+        !gc_log.exists(),
+        "prune must not run gc (no gc.log expected)"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

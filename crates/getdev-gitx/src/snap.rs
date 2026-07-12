@@ -74,11 +74,6 @@ pub enum GitxError {
         #[from]
         source: std::io::Error,
     },
-    /// Placeholder for a primitive not yet implemented in this plan
-    /// (`restore`/`list`/`diff`/`prune` land in 05-03/05-04). Returned instead
-    /// of `todo!()`/`unimplemented!()`/`panic!` (CLAUDE.md hard rule 1).
-    #[error("{op} is not implemented yet")]
-    NotImplemented { op: &'static str },
 }
 
 /// Result of a [`snapshot`] call.
@@ -372,9 +367,11 @@ fn commit_tree(root: &Path, tree: &str, message: &str) -> Result<String, GitxErr
 /// Enforce a namespace's retention budget: keep the newest `keep` ids, delete
 /// the rest oldest-first. Deletes refs ONLY via `update-ref -d` — never
 /// `git gc`/`prune`/`repack` (D-10). Operates on one namespace at a time, so
-/// each namespace's budget is independent (D-09). This is the same idempotent
-/// logic `snap prune` will expose in 05-04.
-fn enforce_retention(root: &Path, ns: Namespace, keep: u32) -> Result<(), GitxError> {
+/// each namespace's budget is independent (D-09). Idempotent: a second run over
+/// an already-trimmed namespace deletes nothing. This is the exact logic the
+/// public [`prune`] exposes — one code path, so manual `snap prune` and
+/// automatic end-of-snap retention can never diverge (D-09).
+fn enforce_retention(root: &Path, ns: Namespace, keep: u32) -> Result<PruneOutcome, GitxError> {
     let stdout = capture(
         git_command_readonly(root).args(["for-each-ref", "--format=%(refname)", ns.ref_prefix()]),
         "for-each-ref",
@@ -386,16 +383,24 @@ fn enforce_retention(root: &Path, ns: Namespace, keep: u32) -> Result<(), GitxEr
     ids.sort_unstable();
     let keep = keep as usize;
     if ids.len() <= keep {
-        return Ok(());
+        return Ok(PruneOutcome {
+            deleted_ids: Vec::new(),
+            kept: ids.len(),
+        });
     }
     let doomed = ids.len() - keep;
+    let mut deleted_ids = Vec::with_capacity(doomed);
     for id in ids.into_iter().take(doomed) {
         capture(
             git_command_readonly(root).args(["update-ref", "-d", &ns.ref_path(id)]),
             "update-ref",
         )?;
+        deleted_ids.push(id);
     }
-    Ok(())
+    Ok(PruneOutcome {
+        deleted_ids,
+        kept: keep,
+    })
 }
 
 /// Checkpoint the full working tree (tracked + untracked-non-ignored, excl.
@@ -723,9 +728,11 @@ pub fn diff(root: &Path, id: u32) -> Result<DiffSummary, GitxError> {
     Ok(summary)
 }
 
-/// Manually enforce `keep` retention on `ns` (the same logic snap runs
-/// silently). Implemented in 05-04.
+/// Manually enforce `keep` retention on `ns` — a thin wrapper over the SAME
+/// [`enforce_retention`] every `snapshot` runs, so manual `snap prune` and
+/// automatic end-of-snap retention are provably one code path (D-09). Deletes
+/// refs only via `update-ref -d`, never `git gc`/`prune`/`repack` (D-10), and
+/// is idempotent. Returns the deleted ids and the kept count.
 pub fn prune(root: &Path, ns: Namespace, keep: u32) -> Result<PruneOutcome, GitxError> {
-    let _ = (root, ns, keep);
-    Err(GitxError::NotImplemented { op: "prune" })
+    enforce_retention(root, ns, keep)
 }
