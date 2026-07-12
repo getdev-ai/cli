@@ -97,6 +97,13 @@ fn parse_fail_on(raw: &str) -> Result<Severity, String> {
     raw.parse::<Severity>()
 }
 
+/// `audit --severity <min>` accepts the full `critical|high|medium|low|info`
+/// range (unlike `--fail-on`) — it's a display/reporting floor, not an
+/// exit-code threshold.
+fn parse_severity(raw: &str) -> Result<Severity, String> {
+    raw.parse::<Severity>()
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Extract hardcoded secrets to .env (dry-run by default)
@@ -119,6 +126,21 @@ enum Command {
         /// Only run the LLM model-string check
         #[arg(long, conflicts_with_all = ["deps_only", "apis_only"])]
         models_only: bool,
+    },
+    /// Security scan tuned to AI-generated failure patterns (offline,
+    /// non-mutating; docs/SPEC-COMMANDS.md `getdev audit`)
+    Audit {
+        /// Drop findings below this severity (critical|high|medium|low|info;
+        /// default: `[audit] severity_min` in config, else low)
+        #[arg(long, value_name = "SEVERITY", value_parser = parse_severity)]
+        severity: Option<Severity>,
+        /// Suppress findings from this rule id (repeatable)
+        #[arg(long, value_name = "RULE_ID")]
+        ignore: Vec<String>,
+        /// Merge a directory of user-authored rule YAML into the embedded
+        /// pack (declarative-only — never executable)
+        #[arg(long, value_name = "DIR")]
+        rules: Option<PathBuf>,
     },
     /// Self-diagnostics: toolchain, git availability, grammar integrity
     Doctor,
@@ -237,6 +259,25 @@ fn run(cli: Cli) -> anyhow::Result<u8> {
             quiet,
             verbose,
         }),
+        Command::Audit {
+            severity,
+            ignore,
+            rules,
+        } => {
+            let severity_min = severity.unwrap_or(cfg.audit.severity_min);
+            commands::audit::run(&commands::audit::AuditArgs {
+                path,
+                json,
+                no_color,
+                fail_on,
+                severity_min,
+                ignore,
+                rules_dir: rules,
+                cfg: cfg.clone(),
+                quiet,
+                verbose,
+            })
+        }
         Command::Doctor => {
             unreachable!("Command::Doctor is handled before config resolution above")
         }
