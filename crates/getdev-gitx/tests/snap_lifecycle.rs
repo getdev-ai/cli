@@ -286,6 +286,39 @@ fn created_since_snapshot_is_removed_on_back() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// CR-01 regression: a created-since file whose name contains NON-ASCII bytes
+/// (git C-quotes it under the default `core.quotePath`, e.g. `"caf\303\251.txt"`)
+/// must still be removed on `back`. Before the `-z` fix, `restore` parsed the
+/// human-quoted `diff-tree` text and `root.join`-ed the mojibake string, so the
+/// real `café.txt` was never located and the file survived (silent NotFound),
+/// violating D-05 exact-not-additive. Every fixture in the proptest is ASCII,
+/// which is why the gap slipped through until now.
+#[test]
+fn created_since_snapshot_with_non_ascii_name_is_removed_on_back() {
+    let dir = mixed_repo("non-ascii-created");
+    let snap = snapshot(&dir, Namespace::Snaps, "base", false, 20).unwrap();
+
+    // a NEW in-scope (untracked-non-ignored) file with a non-ASCII name.
+    write(&dir, "café.txt", "created since the snapshot\n");
+    assert!(
+        dir.join("café.txt").exists(),
+        "precondition: non-ASCII file created"
+    );
+
+    let outcome = restore(&dir, snap.id).unwrap();
+
+    assert!(
+        !dir.join("café.txt").exists(),
+        "a non-ASCII-named file created since the snapshot must be removed on back (CR-01 / D-05)"
+    );
+    assert_eq!(
+        outcome.removed, 1,
+        "restore should report exactly the one created-since file removed"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// D-05 / T-05-09: a gitignored path created or modified after the snapshot
 /// keeps its post-mutation content on `back` — restore never reverts or removes
 /// it, because ignored paths never enter a tree and so are never classified.

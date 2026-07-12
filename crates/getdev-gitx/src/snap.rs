@@ -481,6 +481,40 @@ fn resolve_ref(root: &Path, id: u32) -> Result<(Namespace, String), GitxError> {
     Err(GitxError::NoSuchSnapshot { id })
 }
 
+/// Parse the NUL-delimited output of `diff-tree --name-status -z` into
+/// `(status_field, path)` records. With `-z`, git emits — per change — a status
+/// field, a NUL, the RAW path, and a NUL; it does NOT apply `core.quotePath`
+/// C-quoting (which defaults to on and would mangle any non-ASCII path into
+/// e.g. `"caf\303\251.txt"`). Using the raw path is mandatory so a created-since
+/// file with a non-ASCII name is located and removed on restore (CR-01 / D-05).
+/// Rename/copy statuses (`R`/`C`) carry a source AND a destination path; those
+/// only appear when `-M`/`-C` are requested (they are not here), but are parsed
+/// defensively so a stray record can never desync the field stream — the
+/// destination is taken as the effective path.
+fn parse_name_status_z(out: &[u8]) -> Vec<(String, String)> {
+    let text = String::from_utf8_lossy(out);
+    let mut fields = text.split('\0').filter(|s| !s.is_empty());
+    let mut records = Vec::new();
+    while let Some(status) = fields.next() {
+        let rename_or_copy = matches!(status.chars().next(), Some('R') | Some('C'));
+        let path = if rename_or_copy {
+            // source then destination — the destination is the effective path.
+            let _src = fields.next();
+            match fields.next() {
+                Some(dst) => dst,
+                None => break,
+            }
+        } else {
+            match fields.next() {
+                Some(p) => p,
+                None => break,
+            }
+        };
+        records.push((status.to_owned(), path.to_owned()));
+    }
+    records
+}
+
 /// Restore the working tree to snapshot `id` (byte-identical over the
 /// snapshotted scope; D-05 exact-not-additive semantics).
 ///
@@ -522,6 +556,7 @@ pub fn restore(root: &Path, id: u32) -> Result<RestoreOutcome, GitxError> {
             "diff-tree",
             "--no-commit-id",
             "-r",
+            "-z",
             "--name-status",
             &current_tree,
             &target_tree,
@@ -533,13 +568,7 @@ pub fn restore(root: &Path, id: u32) -> Result<RestoreOutcome, GitxError> {
     let mut removed = 0usize; // `D` created-since, deleted from disk
     let mut readded = 0usize; // `A` target-only, recreated
     let mut created_since: Vec<PathBuf> = Vec::new();
-    for line in String::from_utf8_lossy(&diff).lines() {
-        let mut parts = line.splitn(2, '\t');
-        let status = parts.next().unwrap_or("");
-        let path = match parts.next() {
-            Some(p) if !p.is_empty() => p,
-            _ => continue,
-        };
+    for (status, path) in parse_name_status_z(&diff) {
         match status.chars().next() {
             Some('A') => readded += 1,
             Some('M' | 'T') => restored += 1,
@@ -618,6 +647,7 @@ fn diff_tree_name_status(
             "diff-tree",
             "--no-commit-id",
             "-r",
+            "-z",
             "--name-status",
             from_tree,
             to_tree,
@@ -625,13 +655,7 @@ fn diff_tree_name_status(
         "diff-tree",
     )?;
     let mut changes = Vec::new();
-    for line in String::from_utf8_lossy(&out).lines() {
-        let mut parts = line.splitn(2, '\t');
-        let status = parts.next().unwrap_or("");
-        let path = match parts.next() {
-            Some(p) if !p.is_empty() => p.to_owned(),
-            _ => continue,
-        };
+    for (status, path) in parse_name_status_z(&out) {
         let c = match status.chars().next() {
             Some('A') => 'A',
             Some('D') => 'D',
