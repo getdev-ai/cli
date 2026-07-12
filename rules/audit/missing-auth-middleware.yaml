@@ -157,5 +157,5 @@ fixtures:
     - negative/missing_auth_neg_express_js.js
     - negative/missing_auth_neg_fastapi_py.py
     - negative/missing_auth_neg_flask_py.py
-    - negative/app/dashboard/page.tsx
+    - negative/app/api/missing_auth_neg_arrow/route.tsx
     - negative/missing_auth_neg_plain_js.js
