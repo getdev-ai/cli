@@ -124,3 +124,184 @@ pub fn run(args: &BackArgs) -> anyhow::Result<u8> {
     Ok(0)
 }
 
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    fn unique_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "getdev-back-cli-{tag}-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn git_init(dir: &std::path::Path) {
+        let ok = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["init", "--quiet"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        assert!(ok, "git init failed for {}", dir.display());
+    }
+
+    /// Count live `refs/getdev/auto/` refs — the pre-mutation / pre-restore
+    /// safety net. `snap list` is manual-namespace-only, so we shell directly.
+    fn count_auto_refs(dir: &std::path::Path) -> usize {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["for-each-ref", "--format=%(refname)", "refs/getdev/auto/"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "for-each-ref failed");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .count()
+    }
+
+    /// Whether the user's real `HEAD` resolves to a commit — false on a fresh
+    /// `git init` (unborn HEAD). getdev must never create a user commit, so this
+    /// stays false throughout.
+    fn head_resolves(dir: &std::path::Path) -> bool {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["rev-parse", "--verify", "--quiet", "HEAD"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    /// Count of the user's real branches (`refs/heads/`) — getdev never touches
+    /// these, so it stays 0 throughout.
+    fn branch_count(dir: &std::path::Path) -> usize {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["for-each-ref", "--format=%(refname)", "refs/heads/"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .count()
+    }
+
+    /// The phase exit-gate at the CLI level: `snap` → `env --write` (which,
+    /// via 05-05, records a pre-mutation auto-snap) → `back` restores the
+    /// working tree byte-for-byte, takes its own pre-restore auto-snap, and
+    /// never touches the user's branches/HEAD. Hermetic; no network.
+    #[test]
+    fn snap_env_write_back_round_trips_tree() {
+        let dir = unique_dir("roundtrip");
+        git_init(&dir);
+
+        let one_path = dir.join("one.js");
+        let two_path = dir.join("two.js");
+        std::fs::write(&one_path, "const a = \"sk_live_AAAAAAAAAAAAAAAA01\";\n").unwrap();
+        std::fs::write(&two_path, "const b = \"sk_live_BBBBBBBBBBBBBBBB02\";\n").unwrap();
+        let one_orig = std::fs::read(&one_path).unwrap();
+        let two_orig = std::fs::read(&two_path).unwrap();
+
+        // The user's real git state starts pristine (unborn HEAD, no branches).
+        assert!(!head_resolves(&dir), "fresh repo has an unborn HEAD");
+        assert_eq!(branch_count(&dir), 0, "no user branches before");
+
+        let cfg = getdev_core::config::Config::default();
+
+        // snap #1 — a manual checkpoint of the raw (pre-`env`) tree.
+        crate::commands::snap::run(&crate::commands::snap::SnapArgs {
+            path: dir.clone(),
+            json: false,
+            no_color: true,
+            quiet: true,
+            keep: cfg.snap.keep,
+            message: Some("before env".to_owned()),
+            action: None,
+        })
+        .unwrap();
+
+        // env --write: mutates both source files AND records a pre-mutation
+        // auto-snap (05-05).
+        crate::commands::env::run(&crate::commands::env::EnvArgs {
+            path: dir.clone(),
+            json: false,
+            no_color: true,
+            fail_on: None,
+            env_file: ".env".to_owned(),
+            write: true,
+            cfg: cfg.clone(),
+            quiet: true,
+            verbose: 0,
+        })
+        .unwrap();
+
+        let one_after_env = std::fs::read_to_string(&one_path).unwrap();
+        assert!(
+            one_after_env.contains("process.env"),
+            "env --write should rewrite the source, got:\n{one_after_env}"
+        );
+        assert_eq!(
+            count_auto_refs(&dir),
+            1,
+            "env --write records exactly one pre-mutation auto-snap"
+        );
+
+        // back to snap #1 — non-interactive (`quiet: true`) so it auto-proceeds.
+        run(&BackArgs {
+            path: dir.clone(),
+            json: false,
+            no_color: true,
+            quiet: true,
+            keep: cfg.snap.keep,
+            id: Some(1),
+        })
+        .unwrap();
+
+        // Round-trip: both sources are byte-for-byte their pre-`env` content.
+        assert_eq!(
+            std::fs::read(&one_path).unwrap(),
+            one_orig,
+            "one.js must be restored byte-for-byte"
+        );
+        assert_eq!(
+            std::fs::read(&two_path).unwrap(),
+            two_orig,
+            "two.js must be restored byte-for-byte"
+        );
+        // Exact-not-additive (D-05): `.gitignore`, created by `env --write`
+        // (not present in snapshot #1) and itself not ignored, is removed on
+        // restore. The `.env` file is deliberately left untouched — `env
+        // --write` patched `.gitignore` to ignore it, so it left the snapshotted
+        // scope and restore never classifies a gitignored path for removal
+        // (T-05-09).
+        assert!(
+            !dir.join(".gitignore").exists(),
+            "restore removes non-ignored files created since the snapshot"
+        );
+        // A pre-restore auto-snap ref was created (env's #1 + back's pre-restore).
+        assert_eq!(
+            count_auto_refs(&dir),
+            2,
+            "back must take its own pre-restore auto-snap before restoring"
+        );
+
+        // The user's real branches/HEAD are untouched throughout.
+        assert!(!head_resolves(&dir), "getdev never creates a user commit");
+        assert_eq!(branch_count(&dir), 0, "getdev never creates a user branch");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
