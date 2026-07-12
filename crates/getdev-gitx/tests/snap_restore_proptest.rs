@@ -63,6 +63,17 @@ fn write_bytes(dir: &Path, rel: &str, content: &[u8]) {
     std::fs::write(path, content).unwrap();
 }
 
+/// Create (or replace) an in-scope symlink `link` → `target` (Pitfall 6: git
+/// stores symlinks as mode-120000 blobs; restore must reproduce the symlink,
+/// not a dereferenced copy). Unix-only — Windows symlink fidelity is a
+/// documented residual limitation.
+#[cfg(unix)]
+fn write_symlink(dir: &Path, link: &str, target: &str) {
+    let path = dir.join(link);
+    let _ = std::fs::remove_file(&path);
+    std::os::unix::fs::symlink(target, &path).unwrap();
+}
+
 /// A stable fingerprint of a `(path, bytes)` list — the in-scope file set,
 /// already in ascending index order (V6: reuse `sha2`, never hand-roll a hash).
 fn hash_fileset(files: &[(String, Vec<u8>)]) -> String {
@@ -143,6 +154,9 @@ proptest! {
         for (i, content) in ignored_baseline.iter().enumerate() {
             write_bytes(&dir, &format!("ignored/g{i}.bin"), content);
         }
+        // An in-scope symlink in the baseline (Pitfall 6).
+        #[cfg(unix)]
+        write_symlink(&dir, "slink.txt", "f0.txt");
 
         let outcome = snapshot(&dir, Namespace::Snaps, "base", false, 20)
             .map_err(|e| TestCaseError::fail(format!("snapshot failed: {e}")))?;
@@ -164,9 +178,36 @@ proptest! {
         // Gitignored state as it stands AFTER mutation — restore must not touch it.
         let ignored_after_mutation = ignored_state(&dir);
 
+        // Corrupt the in-scope symlink into a regular file post-snapshot; restore
+        // must revert the typechange back to a symlink (exercises checkout-index
+        // symlink materialization, Pitfall 6).
+        #[cfg(unix)]
+        {
+            let _ = std::fs::remove_file(dir.join("slink.txt"));
+            write_bytes(&dir, "slink.txt", b"no longer a symlink");
+        }
+
         // RED until 05-03 implements restore(); GREEN thereafter.
         restore(&dir, outcome.id)
             .map_err(|e| TestCaseError::fail(format!("restore failed: {e}")))?;
+
+        // The symlink must be restored AS a symlink pointing at its target.
+        #[cfg(unix)]
+        {
+            let meta = std::fs::symlink_metadata(dir.join("slink.txt"))
+                .map_err(|e| TestCaseError::fail(format!("slink.txt missing after restore: {e}")))?;
+            prop_assert!(
+                meta.file_type().is_symlink(),
+                "restore must reproduce slink.txt as a symlink, not a dereferenced file"
+            );
+            let target = std::fs::read_link(dir.join("slink.txt"))
+                .map_err(|e| TestCaseError::fail(format!("read_link(slink.txt) failed: {e}")))?;
+            prop_assert_eq!(
+                target,
+                PathBuf::from("f0.txt"),
+                "restored symlink must point at its original target"
+            );
+        }
 
         let expected = hash_fileset(&expected_inscope(&baseline));
         let actual = hash_fileset(&actual_inscope(&dir));

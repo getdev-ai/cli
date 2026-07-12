@@ -13,7 +13,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use getdev_gitx::snap::{snapshot, Namespace};
+use getdev_gitx::snap::{restore, snapshot, Namespace};
 
 fn nanos() -> u128 {
     std::time::SystemTime::now()
@@ -252,6 +252,62 @@ fn retention_budgets_are_independent_per_namespace() {
         ref_count(&dir, "refs/getdev/auto"),
         2,
         "auto namespace should keep exactly 2, independent of snaps"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// D-05 exact-not-additive: a file created AFTER the snapshot, within the
+/// snapshotted scope, is REMOVED on `back` (restore is not merely additive) —
+/// and the removal is reported in the outcome.
+#[test]
+fn created_since_snapshot_is_removed_on_back() {
+    let dir = mixed_repo("created-since");
+    let snap = snapshot(&dir, Namespace::Snaps, "base", false, 20).unwrap();
+
+    // a NEW in-scope (untracked-non-ignored) file created since the snapshot
+    write(&dir, "newfile.txt", "created since the snapshot\n");
+    assert!(
+        dir.join("newfile.txt").exists(),
+        "precondition: file created"
+    );
+
+    let outcome = restore(&dir, snap.id).unwrap();
+
+    assert!(
+        !dir.join("newfile.txt").exists(),
+        "a file created since the snapshot must be removed on back (D-05)"
+    );
+    assert_eq!(
+        outcome.removed, 1,
+        "restore should report exactly the one created-since file removed"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// D-05 / T-05-09: a gitignored path created or modified after the snapshot
+/// keeps its post-mutation content on `back` — restore never reverts or removes
+/// it, because ignored paths never enter a tree and so are never classified.
+#[test]
+fn gitignored_paths_survive_back_untouched() {
+    let dir = tempdir("ignored-survive");
+    // `.gitignore` covering `secret.local` must exist before the snapshot.
+    write(&dir, ".gitignore", "secret.local\n");
+    write(&dir, "tracked.txt", "tracked content\n");
+
+    // snapshot taken with secret.local absent
+    let snap = snapshot(&dir, Namespace::Snaps, "base", false, 20).unwrap();
+
+    // create + populate the gitignored file AFTER the snapshot
+    write(&dir, "secret.local", "sensitive post-snapshot content\n");
+
+    restore(&dir, snap.id).unwrap();
+
+    let content = std::fs::read_to_string(dir.join("secret.local")).unwrap();
+    assert_eq!(
+        content, "sensitive post-snapshot content\n",
+        "a gitignored path must keep its post-mutation content (never reverted or removed)"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
