@@ -35,6 +35,26 @@ pub enum MutateError {
         /// "succeeded" or a description of what could not be restored
         rollback: String,
     },
+    #[error("pre-mutation snapshot failed: {reason} — aborted, nothing written")]
+    AutoSnapFailed { reason: String },
+}
+
+/// A hook invoked by [`apply`] exactly once, before any file is written, iff
+/// the plan contains more than one [`PlannedWrite`] — the "auto-snap before any
+/// multi-file mutation" trigger from docs/ARCHITECTURE.md's mutation
+/// invariants. A single-file plan never fires the hook: it is already covered
+/// by the verify → atomic-write → rollback path. Returning `Err(reason)` aborts
+/// the whole plan before any I/O — nothing is written (fail closed).
+///
+/// The trait is DEFINED here in `getdev-core` (which depends only on
+/// `getdev-grammars`) and IMPLEMENTED in `getdev-cli` with a
+/// `getdev-gitx`-backed auto-snapshot. This puts the auto-snap call genuinely
+/// inside the audited mutation path without adding a `getdev-core →
+/// getdev-gitx` dependency edge (dependency inversion, per RESEARCH Pattern 4).
+pub trait PreMutateHook {
+    /// Called once before a multi-file mutation, with the paths about to be
+    /// written. An `Err(reason)` aborts the plan before any write.
+    fn before_multi_file_write(&self, paths: &[&Path]) -> Result<(), String>;
 }
 
 /// One planned file mutation. `RewriteSource` is reparse-verified; plain
@@ -106,7 +126,10 @@ pub struct Applied {
 
 /// Apply a mutation plan: verify everything in memory, then write atomically,
 /// rolling back on mid-plan failure.
-pub fn apply(writes: Vec<PlannedWrite>) -> Result<Applied, MutateError> {
+pub fn apply(
+    writes: Vec<PlannedWrite>,
+    _hook: Option<&dyn PreMutateHook>,
+) -> Result<Applied, MutateError> {
     // phase 1: verify all rewritten source reparses BEFORE touching disk
     for write in &writes {
         if let PlannedWrite::RewriteSource {
@@ -285,6 +308,149 @@ mod tests {
         dir
     }
 
+    /// An interior-mutable fake [`PreMutateHook`] that records how many times it
+    /// fired, which paths it was handed, and whether any of those paths already
+    /// existed on disk at call time (to prove the hook runs *before* any write).
+    /// Optionally fails with a fixed reason to exercise the fail-closed abort.
+    struct RecordingHook {
+        calls: std::cell::Cell<usize>,
+        captured_paths: std::cell::RefCell<Vec<PathBuf>>,
+        any_existed_at_call: std::cell::Cell<bool>,
+        fail_with: Option<String>,
+    }
+
+    impl RecordingHook {
+        fn new() -> Self {
+            Self {
+                calls: std::cell::Cell::new(0),
+                captured_paths: std::cell::RefCell::new(Vec::new()),
+                any_existed_at_call: std::cell::Cell::new(false),
+                fail_with: None,
+            }
+        }
+
+        fn failing(reason: &str) -> Self {
+            let hook = Self::new();
+            Self {
+                fail_with: Some(reason.to_owned()),
+                ..hook
+            }
+        }
+    }
+
+    impl PreMutateHook for RecordingHook {
+        fn before_multi_file_write(&self, paths: &[&Path]) -> Result<(), String> {
+            self.calls.set(self.calls.get() + 1);
+            if paths.iter().any(|p| p.exists()) {
+                self.any_existed_at_call.set(true);
+            }
+            self.captured_paths
+                .borrow_mut()
+                .extend(paths.iter().map(|p| p.to_path_buf()));
+            match &self.fail_with {
+                Some(reason) => Err(reason.clone()),
+                None => Ok(()),
+            }
+        }
+    }
+
+    /// D-07 multi-file trigger: a plan with more than one `PlannedWrite` fires
+    /// the hook exactly once, before any file exists, with every planned path;
+    /// a single-file plan never fires it.
+    #[test]
+    fn pre_mutate_hook_fires_only_for_multi_file_plans() {
+        let dir = tempdir("hook-multi");
+        let a = dir.join("a.env");
+        let b = dir.join("b.env");
+
+        let hook = RecordingHook::new();
+        apply(
+            vec![
+                PlannedWrite::WriteFile {
+                    path: a.clone(),
+                    original: None,
+                    new_content: "A=1\n".into(),
+                },
+                PlannedWrite::WriteFile {
+                    path: b.clone(),
+                    original: None,
+                    new_content: "B=2\n".into(),
+                },
+            ],
+            Some(&hook),
+        )
+        .unwrap();
+
+        assert_eq!(hook.calls.get(), 1, "multi-file plan fires the hook once");
+        assert!(
+            !hook.any_existed_at_call.get(),
+            "hook must fire before any file is written"
+        );
+        let captured = hook.captured_paths.borrow();
+        assert!(
+            captured.contains(&a) && captured.contains(&b),
+            "hook receives every planned path"
+        );
+        drop(captured);
+        // the plan still wrote both files after the hook returned Ok
+        assert!(a.exists() && b.exists());
+
+        // single-file plan: the hook is never consulted
+        let solo = dir.join("solo.env");
+        let single_hook = RecordingHook::new();
+        apply(
+            vec![PlannedWrite::WriteFile {
+                path: solo.clone(),
+                original: None,
+                new_content: "S=1\n".into(),
+            }],
+            Some(&single_hook),
+        )
+        .unwrap();
+        assert_eq!(
+            single_hook.calls.get(),
+            0,
+            "single-file plan never fires the hook"
+        );
+        assert!(solo.exists());
+    }
+
+    /// T-05-06 fail-closed: a hook that returns `Err` on a multi-file plan
+    /// aborts with `AutoSnapFailed` and leaves nothing on disk.
+    #[test]
+    fn hook_error_aborts_plan_without_writing() {
+        let dir = tempdir("hook-abort");
+        let a = dir.join("a.env");
+        let b = dir.join("b.env");
+
+        let hook = RecordingHook::failing("snapshot refused");
+        let err = apply(
+            vec![
+                PlannedWrite::WriteFile {
+                    path: a.clone(),
+                    original: None,
+                    new_content: "A=1\n".into(),
+                },
+                PlannedWrite::WriteFile {
+                    path: b.clone(),
+                    original: None,
+                    new_content: "B=2\n".into(),
+                },
+            ],
+            Some(&hook),
+        )
+        .unwrap_err();
+
+        match err {
+            MutateError::AutoSnapFailed { reason } => assert_eq!(reason, "snapshot refused"),
+            other => panic!("expected AutoSnapFailed, got {other:?}"),
+        }
+        assert!(
+            !a.exists() && !b.exists(),
+            "hook failure must abort before any write"
+        );
+    }
+
     /// C6 regression: `{:?}` on a `PlannedWrite` must never print raw
     /// `original`/`new_content` — both variants can hold secret values.
     #[test]
@@ -321,7 +487,7 @@ mod tests {
             lang: Lang::JavaScript,
             original: "const k = \"old\";\n".into(),
             new_content: "const k = process.env.K;\n".into(),
-        }])
+        }], None)
         .unwrap();
 
         assert_eq!(applied.files_written.len(), 1);
@@ -353,7 +519,7 @@ mod tests {
                 original: "const k = \"old\";\n".into(),
                 new_content: "const k = process.env.((;\n".into(),
             },
-        ])
+        ], None)
         .unwrap_err();
 
         assert!(matches!(err, MutateError::VerifyFailed { .. }));
@@ -375,7 +541,7 @@ mod tests {
             lang: Lang::Python,
             original: "def oops(:\n".into(),
             new_content: "def oops(:  # still broken\n".into(),
-        }])
+        }], None)
         .unwrap();
     }
 
@@ -396,7 +562,7 @@ mod tests {
             lang: Lang::Python,
             original: "aws_key = \"old\"\n".into(),
             new_content: "aws_key = os.environ[\"AWS_KEY\"]\n".into(),
-        }])
+        }], None)
         .unwrap();
 
         // the link itself is still a symlink, pointing at the same real file
@@ -440,7 +606,7 @@ mod tests {
             lang: Lang::JavaScript,
             original: "const k = \"old\";\n".into(),
             new_content: "const k = process.env.K;\n".into(),
-        }])
+        }], None)
         .unwrap();
 
         // the temp file, had it survived, would have carried this process's
@@ -469,7 +635,7 @@ mod tests {
             path: path.clone(),
             original: None,
             new_content: "STRIPE=sk_live_FAKEFAKEFAKE1234\n".into(),
-        }])
+        }], None)
         .unwrap();
 
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
@@ -487,7 +653,7 @@ mod tests {
             path: path.clone(),
             original: None,
             new_content: ".env\n".into(),
-        }])
+        }], None)
         .unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), ".env\n");
     }

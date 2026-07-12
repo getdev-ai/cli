@@ -441,7 +441,7 @@ pub fn apply(
         });
     }
 
-    mutate::apply(writes)?;
+    mutate::apply(writes, None)?;
 
     Ok(AppliedSummary {
         vars_written,
