@@ -22,8 +22,8 @@ use getdev_core::report::{self, ColorMode};
 use getdev_core::scan;
 use getdev_core::suppress;
 use getdev_registry::{
-    Cache, Datasets, Ecosystem as RegEco, Existence, RegistryClient, RegistryVerdict, Sensitivity,
-    TyposquatHit, TyposquatReason,
+    Cache, Datasets, Ecosystem as RegEco, Existence, RegistryClient, RegistryError,
+    RegistryVerdict, Sensitivity, TyposquatHit, TyposquatReason,
 };
 
 pub struct RealArgs {
@@ -252,23 +252,37 @@ fn run_deps_group(
             } else {
                 Sensitivity::Off
             };
-            let verdict = client
-                .verify_full_with_sensitivity(
-                    &cache,
-                    &datasets,
-                    to_registry_eco(*eco),
-                    name,
-                    name_sensitivity,
-                )
-                .unwrap_or(RegistryVerdict {
-                    existence: Existence::Inconclusive,
-                    downloads: None,
-                    created_at: None,
-                    typosquat: None,
-                });
-            (*eco, name.clone(), verdict)
+            match client.verify_full_with_sensitivity(
+                &cache,
+                &datasets,
+                to_registry_eco(*eco),
+                name,
+                name_sensitivity,
+            ) {
+                Ok(verdict) => Ok((*eco, name.clone(), verdict)),
+                // W4: a genuine infrastructure failure (corrupt registry
+                // cache, failed http-client build) must NOT be swallowed
+                // into a falsely "clean" exit-0 run — that hides a broken
+                // environment and reports trust it hasn't earned. Surface it
+                // as an execution error (docs/PLAN.md §2.2 exit code 2).
+                Err(err) if is_infra_failure(&err) => Err(err),
+                // An offline lookup or a transient network error is
+                // expected-inconclusive — never proof a package is missing
+                // (03-RESEARCH.md Anti-Patterns) — so it resolves to
+                // Inconclusive and the run continues.
+                Err(_) => Ok((
+                    *eco,
+                    name.clone(),
+                    RegistryVerdict {
+                        existence: Existence::Inconclusive,
+                        downloads: None,
+                        created_at: None,
+                        typosquat: None,
+                    },
+                )),
+            }
         })
-        .collect();
+        .collect::<Result<Vec<_>, RegistryError>>()?;
 
     for (eco, name, verdict) in verdicts {
         let import_site = graph.imports.iter().find(|imp| {
@@ -422,6 +436,17 @@ fn run_models_group(
     Ok(skipped)
 }
 
+/// W4: distinguish a genuine infrastructure failure — which must surface as
+/// an execution error, never a falsely "clean" exit-0 — from an
+/// expected/benign inconclusive lookup. A corrupt registry cache
+/// ([`RegistryError::Cache`]) or a failed http-client build
+/// ([`RegistryError::Client`]) is the former; an offline lookup or a
+/// transient network error is the latter (safely mapped to `Inconclusive`,
+/// since a 5xx/timeout is never proof a package does not exist).
+fn is_infra_failure(err: &RegistryError) -> bool {
+    matches!(err, RegistryError::Cache(_) | RegistryError::Client { .. })
+}
+
 fn to_registry_eco(eco: CoreEco) -> RegEco {
     match eco {
         CoreEco::Npm => RegEco::Npm,
@@ -478,4 +503,50 @@ fn display_path(path: &Path) -> String {
 fn relative_display(path: &Path, root: &Path) -> String {
     let rel = path.strip_prefix(root).unwrap_or(path);
     rel.to_string_lossy().replace('\\', "/")
+}
+
+#[cfg(test)]
+mod tests {
+    use getdev_registry::{CacheError, RegistryError};
+
+    use super::is_infra_failure;
+
+    #[test]
+    fn cache_and_client_errors_are_infra_failures_not_silent_clean() {
+        // W4: a corrupt registry cache (or a failed http-client build) is a
+        // genuine infra failure — `is_infra_failure` returns `true`, so the
+        // `?` in `run_deps_group` propagates it as an execution error rather
+        // than swallowing it into a falsely clean exit-0 run.
+        let cache_err = RegistryError::Cache(CacheError::Io {
+            path: std::path::PathBuf::from("/nonexistent/cache"),
+            source: std::io::Error::other("corrupt cache"),
+        });
+        assert!(
+            is_infra_failure(&cache_err),
+            "a cache error must surface, never report clean"
+        );
+
+        let client_err = RegistryError::Client {
+            message: "tls backend failed to initialize".to_owned(),
+        };
+        assert!(is_infra_failure(&client_err));
+    }
+
+    #[test]
+    fn offline_and_transient_network_errors_are_benign_inconclusive() {
+        // These are NOT infra failures — a lookup that couldn't be confirmed
+        // (offline, 5xx, timeout, oversized body) is never proof a package
+        // is missing, so it resolves to Inconclusive and the run continues.
+        let url = || "https://registry.npmjs.org/foo".to_owned();
+        assert!(!is_infra_failure(&RegistryError::Offline { url: url() }));
+        assert!(!is_infra_failure(&RegistryError::Http {
+            url: url(),
+            message: "503".to_owned(),
+        }));
+        assert!(!is_infra_failure(&RegistryError::Exhausted { url: url() }));
+        assert!(!is_infra_failure(&RegistryError::Body {
+            url: url(),
+            limit: 1024,
+        }));
+    }
 }
