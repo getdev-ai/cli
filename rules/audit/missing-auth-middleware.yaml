@@ -1,0 +1,118 @@
+id: audit/missing-auth-middleware
+severity: high
+confidence: medium
+languages: [javascript, typescript, python]
+frameworks: [express, fastapi, flask, nextjs]
+description: >
+  A route handler declared with no auth-looking guard in its immediate
+  syntax: an Express app/router route with a single handler argument and no
+  additional middleware in the call, a FastAPI/Flask route decorator with no
+  second decorator and no extra arguments (no Depends()/dependencies=.../
+  login_required guard), or a Next.js API-route file (selected by
+  path_glob, not AST — pages/api/**, app/api/**/route.*) exporting an
+  HTTP-verb handler. Heuristic: a route WITH an auth middleware/guard has
+  more arguments/decorators than this shape allows, so it does not match.
+message: "Route handler has no visible auth middleware/guard"
+remediation: >
+  Add an auth-checking middleware/guard to this route: an auth middleware
+  function in the Express handler chain, a FastAPI Depends()-based guard, a
+  Flask @login_required (or equivalent) decorator, or an explicit session/
+  token check at the top of the Next.js API-route handler.
+refs:
+  - https://getdev.ai/rules/audit/missing-auth-middleware
+path_glob:
+  - "**/*.js"
+  - "**/*.mjs"
+  - "**/*.cjs"
+  - "**/*.jsx"
+  - "**/*.ts"
+  - "**/*.py"
+  - "**/pages/api/**"
+  - "**/app/api/**/route.{js,ts,jsx,tsx,mjs,cjs}"
+matchers:
+  # Express (JS/TS): app.get("/route", handler) / router.post("/route", handler)
+  # with exactly one (identifier) handler argument — no middleware chained
+  # in front of it.
+  - language: javascript
+    query: |
+      (call_expression
+        function: (member_expression
+          object: (identifier) @app (#any-of? @app "app" "router")
+          property: (property_identifier) @method (#any-of? @method "get" "post" "put" "delete" "patch"))
+        arguments: (arguments . (string) @route . (identifier) @finding .))
+  - language: typescript
+    query: |
+      (call_expression
+        function: (member_expression
+          object: (identifier) @app (#any-of? @app "app" "router")
+          property: (property_identifier) @method (#any-of? @method "get" "post" "put" "delete" "patch"))
+        arguments: (arguments . (string) @route . (identifier) @finding .))
+  # FastAPI / modern-Flask (Python): @app.get("/route") with exactly one
+  # decorator (no stacked auth decorator) and exactly one positional arg
+  # (no dependencies=[Depends(...)] kwarg).
+  - language: python
+    query: |
+      (decorated_definition
+        .
+        (decorator
+          (call
+            function: (attribute
+              object: (identifier) @app (#any-of? @app "app" "router")
+              attribute: (identifier) @method (#any-of? @method "get" "post" "put" "delete" "patch"))
+            arguments: (argument_list . (string) @route .))) @finding
+        .
+        definition: (function_definition))
+  # Classic Flask (Python): @app.route("/route") with exactly one decorator
+  # and exactly one positional arg (no methods=[...]/other kwargs).
+  - language: python
+    query: |
+      (decorated_definition
+        .
+        (decorator
+          (call
+            function: (attribute
+              object: (identifier) @app (#eq? @app "app")
+              attribute: (identifier) @method (#eq? @method "route"))
+            arguments: (argument_list . (string) @route .))) @finding
+        .
+        definition: (function_definition))
+  # Next.js App Router (JS/TS): export async function GET(request) { ... }
+  # under app/api/**/route.* — file selection is path_glob, not AST, so this
+  # query intentionally matches any exported HTTP-verb function.
+  - language: javascript
+    query: |
+      (export_statement
+        declaration: (function_declaration
+          name: (identifier) @fn (#any-of? @fn "GET" "POST" "PUT" "DELETE" "PATCH")
+          parameters: (formal_parameters) @finding))
+  - language: typescript
+    query: |
+      (export_statement
+        declaration: (function_declaration
+          name: (identifier) @fn (#any-of? @fn "GET" "POST" "PUT" "DELETE" "PATCH")
+          parameters: (formal_parameters) @finding))
+  # Next.js Pages Router (JS/TS): a `handler(req, res)` function declaration
+  # under pages/api/** — again, file selection is path_glob, not AST.
+  - language: javascript
+    query: |
+      (function_declaration
+        name: (identifier) @fn (#eq? @fn "handler")
+        parameters: (formal_parameters) @finding)
+  - language: typescript
+    query: |
+      (function_declaration
+        name: (identifier) @fn (#eq? @fn "handler")
+        parameters: (formal_parameters) @finding)
+fixtures:
+  positive:
+    - positive/missing_auth_express_js.js
+    - positive/missing_auth_fastapi_py.py
+    - positive/missing_auth_flask_py.py
+    - positive/pages/api/missing_auth_nextjs_pages.ts
+    - positive/app/api/missing_auth_nextjs_approuter/route.ts
+  negative:
+    - negative/missing_auth_neg_express_js.js
+    - negative/missing_auth_neg_fastapi_py.py
+    - negative/missing_auth_neg_flask_py.py
+    - negative/app/dashboard/page.tsx
+    - negative/missing_auth_neg_plain_js.js
