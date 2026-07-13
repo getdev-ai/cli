@@ -764,9 +764,11 @@ reason = "test fixture key, not a real secret"
         let global = RawConfig::load_global_at(&dir).unwrap();
         // Project sets only channel; it must NOT wipe the global pin/downgrade
         // (presence-based precedence: absent project keys fall through).
-        let project =
-            RawConfig::parse("[update]\nchannel = \"prerelease\"\n", Path::new(".getdev.toml"))
-                .unwrap();
+        let project = RawConfig::parse(
+            "[update]\nchannel = \"prerelease\"\n",
+            Path::new(".getdev.toml"),
+        )
+        .unwrap();
         let merged = Config::merge(project, global);
         assert_eq!(merged.update.channel, "prerelease");
         assert_eq!(merged.update.pin.as_deref(), Some("0.1.0"));
