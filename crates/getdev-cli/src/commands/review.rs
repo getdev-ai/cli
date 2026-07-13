@@ -45,14 +45,24 @@ pub struct ReviewArgs {
 }
 
 pub fn run(args: &ReviewArgs) -> anyhow::Result<u8> {
-    let (mut findings, review_skipped) = review::run(
-        &args.path,
-        &args.scope,
-        &ReviewOptions {
-            severity_min: args.severity_min,
-        },
-    )?;
-    let skip_errors = review_skipped;
+    let opts = ReviewOptions {
+        severity_min: args.severity_min,
+    };
+    // Parse-once for the `--all` scope (the one `check` reuses): build ONE
+    // shared ScanContext (walk + parse) and pass it in — there is exactly one
+    // walk/parse code path (07-02). `ctx.skipped` carries the oversized/
+    // unreadable source files the shared scan pass folded aside. The diff-
+    // scoped paths (`--against`/`--staged`/default) parse only their specific
+    // changed files, so they keep their own targeted path.
+    let (mut findings, skip_errors) = match &args.scope {
+        ReviewScope::All => {
+            let ctx = getdev_core::scan::ScanContext::build(&args.path)?;
+            let (findings, mut skipped) = review::run_all(&ctx, &opts)?;
+            skipped.extend(ctx.skipped);
+            (findings, skipped)
+        }
+        scope => review::run(&args.path, scope, &opts)?,
+    };
 
     // Config `[ignore]`/`[[suppress]]` flows through the same
     // `suppress::filter_findings` path used by `audit` — one filtering
