@@ -110,21 +110,6 @@ pub enum UpdateError {
     /// maps the platform specifics; the original binary is left in place.
     #[error("atomic binary swap failed: {0}")]
     Swap(String),
-
-    /// Windows `.zip` self-update extraction is not yet wired (deferred to
-    /// 08-08's 3-OS smoke). The verify-then-swap core is proven on Unix;
-    /// Windows users reinstall via the installer/scoop until then. Fails
-    /// closed — the gates still run, but the swap never happens partially.
-    ///
-    /// Constructed only under `#[cfg(windows)]` (`swap::apply_update`), so on a
-    /// unix build it is never built — the targeted allow keeps that
-    /// platform-conditional variant from tripping `dead_code`.
-    #[allow(dead_code)]
-    #[error(
-        "windows self-update archive handling is not yet available \
-         — reinstall via the installer/scoop (tracked for 08-08)"
-    )]
-    WindowsArchiveUnsupported,
 }
 
 /// Verify a detached keyed-cosign signature over a manifest.

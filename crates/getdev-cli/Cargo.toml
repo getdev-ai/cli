@@ -57,7 +57,21 @@ thiserror = { workspace = true }
 assert_cmd = "2.2.2"
 insta = { version = "1.48.0", features = ["json"] }
 serde_json = { workspace = true }
+# The Windows `.zip` extractor lives behind `cfg(windows)` for the shipped
+# binary, but its extraction logic is exercised hermetically on the dev host
+# (unix/macOS) too — so `zip` is also a dev-dependency here, keeping the test
+# runnable on every platform. Same minimal pure-Rust deflate config as below.
+zip = { version = "2.4", default-features = false, features = ["deflate"] }
 
 [target."cfg(unix)".dependencies]
 lzma-rs = "0.3"
 tar = "0.4"
+
+# Windows ships a `.zip` release archive (Unix ships `.tar.xz`). Pure-Rust
+# deflate only (flate2 with the rust_backend/miniz_oxide inflater; zopfli is a
+# pure-Rust compress-only sidecar) — NO C toolchain, NO bzip2/zstd/aes/lzma — to
+# preserve determinism and keep `cargo deny` green (mirrors the cfg(unix)
+# lzma-rs/tar confinement 08-04 established). This tree is Windows-only, so the
+# Unix binary never carries it.
+[target."cfg(windows)".dependencies]
+zip = { version = "2.4", default-features = false, features = ["deflate"] }
