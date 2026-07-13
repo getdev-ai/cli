@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 
 use owo_colors::OwoColorize;
 
-use crate::findings::{Confidence, Finding, FindingsReport, Severity};
+use crate::findings::{Confidence, Finding, FindingsReport, Severity, Summary};
 
 /// Whether terminal output should use ANSI colors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,13 +36,63 @@ pub fn render_json(report: &FindingsReport) -> Result<String, serde_json::Error>
     Ok(out)
 }
 
+/// The per-severity Ship Score deduction weights, worst-first — the SINGLE
+/// versioned source of the scoring table (docs/SPEC-COMMANDS.md `check`:
+/// "weights live in one versioned source file and are printed with `-v`").
+/// Each value is [`Severity::ship_score_weight`], so the formula is never
+/// duplicated: [`ship_score`] applies it and [`render_ship_score_weights`]
+/// prints it. `Info` is intentionally excluded (weight 0 — info never dents
+/// the score).
+pub const SHIP_SCORE_WEIGHTS: [(Severity, i32); 4] = [
+    (Severity::Critical, Severity::Critical.ship_score_weight()),
+    (Severity::High, Severity::High.ship_score_weight()),
+    (Severity::Medium, Severity::Medium.ship_score_weight()),
+    (Severity::Low, Severity::Low.ship_score_weight()),
+];
+
+/// Compute the Ship Score (docs/SPEC-COMMANDS.md `check`): start at 100 and
+/// subtract each finding's [`Severity::ship_score_weight`], floored at 0. The
+/// per-severity weights are the single versioned source
+/// ([`SHIP_SCORE_WEIGHTS`]); this is the ONLY place the formula is evaluated.
+/// `check` is the only command that ever sets `FindingsReport.score`.
+pub fn ship_score(summary: &Summary) -> u8 {
+    let deduction = summary.critical as i32 * Severity::Critical.ship_score_weight()
+        + summary.high as i32 * Severity::High.ship_score_weight()
+        + summary.medium as i32 * Severity::Medium.ship_score_weight()
+        + summary.low as i32 * Severity::Low.ship_score_weight();
+    (100 - deduction).clamp(0, 100) as u8
+}
+
+/// Render the versioned Ship Score weight table for `check -v`, so the CLI
+/// never inlines the weights (they stay single-sourced in `getdev-core`).
+pub fn render_ship_score_weights() -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "ship score weights (start 100, floor 0):");
+    for (severity, weight) in SHIP_SCORE_WEIGHTS {
+        let _ = writeln!(out, "  {:<8} -{weight}", severity.as_str());
+    }
+    out
+}
+
 /// Human terminal output: findings grouped by severity (worst first), each
 /// with location, message, and the most actionable next step.
 pub fn render_terminal(report: &FindingsReport, color: ColorMode) -> String {
     let mut out = String::new();
 
+    // `check` is the only command that sets `score` (docs/SPEC-COMMANDS.md):
+    // when present, lead with the normative Ship Score banner instead of the
+    // trailing summary line. Every other command leaves `score = None` and the
+    // renderer behaves exactly as before.
+    if let Some(score) = report.score {
+        render_score_banner(&mut out, &report.summary, score);
+    }
+
     if report.findings.is_empty() {
-        let _ = writeln!(out, "no findings — clean");
+        // The banner already conveys a clean run (Ship Score 100/100 · all
+        // zeros) for `check`; only the non-check path prints the plain line.
+        if report.score.is_none() {
+            let _ = writeln!(out, "no findings — clean");
+        }
         return out;
     }
 
@@ -60,19 +110,79 @@ pub fn render_terminal(report: &FindingsReport, color: ColorMode) -> String {
         }
     }
 
-    let s = &report.summary;
-    let _ = writeln!(
-        out,
-        "{} finding(s): {} critical · {} high · {} medium · {} low · {} info ({} fixable)",
-        s.total(),
-        s.critical,
-        s.high,
-        s.medium,
-        s.low,
-        s.info,
-        s.fixable
-    );
+    if report.score.is_some() {
+        render_top_three(&mut out, &report.findings);
+        let fixable = report.summary.fixable;
+        if fixable > 0 {
+            let _ = writeln!(
+                out,
+                "{fixable} finding(s) fixable — run: getdev env --write"
+            );
+        }
+    } else {
+        let s = &report.summary;
+        let _ = writeln!(
+            out,
+            "{} finding(s): {} critical · {} high · {} medium · {} low · {} info ({} fixable)",
+            s.total(),
+            s.critical,
+            s.high,
+            s.medium,
+            s.low,
+            s.info,
+            s.fixable
+        );
+    }
     out
+}
+
+/// Visible inner width of the Ship Score banner box (columns between the
+/// vertical borders). Sized to fit the normative golden-block content line
+/// `  N critical · N high · N medium · N low` with breathing room.
+const BANNER_INNER_WIDTH: usize = 46;
+
+/// The normative Ship Score banner (docs/SPEC-COMMANDS.md `check` golden
+/// block): a box-drawn header carrying the `NN/100` score and the
+/// `N critical · N high · N medium · N low` tally. Deterministic string
+/// output — no color-dependent content (the box is identical whether ANSI is
+/// on or off).
+fn render_score_banner(out: &mut String, summary: &Summary, score: u8) {
+    let title = "─ getdev check ";
+    let title_cols = title.chars().count();
+    let fill = BANNER_INNER_WIDTH.saturating_sub(title_cols);
+    let _ = writeln!(out, "┌{title}{}┐", "─".repeat(fill));
+    let score_line = format!("  Ship Score: {score}/100");
+    let _ = writeln!(out, "│{score_line:<BANNER_INNER_WIDTH$}│");
+    let counts = format!(
+        "  {} critical · {} high · {} medium · {} low",
+        summary.critical, summary.high, summary.medium, summary.low
+    );
+    let _ = writeln!(out, "│{counts:<BANNER_INNER_WIDTH$}│");
+    let _ = writeln!(out, "└{}┘", "─".repeat(BANNER_INNER_WIDTH));
+}
+
+/// "top 3 things to fix first" (docs/SPEC-COMMANDS.md `check`): the three
+/// highest-severity findings. `findings` is already sorted worst-first by
+/// [`FindingsReport::new`], so the slice head IS that ordering — deterministic
+/// with no re-sort.
+fn render_top_three(out: &mut String, findings: &[Finding]) {
+    if findings.is_empty() {
+        return;
+    }
+    let _ = writeln!(out, "\ntop 3 things to fix first:");
+    for (n, finding) in findings.iter().take(3).enumerate() {
+        let location = match finding.line {
+            Some(line) => format!("{}:{line}", finding.file),
+            None => finding.file.clone(),
+        };
+        let _ = writeln!(
+            out,
+            "  {}. {} {location} — {}",
+            n + 1,
+            finding.id,
+            finding.message
+        );
+    }
 }
 
 fn render_finding(out: &mut String, finding: &Finding, color: ColorMode) {
@@ -269,5 +379,96 @@ mod tests {
         assert!(out.contains("no findings"));
         let empty = Summary::default();
         assert_eq!(empty.total(), 0);
+    }
+
+    fn summary(critical: usize, high: usize, medium: usize, low: usize) -> Summary {
+        Summary {
+            critical,
+            high,
+            medium,
+            low,
+            info: 0,
+            fixable: 0,
+        }
+    }
+
+    /// The Ship Score formula is the single normative source
+    /// (docs/SPEC-COMMANDS.md `check`: critical −25, high −10, medium −4,
+    /// low −1; floor 0). Assert it exactly against several tallies, including
+    /// the SPEC golden block's own tally.
+    #[test]
+    fn ship_score_applies_the_versioned_formula() {
+        // clean project → perfect score
+        assert_eq!(ship_score(&summary(0, 0, 0, 0)), 100);
+        // one of each weighted severity: 100 − (25+10+4+1) = 60
+        assert_eq!(ship_score(&summary(1, 1, 1, 1)), 60);
+        // mid-range: 100 − (25+2·10+3·1) = 100 − 48 = 52
+        assert_eq!(ship_score(&summary(1, 2, 0, 3)), 52);
+        // the SPEC golden block's tally (2 critical · 3 high · 5 medium ·
+        // 4 low): deduction = 50+30+20+4 = 104, floored to 0. (The SPEC's
+        // banner illustration prints "43/100" for these counts, which is
+        // arithmetically inconsistent with the same SPEC's stated weights;
+        // the formula — the normative rule per docs/SPEC-FINDINGS.md
+        // invariant 5 — governs, and it floors here.)
+        assert_eq!(ship_score(&summary(2, 3, 5, 4)), 0);
+        // info never dents the score
+        let mut only_info = summary(0, 0, 0, 0);
+        only_info.info = 9;
+        assert_eq!(ship_score(&only_info), 100);
+    }
+
+    /// The weight table is single-sourced: each entry equals the corresponding
+    /// `Severity::ship_score_weight`, and `-v` prints them.
+    #[test]
+    fn ship_score_weights_are_single_sourced_and_printable() {
+        assert_eq!(
+            SHIP_SCORE_WEIGHTS,
+            [
+                (Severity::Critical, 25),
+                (Severity::High, 10),
+                (Severity::Medium, 4),
+                (Severity::Low, 1),
+            ]
+        );
+        for (severity, weight) in SHIP_SCORE_WEIGHTS {
+            assert_eq!(severity.ship_score_weight(), weight);
+        }
+        let printed = render_ship_score_weights();
+        assert!(printed.contains("critical -25"));
+        assert!(printed.contains("low      -1"));
+    }
+
+    /// When a score is present (`check`), the terminal renderer leads with the
+    /// normative box-drawn banner and closes with "top 3 things to fix first"
+    /// plus the fixable hint — none of which appear for the plain (score-less)
+    /// path.
+    #[test]
+    fn score_present_renders_ship_banner_and_top_three() {
+        let mut rep = report(vec![
+            finding(Severity::Critical, Confidence::High),
+            finding(Severity::Low, Confidence::High),
+        ]);
+        rep.score = Some(ship_score(&rep.summary));
+        let out = render_terminal(&rep, ColorMode::Off);
+        assert!(out.contains("┌─ getdev check "));
+        assert!(out.contains("Ship Score: "));
+        assert!(out.contains("1 critical · 0 high · 0 medium · 1 low"));
+        assert!(out.contains("top 3 things to fix first:"));
+        // the box borders are balanced
+        assert!(out.contains('└') && out.contains('┐'));
+        // and the plain summary line is NOT emitted in score mode
+        assert!(!out.contains("finding(s): 1 critical"));
+    }
+
+    /// A clean `check` run still shows the banner (100/100) rather than the
+    /// bare "no findings" line.
+    #[test]
+    fn score_present_clean_shows_full_banner() {
+        let mut rep = report(vec![]);
+        rep.score = Some(ship_score(&rep.summary));
+        let out = render_terminal(&rep, ColorMode::Off);
+        assert!(out.contains("Ship Score: 100/100"));
+        assert!(out.contains("0 critical · 0 high · 0 medium · 0 low"));
+        assert!(!out.contains("no findings"));
     }
 }

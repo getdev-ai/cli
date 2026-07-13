@@ -40,6 +40,24 @@ impl Severity {
             Self::Info => "info",
         }
     }
+
+    /// Ship Score deduction weight (docs/SPEC-FINDINGS.md invariant 5 /
+    /// docs/SPEC-COMMANDS.md `check`): the SINGLE versioned source of the
+    /// per-severity penalty subtracted from 100. `check` is the only consumer
+    /// (via [`crate::report::ship_score`]); `check -v` prints these weights.
+    /// Kept a `const fn` so the weight table
+    /// ([`crate::report::SHIP_SCORE_WEIGHTS`]) is itself a compile-time const —
+    /// the formula lives in exactly one place, never inlined into the CLI
+    /// (CLAUDE.md rule 7: rules/weights are data, not scattered constants).
+    pub const fn ship_score_weight(self) -> i32 {
+        match self {
+            Self::Critical => 25,
+            Self::High => 10,
+            Self::Medium => 4,
+            Self::Low => 1,
+            Self::Info => 0,
+        }
+    }
 }
 
 impl fmt::Display for Severity {
