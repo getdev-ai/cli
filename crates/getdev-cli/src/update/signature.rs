@@ -33,12 +33,29 @@ use sha2::{Digest, Sha256};
 /// meaningful and adding no fourth network destination beyond
 /// npm/PyPI/GitHub-Releases.
 ///
-/// PLACEHOLDER — replaced with the real release public key in 08-08. Nothing
-/// verifies against this yet; the 08-01 tests use the committed test vector's
-/// `cosign.pub`, never this const.
+/// ┌─────────────────────────────────────────────────────────────────────────┐
+/// │ PASTE-HERE: the single embed location for the release signing public key. │
+/// └─────────────────────────────────────────────────────────────────────────┘
+///
+/// This is the release signing key — the PUBLIC half whose PRIVATE half is the
+/// `COSIGN_PRIVATE_KEY` GitHub secret the release workflow signs `SHA256SUMS`
+/// with (docs/RELEASING.md). A mismatch makes every self-update fail closed.
+///
+/// **To embed the real key at launch (one step):** generate the pair with
+/// `cosign generate-key-pair`, then replace the ENTIRE string literal below
+/// with the verbatim contents of `cosign.pub` (the full
+/// `-----BEGIN PUBLIC KEY----- … -----END PUBLIC KEY-----` block). Change
+/// nothing else. The `embedded_pubkey_is_the_placeholder_or_parses` test then
+/// flips from a no-op to enforcing that the pasted PEM parses as an SPKI
+/// ECDSA-P256 key, so a malformed paste fails CI instead of shipping an
+/// updater that can never verify a genuine release.
+///
+/// Until then this is a documented PLACEHOLDER: nothing verifies against it yet
+/// (the 08-01 tests use the committed test vector's `cosign.pub`, never this
+/// const), and the placeholder sentinel keeps the parse test green pre-launch.
 pub const EMBEDDED_COSIGN_PUBKEY: &str = "\
 -----BEGIN PUBLIC KEY-----
-PLACEHOLDER-REPLACED-WITH-THE-REAL-RELEASE-PUBLIC-KEY-IN-08-08==
+PLACEHOLDER-REPLACED-WITH-THE-REAL-RELEASE-PUBLIC-KEY-AT-LAUNCH==
 -----END PUBLIC KEY-----
 ";
 
@@ -238,6 +255,25 @@ mod tests {
         assert_eq!(
             verify_detached(MANIFEST, SIGNATURE, &wrong_pem),
             Err(UpdateError::SignatureMismatch)
+        );
+    }
+
+    /// The embedded release public key must either be the documented
+    /// pre-launch placeholder OR a genuinely parseable SPKI ECDSA-P256 key.
+    /// This is a no-op while the placeholder sentinel is present; the instant
+    /// the real `cosign.pub` is pasted in (removing the sentinel), it enforces
+    /// that the pasted PEM actually parses — so a malformed paste fails CI
+    /// rather than shipping an updater that can never verify a real release
+    /// (T-08-25). It never asserts the placeholder itself parses.
+    #[test]
+    fn embedded_pubkey_is_the_placeholder_or_parses() {
+        if EMBEDDED_COSIGN_PUBKEY.contains("PLACEHOLDER") {
+            return; // pre-launch placeholder — the real key is pasted at launch
+        }
+        assert!(
+            VerifyingKey::from_public_key_pem(EMBEDDED_COSIGN_PUBKEY).is_ok(),
+            "EMBEDDED_COSIGN_PUBKEY must be a valid SPKI-PEM ECDSA-P256 public key \
+             (paste the verbatim cosign.pub contents)"
         );
     }
 
