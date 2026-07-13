@@ -19,3 +19,9 @@ pub mod rules;
 pub mod scan;
 pub mod secrets;
 pub mod suppress;
+
+/// The parse-once shared context (walk once, parse once, analyzers as
+/// read-only visitors) and its per-file cache — re-exported at the crate root
+/// so CLI + sibling modules can name them directly as the `check` analyzers
+/// (07-02/07-03) start consuming them.
+pub use scan::{ScanContext, ScannedFile};

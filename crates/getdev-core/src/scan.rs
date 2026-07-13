@@ -383,6 +383,140 @@ pub fn collect_string_assignments(
     Ok((results, skipped))
 }
 
+/// Project-relative display path with forward slashes — the same convention
+/// as `audit`/`env`/`apisurface`'s own `relative_display`. Copied locally
+/// rather than imported because each of those is crate-private to its own
+/// module; keeping the one-liner here avoids widening any of their scopes.
+fn relative_display(path: &Path, root: &Path) -> String {
+    let rel = path.strip_prefix(root).unwrap_or(path);
+    rel.to_string_lossy().replace('\\', "/")
+}
+
+/// A single project source file, walked and parsed EXACTLY ONCE by
+/// [`ScanContext::build`], caching everything a downstream read-only analyzer
+/// needs to run a tree-sitter query without a second parse (CLAUDE.md rule 5):
+/// its project-relative path, absolute path, language, source text, and parsed
+/// `Tree`.
+///
+/// `source` may contain secrets (this type flows every scanned file, including
+/// ones `env::classify` later flags), so `Debug` is hand-rolled to redact it —
+/// a derived `Debug` would print the raw file contents (CLAUDE.md rule 4,
+/// mirrors [`StringAssignment`]'s redaction).
+pub struct ScannedFile {
+    /// project-relative display path (forward slashes), same convention as
+    /// `audit::relative_display`
+    pub rel: PathBuf,
+    /// absolute on-disk path, as yielded by the walker
+    pub abs: PathBuf,
+    pub lang: Lang,
+    /// full file contents (already size-capped by [`read_source_capped`])
+    pub source: String,
+    /// the one-and-only parse of this file for this invocation
+    pub tree: getdev_grammars::tree_sitter::Tree,
+}
+
+impl fmt::Debug for ScannedFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ScannedFile")
+            .field("rel", &self.rel)
+            .field("abs", &self.abs)
+            .field("lang", &self.lang)
+            .field("source", &"«redacted»")
+            .field("tree", &self.tree)
+            .finish()
+    }
+}
+
+/// A parse-once shared context: walks the project tree EXACTLY ONCE (via the
+/// same [`project_walker`] every analyzer uses today) and parses every
+/// eligible JS/TS/TSX/Python source file EXACTLY ONCE, caching the result in
+/// [`ScannedFile`]s. This is the single walk/parse code path the `check`
+/// analyzers consume as read-only visitors — the difference between one shared
+/// scan pass and the 4-5× redundant walk+parse a naive aggregate would incur
+/// (Phase 7 Success Criterion 1; docs/PLAN.md "Full ScanContext sharing").
+///
+/// Skip-not-fail: an unreadable/oversized/unparseable single file is collected
+/// into [`Self::skipped`] with the SAME [`ScanError`] variant the standalone
+/// collectors produce — it never aborts the build. Only a fatal engine
+/// condition (grammar/query mismatch — a programming bug) returns `Err`, byte
+/// for byte the same policy as [`scan_path`]/[`collect_string_assignments`].
+#[derive(Debug)]
+pub struct ScanContext {
+    pub root: PathBuf,
+    pub files: Vec<ScannedFile>,
+    pub skipped: Vec<ScanError>,
+}
+
+impl ScanContext {
+    /// Walk `root` once and parse every eligible source file once. See the
+    /// type docs for the skip-vs-fail contract.
+    ///
+    /// # Errors
+    /// Returns a [`ScanError::Grammar`]/[`ScanError::Query`] only for a fatal
+    /// engine condition (grammar version mismatch / malformed built-in query);
+    /// a per-file read/parse failure is folded into [`Self::skipped`] instead.
+    pub fn build(root: &Path) -> Result<Self, ScanError> {
+        let mut files = Vec::new();
+        let mut skipped = Vec::new();
+
+        // Same walker, same eligibility gate, same read/parse idiom as
+        // `scan_path`/`audit::run` — absorbed here ONCE so no analyzer repeats
+        // it and the file set can never silently drift between them (Pitfall 1).
+        for_each_source_file(root, |path, lang| {
+            match parse_source_file(path, lang) {
+                Ok((source, tree)) => files.push(ScannedFile {
+                    rel: PathBuf::from(relative_display(path, root)),
+                    abs: path.to_path_buf(),
+                    lang,
+                    source,
+                    tree,
+                }),
+                // grammar/query errors are programming bugs — fail loudly;
+                // per-file read/parse trouble is expected in the wild — skip.
+                Err(err @ (ScanError::Grammar(_) | ScanError::Query(_))) => return Err(err),
+                Err(err) => skipped.push(err),
+            }
+            Ok(())
+        })?;
+
+        Ok(Self {
+            root: root.to_path_buf(),
+            files,
+            skipped,
+        })
+    }
+}
+
+/// Read + parse one eligible source file into `(source, Tree)`, using the same
+/// capped reader and per-language parser setup as [`scan_file`] /
+/// [`assignments_in_file`] / `audit::process_lang_file`. Every fallible step
+/// maps to the existing [`ScanError`] variant so the caller can fold it into a
+/// skip list unchanged.
+fn parse_source_file(
+    path: &Path,
+    lang: Lang,
+) -> Result<(String, getdev_grammars::tree_sitter::Tree), ScanError> {
+    let source = read_source_capped(path)?;
+    let language = lang.language();
+    let mut parser = Parser::new();
+    parser.set_language(&language)?;
+    let tree = parser
+        .parse(&source, None)
+        .ok_or_else(|| ScanError::Parse {
+            path: path.to_path_buf(),
+        })?;
+    Ok((source, tree))
+}
+
+/// Compile-time proof that `tree_sitter::Tree` is `Send`. `check` runs its
+/// analyzers sequentially over one `&ScanContext` (no threading is introduced
+/// this phase), but any future cross-thread reuse of a cached `Tree` depends on
+/// this property — so it is pinned at build time here, before it can ever be
+/// relied on. If the grammar crate's `Tree` were ever not `Send`, the whole
+/// crate fails to compile rather than miscompiling a later parallel consumer.
+const fn assert_send<T: Send>() {}
+const _: () = assert_send::<getdev_grammars::tree_sitter::Tree>();
+
 /// Parse `path` and extract its string assignments. This is a convenience
 /// wrapper that owns its own `Parser::parse` — do NOT call it on a hot path
 /// where the same file has already been parsed (e.g. alongside
