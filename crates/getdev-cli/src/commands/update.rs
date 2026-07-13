@@ -73,10 +73,16 @@ fn human_line(outcome: &UpdateOutcome, color: ColorMode) -> String {
             marker("skipped", color, Tone::Dim)
         ),
         UpdateOutcome::UpToDate { version } => {
-            format!("{} (getdev {version})", marker("up to date", color, Tone::Ok))
+            format!(
+                "{} (getdev {version})",
+                marker("up to date", color, Tone::Ok)
+            )
         }
         UpdateOutcome::Updated { from, to } => {
-            format!("{} getdev {from} -> {to}", marker("updated", color, Tone::Ok))
+            format!(
+                "{} getdev {from} -> {to}",
+                marker("updated", color, Tone::Ok)
+            )
         }
     }
 }
@@ -86,9 +92,7 @@ fn human_line(outcome: &UpdateOutcome, color: ColorMode) -> String {
 /// it is restarted).
 fn hint_line(outcome: &UpdateOutcome) -> Option<String> {
     match outcome {
-        UpdateOutcome::Updated { to, .. } => {
-            Some(format!("restart getdev to run {to}"))
-        }
+        UpdateOutcome::Updated { to, .. } => Some(format!("restart getdev to run {to}")),
         UpdateOutcome::Skipped | UpdateOutcome::UpToDate { .. } => None,
     }
 }
