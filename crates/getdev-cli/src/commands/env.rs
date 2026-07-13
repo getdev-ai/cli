@@ -30,6 +30,10 @@ pub struct EnvArgs {
 pub fn run(args: &EnvArgs) -> anyhow::Result<u8> {
     let options = EnvOptions {
         env_file: args.env_file.clone(),
+        // include_urls stays at its default (false) here — the `--include-urls`
+        // flag / `[env] include_urls` resolution into this field is wired in
+        // 08-05 (which owns the CLI surface + removes main.rs's stub warning).
+        ..Default::default()
     };
     let mut plan = env::plan(&args.path, &options)?;
     let mut findings = env::findings(&plan, &options);

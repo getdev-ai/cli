@@ -1115,6 +1115,95 @@ mod tests {
         dir
     }
 
+    /// Count planned entries produced by the URL/DSN classifier (provider
+    /// `url`) — distinct from secret-pattern / entropy entries.
+    fn plan_url_entries(fixture: &str, include_urls: bool) -> EnvPlan {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testdata/fixtures/env/urls")
+            .join(fixture);
+        let dir = fresh_dir(&format!("urls-{}", fixture.replace('.', "_")));
+        std::fs::copy(&src, dir.join(fixture))
+            .unwrap_or_else(|e| panic!("fixture {} missing: {e}", src.display()));
+        let opts = EnvOptions {
+            include_urls,
+            ..Default::default()
+        };
+        let plan = plan(&dir, &opts).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        plan
+    }
+
+    fn url_entry_count(plan: &EnvPlan) -> usize {
+        plan.entries
+            .iter()
+            .filter(|e| e.secret.provider == "url")
+            .count()
+    }
+
+    /// Table-driven fixture gate: every positive fires EXACTLY once under
+    /// `include_urls=true` and is SILENT under `include_urls=false` (the gate
+    /// works both ways); every negative stays silent under both settings.
+    #[test]
+    fn url_fixtures_fire_only_when_gate_is_on() {
+        const POSITIVES: &[&str] = &[
+            "positive_http_url.js",
+            "positive_postgres_dsn.py",
+            "positive_redis_dsn.js",
+        ];
+        const NEGATIVES: &[&str] = &[
+            "negative_relative_path.js",
+            "negative_localhost_comment.py",
+            "negative_import_specifier.ts",
+        ];
+
+        for fixture in POSITIVES {
+            let on = plan_url_entries(fixture, true);
+            assert_eq!(
+                url_entry_count(&on),
+                1,
+                "positive {fixture} must produce exactly one URL entry when the gate is on"
+            );
+            let off = plan_url_entries(fixture, false);
+            assert_eq!(
+                url_entry_count(&off),
+                0,
+                "positive {fixture} must be silent when the gate is off"
+            );
+        }
+
+        for fixture in NEGATIVES {
+            for gate in [true, false] {
+                let plan = plan_url_entries(fixture, gate);
+                assert_eq!(
+                    url_entry_count(&plan),
+                    0,
+                    "negative {fixture} must stay silent (include_urls={gate})"
+                );
+            }
+        }
+    }
+
+    /// T-08-04 via fixture: the credentialed-DSN positive proves the raw
+    /// credential never reaches any finding field — only the masked preview.
+    #[test]
+    fn credentialed_dsn_fixture_never_leaks_credential() {
+        let plan = plan_url_entries("positive_postgres_dsn.py", true);
+        let opts = EnvOptions {
+            include_urls: true,
+            ..Default::default()
+        };
+        let findings = findings(&plan, &opts);
+        let json = serde_json::to_string(&findings).unwrap();
+        assert!(
+            !json.contains("s3cr3tPw0rd"),
+            "raw DSN credential leaked into findings: {json}"
+        );
+        assert!(
+            json.contains("postgres://appuser:…@db.internal:5432/app"),
+            "masked DSN preview missing: {json}"
+        );
+    }
+
     #[test]
     fn plan_end_to_end_on_temp_project() {
         let dir = std::env::temp_dir().join(format!("getdev-env-{}", std::process::id()));
