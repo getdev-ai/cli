@@ -16,7 +16,7 @@ mod manifest_py;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::scan::{project_walker, Lang, ScanError};
+use crate::scan::{project_walker, Lang, ScanContext, ScanError};
 
 pub use manifest_js::declared_npm;
 pub use manifest_py::{declared_pypi, normalize_pep503};
@@ -226,6 +226,31 @@ const OTHER_LANG_EXTENSIONS: &[(&str, &str)] = &[
 /// while reading a manifest that the walker already found on disk (e.g.
 /// permission denied) is still fatal (`DepsError::Read`).
 pub fn build_graph(root: &Path) -> Result<(DependencyGraph, Vec<ScanError>), DepsError> {
+    // Standalone entry: walk + parse the project ONCE into a `ScanContext`, then
+    // delegate. This owns the context, so it surfaces the context's own source
+    // read/parse skips (a shared-context caller — `check`, 07-04 — surfaces
+    // `ctx.skipped` itself and must not double-count, so
+    // `build_graph_with_context` returns only manifest skips).
+    let ctx = ScanContext::build(root)?;
+    let (graph, mut skipped) = build_graph_with_context(&ctx, root)?;
+    skipped.extend(ctx.skipped);
+    Ok((graph, skipped))
+}
+
+/// [`build_graph`] over a caller-provided parse-once [`ScanContext`] — the path
+/// `check` (07-04) uses so the AST-import collection reuses check's single
+/// shared scan instead of walking + parsing the project a second time
+/// (CLAUDE.md rule 5 / Phase 7 Success Criterion 1). Only the AST-import half is
+/// context-fed; the manifest half (declared packages from
+/// package.json/requirements.txt/pyproject/lockfiles) reads those files
+/// directly and takes no context — it does not use tree-sitter. The returned
+/// skip list carries only the manifest parse skips this incurs; the context's
+/// own source read/parse skips live in [`ScanContext::skipped`], surfaced by
+/// the context's owner.
+pub fn build_graph_with_context(
+    ctx: &ScanContext,
+    root: &Path,
+) -> Result<(DependencyGraph, Vec<ScanError>), DepsError> {
     let (declared_npm_set, direct_npm_set, npm_skipped) = manifest_js::declared_npm(root)?;
     let (declared_pypi_set, direct_pypi_set, pypi_skipped) = manifest_py::declared_pypi(root)?;
 
@@ -233,10 +258,9 @@ pub fn build_graph(root: &Path) -> Result<(DependencyGraph, Vec<ScanError>), Dep
     let python_stdlib = imports_py::python_stdlib()?;
     let python_import_aliases = imports_py::python_import_aliases()?;
 
-    let (js_raw, mut skipped) = imports_js::collect_imports(root)?;
-    let (py_raw, py_skipped) = imports_py::collect_imports(root)?;
-    skipped.extend(py_skipped);
-    skipped.extend(npm_skipped);
+    let js_raw = imports_js::collect_imports(ctx);
+    let py_raw = imports_py::collect_imports(ctx);
+    let mut skipped = npm_skipped;
     skipped.extend(pypi_skipped);
 
     let locals = local_module_names(root);
@@ -438,21 +462,25 @@ fn local_module_names(root: &Path) -> HashSet<String> {
 /// grammar/query error from a collector degrades to a collected skip here
 /// (orphan detection must never panic the run), not a hard failure.
 pub(crate) fn relative_import_targets(root: &Path) -> (Vec<RawImport>, Vec<ScanError>) {
+    // Parse-once: one shared context feeds both collectors (CLAUDE.md rule 5). A
+    // fatal grammar/query build error degrades to a collected skip here (orphan
+    // detection must never panic the run), not a hard failure.
+    let ctx = match ScanContext::build(root) {
+        Ok(ctx) => ctx,
+        Err(err) => return (Vec::new(), vec![err]),
+    };
     let mut imports = Vec::new();
-    let mut skipped = Vec::new();
-    for result in [
-        imports_js::collect_imports(root),
-        imports_py::collect_imports(root),
-    ] {
-        match result {
-            Ok((raw, sk)) => {
-                imports.extend(raw.into_iter().filter(|r| r.is_relative));
-                skipped.extend(sk);
-            }
-            Err(err) => skipped.push(err),
-        }
-    }
-    (imports, skipped)
+    imports.extend(
+        imports_js::collect_imports(&ctx)
+            .into_iter()
+            .filter(|r| r.is_relative),
+    );
+    imports.extend(
+        imports_py::collect_imports(&ctx)
+            .into_iter()
+            .filter(|r| r.is_relative),
+    );
+    (imports, ctx.skipped)
 }
 
 /// Project-relative display path, forward slashes — mirrors `env::plan`'s

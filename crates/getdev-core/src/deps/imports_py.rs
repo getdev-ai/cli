@@ -8,11 +8,11 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use getdev_grammars::tree_sitter::{Parser, Query, QueryCursor};
+use getdev_grammars::tree_sitter::{Query, QueryCursor};
 use serde::Deserialize;
 use streaming_iterator::StreamingIterator;
 
-use crate::scan::{project_walker, read_source_capped, Lang, ScanError};
+use crate::scan::{Lang, ScanContext, ScannedFile};
 
 use super::{relative_display, DepsError, RawImport};
 
@@ -79,68 +79,52 @@ fn import_query(lang: Lang) -> &'static str {
     }
 }
 
-/// Walk `root` and collect every Python `import`/`from` module reference.
-/// Same skip semantics as [`crate::scan::collect_string_assignments`].
-pub fn collect_imports(root: &Path) -> Result<(Vec<RawImport>, Vec<ScanError>), ScanError> {
+/// Collect every Python `import`/`from` module reference from a parse-once
+/// [`ScanContext`] WITHOUT a walk or parse of its own: for each already-parsed
+/// Python [`ScannedFile`] it reruns the import query against the cached
+/// `tree`/`source`. Read/parse skips already live in [`ScanContext::skipped`],
+/// so this returns just the imports; a query-compile failure (a programming
+/// bug proven impossible by the in-crate tests) is folded away, mirroring
+/// [`crate::scan::string_assignments_from_context`].
+pub fn collect_imports(ctx: &ScanContext) -> Vec<RawImport> {
     let mut results = Vec::new();
-    let mut skipped = Vec::new();
 
     // Compile the Python import query once, not once per file — the per-file
     // recompile dominated `orphan-file`'s whole-project import scan inside
     // review's `< 2 s` perf budget (docs/PLAN.md §3.5), and also slows `real`.
     let query = match Query::new(&Lang::Python.language(), import_query(Lang::Python)) {
         Ok(q) => q,
-        Err(err) => return Err(ScanError::Query(err)),
+        Err(_) => return results,
     };
 
-    for entry in project_walker(root).build().flatten() {
-        if !entry.file_type().is_some_and(|t| t.is_file()) {
+    for file in &ctx.files {
+        if file.lang != Lang::Python {
             continue;
         }
-        let path = entry.path();
-        let Some(lang) = Lang::from_path(path) else {
-            continue;
-        };
-        if lang != Lang::Python {
-            continue;
-        }
-        match imports_in_file(path, root, &query) {
-            Ok(mut found) => results.append(&mut found),
-            Err(err @ (ScanError::Grammar(_) | ScanError::Query(_))) => return Err(err),
-            Err(err) => skipped.push(err),
-        }
+        results.extend(imports_in_tree(file, &ctx.root, &query));
     }
 
-    Ok((results, skipped))
+    results
 }
 
-fn imports_in_file(path: &Path, root: &Path, query: &Query) -> Result<Vec<RawImport>, ScanError> {
-    let source = read_source_capped(path)?;
-
-    let language = Lang::Python.language();
-    let mut parser = Parser::new();
-    parser.set_language(&language)?;
-    let tree = parser
-        .parse(&source, None)
-        .ok_or_else(|| ScanError::Parse {
-            path: path.to_path_buf(),
-        })?;
+fn imports_in_tree(file: &ScannedFile, root: &Path, query: &Query) -> Vec<RawImport> {
+    let bytes = file.source.as_bytes();
 
     let module_idx = query.capture_index_for_name("module");
     let relative_idx = query.capture_index_for_name("relative");
 
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(query, tree.root_node(), source.as_bytes());
+    let mut matches = cursor.matches(query, file.tree.root_node(), bytes);
     let mut results = Vec::new();
 
     while let Some(m) = matches.next() {
         for capture in m.captures {
-            let Ok(raw) = capture.node.utf8_text(source.as_bytes()) else {
+            let Ok(raw) = capture.node.utf8_text(bytes) else {
                 continue;
             };
             let pos = capture.node.start_position();
             let line = u32::try_from(pos.row).unwrap_or(u32::MAX).saturating_add(1);
-            let file = relative_display(path, root);
+            let file_display = relative_display(&file.abs, root);
 
             if Some(capture.index) == module_idx {
                 let module = bare_py_module(raw);
@@ -150,21 +134,21 @@ fn imports_in_file(path: &Path, root: &Path, query: &Query) -> Result<Vec<RawImp
                 results.push(RawImport {
                     module,
                     is_relative: false,
-                    file,
+                    file: file_display,
                     line,
                 });
             } else if Some(capture.index) == relative_idx {
                 results.push(RawImport {
                     module: raw.to_owned(),
                     is_relative: true,
-                    file,
+                    file: file_display,
                     line,
                 });
             }
         }
     }
 
-    Ok(results)
+    results
 }
 
 /// `os.path` -> `os`.
@@ -227,8 +211,9 @@ mod tests {
         )
         .unwrap();
 
-        let (imports, skipped) = collect_imports(&dir).unwrap();
-        assert!(skipped.is_empty());
+        let ctx = crate::scan::ScanContext::build(&dir).unwrap();
+        let imports = collect_imports(&ctx);
+        assert!(ctx.skipped.is_empty());
 
         let absolute: Vec<&str> = imports
             .iter()
