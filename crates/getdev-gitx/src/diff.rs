@@ -486,7 +486,7 @@ mod tests {
     fn untracked_file_ranges_whole_file_but_not_when_staged() {
         let dir = base_repo("untracked");
         write(&dir, "new.txt", "x\ny\nz\n"); // 3 lines, untracked
-        // WorkingTreeVsHead: appears as a whole-file addition.
+                                             // WorkingTreeVsHead: appears as a whole-file addition.
         let wt = changed_files(&dir, &DiffScope::WorkingTreeVsHead).unwrap();
         let n = find(&wt, "new.txt").expect("untracked file included");
         assert_eq!(n.status, ChangeStatus::Added);
@@ -511,7 +511,9 @@ mod tests {
         // Second commit so HEAD~1 is a distinct base.
         write(&dir, "f.txt", "a\nb\nc\nsecond\n");
         assert!(git(&dir, &["add", "f.txt"]).status.success());
-        assert!(git(&dir, &["commit", "-q", "-m", "second"]).status.success());
+        assert!(git(&dir, &["commit", "-q", "-m", "second"])
+            .status
+            .success());
         // Now dirty the working tree further.
         write(&dir, "f.txt", "a\nb\nc\nsecond\nthird\n");
         let files = changed_files(&dir, &DiffScope::Against("HEAD~1".to_owned())).unwrap();

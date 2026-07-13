@@ -161,11 +161,9 @@ pub fn run(
             let Some(query) = pack.query_cache.get(file.lang, &rule.id) else {
                 continue;
             };
-            for node in crate::audit::run_ast_matcher(
-                query,
-                file.tree.root_node(),
-                file.source.as_bytes(),
-            ) {
+            for node in
+                crate::audit::run_ast_matcher(query, file.tree.root_node(), file.source.as_bytes())
+            {
                 let line = u32::try_from(node.start_position().row)
                     .unwrap_or(u32::MAX)
                     .saturating_add(1);
@@ -295,7 +293,9 @@ fn push_review_file(
     let mut parser = Parser::new();
     // A grammar/version mismatch is a getdev bug — fail loudly (fatal),
     // exactly as `audit`/`scan` do.
-    parser.set_language(&lang.language()).map_err(ScanError::from)?;
+    parser
+        .set_language(&lang.language())
+        .map_err(ScanError::from)?;
     let Some(tree) = parser.parse(&source, None) else {
         skipped.push(ScanError::Parse {
             path: path.to_path_buf(),

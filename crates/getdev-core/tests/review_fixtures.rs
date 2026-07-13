@@ -32,7 +32,8 @@ fn every_positive_fixture_fires() {
     let pack = rules::load_embedded_review().unwrap();
     let root = fixtures_root();
 
-    let (findings, skipped) = review::run(&root, &ReviewScope::All, &ReviewOptions::default()).unwrap();
+    let (findings, skipped) =
+        review::run(&root, &ReviewScope::All, &ReviewOptions::default()).unwrap();
     assert!(skipped.is_empty(), "fixtures were skipped: {skipped:?}");
 
     for rule in &pack.rules {
@@ -61,7 +62,8 @@ fn no_negative_fixture_fires() {
     let pack = rules::load_embedded_review().unwrap();
     let root = fixtures_root();
 
-    let (findings, _skipped) = review::run(&root, &ReviewScope::All, &ReviewOptions::default()).unwrap();
+    let (findings, _skipped) =
+        review::run(&root, &ReviewScope::All, &ReviewOptions::default()).unwrap();
 
     for rule in &pack.rules {
         for negative in &rule.fixtures.negative {
@@ -85,7 +87,8 @@ fn coverage_every_rule_meets_the_three_plus_three_fixture_floor() {
     let pack = rules::load_embedded_review().unwrap();
     let root = fixtures_root();
 
-    let (findings, _skipped) = review::run(&root, &ReviewScope::All, &ReviewOptions::default()).unwrap();
+    let (findings, _skipped) =
+        review::run(&root, &ReviewScope::All, &ReviewOptions::default()).unwrap();
 
     for rule in &pack.rules {
         assert!(

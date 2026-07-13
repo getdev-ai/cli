@@ -29,15 +29,24 @@ fn unique_tempdir(name: &str) -> PathBuf {
 #[test]
 fn all_scope_fires_debug_leftover_on_the_whole_file() {
     let dir = unique_tempdir("all_scope");
-    std::fs::write(dir.join("app.js"), "function f() {\n  console.log('x');\n}\n").unwrap();
+    std::fs::write(
+        dir.join("app.js"),
+        "function f() {\n  console.log('x');\n}\n",
+    )
+    .unwrap();
 
-    let (findings, skipped) = review::run(&dir, &ReviewScope::All, &ReviewOptions::default()).unwrap();
+    let (findings, skipped) =
+        review::run(&dir, &ReviewScope::All, &ReviewOptions::default()).unwrap();
     assert!(skipped.is_empty());
     let debug: Vec<_> = findings
         .iter()
         .filter(|f| f.id == "review/debug-leftover")
         .collect();
-    assert_eq!(debug.len(), 1, "console.log must fire under --all: {findings:?}");
+    assert_eq!(
+        debug.len(),
+        1,
+        "console.log must fire under --all: {findings:?}"
+    );
     assert_eq!(debug[0].command, "review");
     assert_eq!(debug[0].file, "app.js");
     assert_eq!(debug[0].line, Some(2));
@@ -63,7 +72,11 @@ fn diff_scope_overlap_scopes_debug_leftover_to_introduced_lines() {
         .iter()
         .filter(|f| f.id == "review/debug-leftover")
         .collect();
-    assert_eq!(debug.len(), 1, "only the introduced console.log fires: {findings:?}");
+    assert_eq!(
+        debug.len(),
+        1,
+        "only the introduced console.log fires: {findings:?}"
+    );
     assert_eq!(debug[0].line, Some(2));
 }
 
@@ -85,7 +98,11 @@ fn diff_scope_todo_fires_only_on_introduced_comment() {
         .iter()
         .filter(|f| f.id == "review/todo-introduced")
         .collect();
-    assert_eq!(todo.len(), 1, "only the introduced TODO fires: {findings:?}");
+    assert_eq!(
+        todo.len(),
+        1,
+        "only the introduced TODO fires: {findings:?}"
+    );
     assert_eq!(todo[0].line, Some(1));
 }
 

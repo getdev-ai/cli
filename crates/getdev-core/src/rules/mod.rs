@@ -42,8 +42,7 @@ static EMBEDDED_RULES: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/../../ru
 /// silently compiles `review/*` queries it never runs (and vice versa), and
 /// each command's pack stays independently testable. Loaded via
 /// [`load_embedded_review`].
-static EMBEDDED_REVIEW_RULES: Dir<'static> =
-    include_dir!("$CARGO_MANIFEST_DIR/../../rules/review");
+static EMBEDDED_REVIEW_RULES: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/../../rules/review");
 
 /// Every way a rule pack load can fail. Always carries `origin` (the
 /// source file/description this error came from) so a multi-rule pack load

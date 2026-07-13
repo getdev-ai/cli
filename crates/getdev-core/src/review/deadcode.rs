@@ -301,7 +301,10 @@ fn deadcode_finding(rel: &str, decl: &Declaration<'_>) -> Finding {
         line: Some(decl.line),
         column: Some(decl.column),
         end_line: Some(decl.end_line),
-        message: format!("Introduced '{}' has no references in the project", decl.name),
+        message: format!(
+            "Introduced '{}' has no references in the project",
+            decl.name
+        ),
         detail: Some(
             "no textual reference found; may be a new public API or framework entry point \
              (zero-reference heuristic, not call-graph analysis; confidence: medium)"

@@ -130,7 +130,9 @@ fn fingerprint_functions(files: &[ReviewFile]) -> Vec<FnRecord> {
             let minhash = minhash_sketch(&shingles);
             let start = node.start_position();
             let end = node.end_position();
-            let start_line = u32::try_from(start.row).unwrap_or(u32::MAX).saturating_add(1);
+            let start_line = u32::try_from(start.row)
+                .unwrap_or(u32::MAX)
+                .saturating_add(1);
             let end_line = u32::try_from(end.row).unwrap_or(u32::MAX).saturating_add(1);
             records.push(FnRecord {
                 rel: file.rel.clone(),
@@ -139,7 +141,10 @@ fn fingerprint_functions(files: &[ReviewFile]) -> Vec<FnRecord> {
                     .unwrap_or(u32::MAX)
                     .saturating_add(1),
                 end_line,
-                is_introduced: is_introduced_declaration((start_line, end_line), &file.added_ranges),
+                is_introduced: is_introduced_declaration(
+                    (start_line, end_line),
+                    &file.added_ranges,
+                ),
                 shingles,
                 minhash,
             });
@@ -322,13 +327,22 @@ function sumOrders(orders) {
 
     #[test]
     fn near_identical_pair_with_one_introduced_fires_once() {
-        let introduced = review_file("src/new.js", Lang::JavaScript, INTRODUCED_FN, vec![(1, 8)], true);
+        let introduced = review_file(
+            "src/new.js",
+            Lang::JavaScript,
+            INTRODUCED_FN,
+            vec![(1, 8)],
+            true,
+        );
         // added_ranges empty => this function is NOT introduced.
         let existing = review_file("src/old.js", Lang::JavaScript, EXISTING_FN, vec![], false);
         let findings = detect(&[introduced, existing]);
         assert_eq!(findings.len(), 1, "exactly one duplicate finding expected");
         assert_eq!(findings[0].id, "review/duplicate-helper");
-        assert_eq!(findings[0].file, "src/new.js", "anchored on the introduced side");
+        assert_eq!(
+            findings[0].file, "src/new.js",
+            "anchored on the introduced side"
+        );
         assert_eq!(findings[0].severity, Severity::Low);
         assert_eq!(findings[0].confidence, Confidence::Medium);
         assert!(findings[0].detail.as_ref().unwrap().contains("src/old.js"));
@@ -337,9 +351,24 @@ function sumOrders(orders) {
     #[test]
     fn sub_twenty_token_duplicates_are_skipped() {
         // Identical, but far below the 20-token floor.
-        let a = review_file("a.js", Lang::JavaScript, "const g = () => 1 + 2 + 3;\n", vec![(1, 1)], true);
-        let b = review_file("b.js", Lang::JavaScript, "const h = () => 1 + 2 + 3;\n", vec![(1, 1)], true);
-        assert!(detect(&[a, b]).is_empty(), "min-size guard must suppress trivial duplicates");
+        let a = review_file(
+            "a.js",
+            Lang::JavaScript,
+            "const g = () => 1 + 2 + 3;\n",
+            vec![(1, 1)],
+            true,
+        );
+        let b = review_file(
+            "b.js",
+            Lang::JavaScript,
+            "const h = () => 1 + 2 + 3;\n",
+            vec![(1, 1)],
+            true,
+        );
+        assert!(
+            detect(&[a, b]).is_empty(),
+            "min-size guard must suppress trivial duplicates"
+        );
     }
 
     #[test]
@@ -353,9 +382,18 @@ function parseConfig(raw) {
   return parsed.name.toUpperCase();
 }
 ";
-        let a = review_file("src/new.js", Lang::JavaScript, INTRODUCED_FN, vec![(1, 8)], true);
+        let a = review_file(
+            "src/new.js",
+            Lang::JavaScript,
+            INTRODUCED_FN,
+            vec![(1, 8)],
+            true,
+        );
         let b = review_file("src/other.js", Lang::JavaScript, other, vec![(1, 8)], true);
-        assert!(detect(&[a, b]).is_empty(), "dissimilar functions must not fire");
+        assert!(
+            detect(&[a, b]).is_empty(),
+            "dissimilar functions must not fire"
+        );
     }
 
     #[test]
