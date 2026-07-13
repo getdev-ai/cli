@@ -133,8 +133,11 @@ mod tests {
              {b}  getdev-x86_64-unknown-linux-gnu.tar.xz\n"
         );
         assert_eq!(
-            parse_manifest_entry(manifest.as_bytes(), "getdev-x86_64-unknown-linux-gnu.tar.xz")
-                .unwrap(),
+            parse_manifest_entry(
+                manifest.as_bytes(),
+                "getdev-x86_64-unknown-linux-gnu.tar.xz"
+            )
+            .unwrap(),
             b
         );
     }
