@@ -1,0 +1,37 @@
+{
+  "##": [
+    "Scoop manifest for getdev (bucket: getdev-ai/scoop-bucket).",
+    "cargo-dist does NOT generate Scoop manifests (DEC-14), so this file is",
+    "maintained by hand and bumped mechanically by the release workflow's",
+    "custom Scoop-bump step (.github/workflows/release.yml). The `autoupdate`",
+    "stanza makes bumps mechanical: `version`, the download `url`, and `hash`",
+    "(fetched from the artifact's .sha256) are the only fields that change.",
+    "`version`/`hash` below are pre-release placeholders — the first real tag",
+    "(08-08) fills them via the bump step. Only x86_64 Windows is a release",
+    "target; aarch64-pc-windows-msvc is best-effort and not shipped via Scoop."
+  ],
+  "version": "0.0.0",
+  "description": "verify, secure, and ship AI-generated code — one binary, runs locally, nothing leaves your machine",
+  "homepage": "https://getdev.ai",
+  "license": "Apache-2.0",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/getdev-ai/cli/releases/download/v0.0.0/getdev-x86_64-pc-windows-msvc.zip",
+      "hash": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  },
+  "bin": "getdev.exe",
+  "checkver": {
+    "github": "https://github.com/getdev-ai/cli"
+  },
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/getdev-ai/cli/releases/download/v$version/getdev-x86_64-pc-windows-msvc.zip",
+        "hash": {
+          "url": "$url.sha256"
+        }
+      }
+    }
+  }
+}

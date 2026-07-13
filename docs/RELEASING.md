@@ -34,6 +34,15 @@ git switch main && git pull
 
 # 1. bump version (all crates, via workspace.package.version)
 #    update Cargo.toml + `cargo update -w` so Cargo.lock follows
+#
+#    RELEASE-TIME TOGGLE: all five crates ship with `publish = false` as a
+#    pre-release guard. For a real v0.1 crates.io release, flip every crate's
+#    `publish = false` -> `publish = true` (getdev-grammars, getdev-core,
+#    getdev-registry, getdev-gitx, and getdev — crates/getdev-cli) in THIS
+#    release commit. The release workflow's ordered `cargo publish` step assumes
+#    the guard is off; leaving it on makes that step fail safely (the intended
+#    behavior for an accidental pre-release tag). Never flip it on `main` outside
+#    a tagged release.
 
 # 2. changelog
 git cliff --tag v0.1.0 -o CHANGELOG.md

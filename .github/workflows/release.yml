@@ -532,3 +532,112 @@ jobs:
             SHA256SUMS.sig \
             "getdev-${version}.sbom.spdx.json" \
             --clobber
+
+  # Bump the manually-maintained Scoop manifest (DEC-14 — cargo-dist does not
+  # manage Scoop) and push it to getdev-ai/scoop-bucket. The manifest's autoupdate
+  # stanza is mirrored here: set `version`, the download `url`, and the `hash`
+  # (fetched from the release's .sha256 asset) for the x86_64 Windows artifact.
+  getdev-bump-scoop:
+    name: getdev-bump-scoop (custom)
+    needs:
+      - plan
+      - host
+    if: ${{ needs.plan.outputs.publishing == 'true' && needs.host.result == 'success' }}
+    runs-on: "ubuntu-22.04"
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - name: Checkout getdev source (for the manifest template)
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          path: src
+      - name: Render the bumped Scoop manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          asset="getdev-x86_64-pc-windows-msvc.zip"
+          url="https://github.com/getdev-ai/cli/releases/download/${TAG}/${asset}"
+          # Pull the checksum from the release's per-artifact .sha256 asset.
+          gh release download "$TAG" --repo getdev-ai/cli --pattern "${asset}.sha256" --dir . --clobber
+          hash="$(awk '{print $1}' "${asset}.sha256" | head -n1)"
+          if [ -z "$hash" ]; then echo "could not read $asset checksum" >&2; exit 1; fi
+          jq \
+            --arg version "$version" \
+            --arg url "$url" \
+            --arg hash "$hash" \
+            '.version = $version
+             | .architecture["64bit"].url = $url
+             | .architecture["64bit"].hash = $hash' \
+            src/packaging/scoop/getdev.json > getdev.json
+          echo "rendered manifest:"; cat getdev.json
+      - name: Push manifest to getdev-ai/scoop-bucket
+        uses: actions/checkout@v6
+        with:
+          repository: "getdev-ai/scoop-bucket"
+          token: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+          persist-credentials: true
+          path: bucket
+      - name: Commit the bumped manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          mkdir -p bucket/bucket
+          cp getdev.json bucket/bucket/getdev.json
+          cd bucket
+          git config user.name "getdev-release-bot"
+          git config user.email "release-bot@getdev.ai"
+          git add bucket/getdev.json
+          if git diff --cached --quiet; then
+            echo "scoop manifest already up to date"
+          else
+            git commit -m "getdev ${version}"
+            git push
+          fi
+
+  # Ordered crates.io publish (DEC-13). cargo-dist does NOT manage crates.io, so
+  # this is a hand-appended custom job. Dependency order (docs/DISTRIBUTION.md):
+  #   getdev-grammars -> getdev-core / getdev-registry / getdev-gitx -> getdev
+  # cargo (>=1.66) waits for each published crate to appear in the index before
+  # returning, so dependents resolve; a short sleep between tiers is belt-and-
+  # suspenders. `cargo release`/`release-plz` are the documented alternatives if
+  # manual ordering becomes error-prone.
+  #
+  # RELEASE-TIME TOGGLE (do NOT flip silently): every crate carries
+  # `publish = false` as a pre-release guard. The v0.1 release procedure flips
+  # all five to publishable in the release commit (see docs/RELEASING.md) — this
+  # job assumes that has happened and will otherwise no-op-fail on the guard,
+  # which is the intended safety behavior for any accidental pre-release tag.
+  getdev-publish-crates:
+    name: getdev-publish-crates (custom)
+    needs:
+      - plan
+      - host
+    if: ${{ needs.plan.outputs.publishing == 'true' && needs.host.result == 'success' }}
+    runs-on: "ubuntu-22.04"
+    environment: release
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo publish (ordered — grammars, then libs, then getdev)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # tier 1: the grammar/FFI foundation
+          cargo publish -p getdev-grammars
+          sleep 20
+          # tier 2: the library crates (each depends only on grammars)
+          cargo publish -p getdev-core
+          cargo publish -p getdev-registry
+          cargo publish -p getdev-gitx
+          sleep 20
+          # tier 3: the binary crate published as `getdev`
+          cargo publish -p getdev
