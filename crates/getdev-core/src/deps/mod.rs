@@ -429,6 +429,32 @@ fn local_module_names(root: &Path) -> HashSet<String> {
     names
 }
 
+/// Crate-internal accessor for `review::orphan`: run both existing import
+/// collectors over `root` and return only the RELATIVE (`is_relative == true`)
+/// subset, plus any per-file scan skips. A thin wrapper over the same
+/// `imports_js`/`imports_py` machinery `build_graph` uses — `orphan-file`
+/// reconciles these raw relative specifiers against local file paths rather
+/// than declared packages (06-RESEARCH.md "Don't Hand-Roll"). A fatal
+/// grammar/query error from a collector degrades to a collected skip here
+/// (orphan detection must never panic the run), not a hard failure.
+pub(crate) fn relative_import_targets(root: &Path) -> (Vec<RawImport>, Vec<ScanError>) {
+    let mut imports = Vec::new();
+    let mut skipped = Vec::new();
+    for result in [
+        imports_js::collect_imports(root),
+        imports_py::collect_imports(root),
+    ] {
+        match result {
+            Ok((raw, sk)) => {
+                imports.extend(raw.into_iter().filter(|r| r.is_relative));
+                skipped.extend(sk);
+            }
+            Err(err) => skipped.push(err),
+        }
+    }
+    (imports, skipped)
+}
+
 /// Project-relative display path, forward slashes — mirrors `env::plan`'s
 /// convention.
 pub(crate) fn relative_display(path: &Path, root: &Path) -> String {
