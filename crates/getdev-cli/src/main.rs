@@ -218,13 +218,6 @@ enum Command {
     /// flags only (docs/SPEC-COMMANDS.md `update`, CLAUDE.md rule 6).
     /// `--offline` makes it an explicit no-op.
     Update,
-    /// P0 de-risking spike: walk + parse + query a directory (dev-only)
-    #[command(hide = true)]
-    Spike {
-        /// Directory to scan
-        #[arg(default_value = ".")]
-        dir: PathBuf,
-    },
 }
 
 /// The `getdev ship --target` values (docs/SPEC-COMMANDS.md `ship`). A thin
@@ -534,7 +527,6 @@ fn run(cli: Cli) -> anyhow::Result<u8> {
             no_color,
             cfg: cfg.update.clone(),
         }),
-        Command::Spike { dir } => commands::spike::run(&dir).map(|()| 0),
     }
 }
 

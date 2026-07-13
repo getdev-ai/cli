@@ -40,10 +40,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
-      - name: doctor + spike smoke
+      - name: doctor smoke
         run: |
           cargo run -p getdev -- doctor
-          cargo run -p getdev -- spike testdata/spike
 
   # REQ-cmd-ship SC3 exit gate: prove `getdev ship --write --target docker`
   # generates a Dockerfile that `docker build` actually succeeds on for every
