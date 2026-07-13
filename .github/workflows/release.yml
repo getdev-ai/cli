@@ -295,6 +295,14 @@ jobs:
       - plan
       - host
     runs-on: "ubuntu-22.04"
+    # GHA-002: the cross-repo tap-push token sits behind the required-reviewer
+    # `release` environment gate, so a compromised PR can never reach it.
+    # GHA-001: third-party actions below are pinned to a full commit SHA.
+    # NOTE — this is a cargo-dist-GENERATED job: `dist generate --mode ci`
+    # regenerates it and will DROP this `environment:` line and the SHA pins
+    # below. Re-apply GHA-001/002 after any deliberate dist regeneration
+    # (documented in docs/RELEASING.md).
+    environment: release
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       PLAN: ${{ needs.plan.outputs.val }}
@@ -302,14 +310,14 @@ jobs:
       GITHUB_EMAIL: "admin+bot@axo.dev"
     if: ${{ !fromJson(needs.plan.outputs.val).announcement_is_prerelease || fromJson(needs.plan.outputs.val).publish_prereleases }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
         with:
           persist-credentials: true
           repository: "getdev-ai/homebrew-tap"
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
       # So we have access to the formula
       - name: Fetch homebrew formulae
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
         with:
           pattern: artifacts-*
           path: Formula/
@@ -341,18 +349,24 @@ jobs:
       - plan
       - host
     runs-on: "ubuntu-22.04"
+    # GHA-002: NPM_TOKEN sits behind the required-reviewer `release` environment
+    # gate. GHA-001: third-party actions below are pinned to a full commit SHA.
+    # NOTE — cargo-dist-GENERATED job: `dist generate --mode ci` regenerates it
+    # and DROPS this `environment:` line and the SHA pins; re-apply GHA-001/002
+    # after any deliberate dist regeneration (docs/RELEASING.md).
+    environment: release
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       PLAN: ${{ needs.plan.outputs.val }}
     if: ${{ !fromJson(needs.plan.outputs.val).announcement_is_prerelease || fromJson(needs.plan.outputs.val).publish_prereleases }}
     steps:
       - name: Fetch npm packages
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
         with:
           pattern: artifacts-*
           path: npm/
           merge-multiple: true
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6
         with:
           node-version: '20.x'
           registry-url: 'https://registry.npmjs.org'
@@ -417,13 +431,16 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       TAG: ${{ needs.plan.outputs.tag }}
     steps:
-      - uses: actions/checkout@v6
+      # GHA-001: third-party actions pinned to a full commit SHA in this
+      # secret-bearing (COSIGN_PRIVATE_KEY) job. anchore/sbom-action was pinned
+      # first — it is the weakest (a moving major-zero `v0` tag).
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
         with:
           persist-credentials: false
       # Pull every built artifact (release archives + per-artifact .sha256) that
       # the build jobs staged, so we can size-gate, aggregate, sign, and SBOM them.
       - name: Fetch built artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
         with:
           pattern: artifacts-*
           path: dist-artifacts/
@@ -488,7 +505,7 @@ jobs:
       # in testdata/update/signature/ was produced with. DO NOT bump without
       # re-proving compatibility against signature.rs.
       - name: Install cosign (pinned 2.x — legacy detached signature)
-        uses: sigstore/cosign-installer@v3.7.0
+        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da  # v3.7.0
         with:
           cosign-release: 'v2.4.3'
       # KEYED sign-blob over SHA256SUMS → SHA256SUMS.sig. --tlog-upload=false keeps
@@ -513,7 +530,7 @@ jobs:
       # the Syft Go binary (Anchore). Syft is NOT a Rust crate — there is no such
       # crate on crates.io; referencing one would be a hallucinated dependency (D-03).
       - name: Generate SBOM (Syft → SPDX-JSON)
-        uses: anchore/sbom-action@v0
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610  # v0.24.0 (was the moving v0 tag)
         with:
           path: dist-artifacts/
           format: spdx-json
@@ -544,12 +561,15 @@ jobs:
       - host
     if: ${{ needs.plan.outputs.publishing == 'true' && needs.host.result == 'success' }}
     runs-on: "ubuntu-22.04"
+    # GHA-002: the cross-repo SCOOP_BUCKET_TOKEN sits behind the required-reviewer
+    # `release` environment gate. GHA-001: checkouts pinned to a full commit SHA.
+    environment: release
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       TAG: ${{ needs.plan.outputs.tag }}
     steps:
       - name: Checkout getdev source (for the manifest template)
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
         with:
           persist-credentials: false
           path: src
@@ -574,7 +594,7 @@ jobs:
             src/packaging/scoop/getdev.json > getdev.json
           echo "rendered manifest:"; cat getdev.json
       - name: Push manifest to getdev-ai/scoop-bucket
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
         with:
           repository: "getdev-ai/scoop-bucket"
           token: ${{ secrets.SCOOP_BUCKET_TOKEN }}
@@ -622,11 +642,15 @@ jobs:
     env:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     steps:
-      - uses: actions/checkout@v6
+      # GHA-001: third-party actions pinned to a full commit SHA in this
+      # secret-bearing (CARGO_REGISTRY_TOKEN) job. `dtolnay/rust-toolchain@stable`
+      # is a MOVING branch, so it is pinned to the branch-tip commit — bump
+      # deliberately when refreshing the toolchain action.
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
         with:
           persist-credentials: false
           submodules: recursive
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable
       - name: cargo publish (ordered — grammars, then libs, then getdev)
         shell: bash
         run: |
