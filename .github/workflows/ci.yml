@@ -44,3 +44,29 @@ jobs:
         run: |
           cargo run -p getdev -- doctor
           cargo run -p getdev -- spike testdata/spike
+
+  # REQ-cmd-ship SC3 exit gate: prove `getdev ship --write --target docker`
+  # generates a Dockerfile that `docker build` actually succeeds on for every
+  # preset stack. ubuntu-latest ONLY — GitHub-hosted macOS/Windows runners do
+  # not reliably support Linux container builds (07-RESEARCH.md Pitfall 5).
+  docker-build-gate:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [nodejs-nextjs, fastapi, flask, django]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the getdev binary
+        run: cargo build -p getdev
+      - name: ship --write + docker build (${{ matrix.preset }})
+        env:
+          PRESET: ${{ matrix.preset }}
+        run: |
+          BIN="$PWD/target/debug/getdev"
+          cd "testdata/fixtures/ship/$PRESET"
+          "$BIN" ship --write --target docker
+          test -f Dockerfile
+          docker build -t "getdev-ship-$PRESET" .

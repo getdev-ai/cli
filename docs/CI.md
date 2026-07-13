@@ -12,6 +12,7 @@ Jobs (all required for merge):
 | `fmt` | ubuntu | `cargo fmt --check` |
 | `clippy` | ubuntu | `cargo clippy --workspace --all-targets -- -D warnings` |
 | `test` | ubuntu, macos, windows | `cargo test --workspace` + corpus integration tests |
+| `docker-build-gate` | ubuntu **only** | `getdev ship --write --target docker` then `docker build` over each `testdata/fixtures/ship/*` preset (REQ-cmd-ship SC3) |
 | `deny` | ubuntu | `cargo deny check` (licenses + RustSec advisories) |
 | `coverage` | ubuntu | `cargo llvm-cov --workspace` — fail under 80% on library crates |
 | `bench` | ubuntu (pinned runner type) | criterion against perf budgets; regression = red |
@@ -50,6 +51,14 @@ jobs:
 Notes:
 
 - **Toolchain** comes from `rust-toolchain.toml` — never hardcode a version in the workflow.
+- The **docker-build-gate** is the enforceable REQ-cmd-ship SC3 exit gate: it builds the
+  `getdev` binary, runs `getdev ship --write --target docker` in each
+  `testdata/fixtures/ship/<preset>/` (Node/Next.js, FastAPI, Flask, Django — each a minimal
+  BUT complete app with a real lockfile/entrypoint, distinct from the non-buildable
+  `testdata/corpus/seeded/*` AST fixtures), then `docker build`s the generated Dockerfile.
+  It runs on **ubuntu-latest only** — GitHub-hosted macOS/Windows runners do not reliably
+  support Linux container builds — and matrixes over the four presets so a single preset's
+  failure is isolated.
 - **aarch64** is not in the PR matrix (cost); it's covered by release-artifact smoke tests.
 - The **bench** job runs on one pinned runner class; treat >10% regressions as failures but
   expect noise — compare against a stored baseline (`criterion --save-baseline`), don't
@@ -101,8 +110,9 @@ updates:
 
 ## Repository settings (one-time)
 
-- **Branch protection on `main`**: require PRs; required checks = fmt, clippy, test×3, deny,
-  coverage; require linear history (merge queue or squash); no force-push.
+- **Branch protection on `main`**: require PRs; required checks = fmt, clippy, test×3,
+  docker-build-gate×4, deny, coverage; require linear history (merge queue or squash); no
+  force-push.
 - **DCO enforcement**: enable the DCO check app (or the `dco` GitHub Action) as a required check.
 - **Actions hardening**: pin third-party actions by SHA; default `permissions: contents: read`
   at workflow level; disable `pull_request_target` usage entirely (getdev scans untrusted
