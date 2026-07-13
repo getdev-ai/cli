@@ -1,0 +1,171 @@
+# deny.toml — cargo-deny configuration for getdev.
+#
+# This file is one of the two mechanical proofs of getdev's privacy /
+# determinism promise (SC4). It turns three settled decisions from
+# docs/DECISIONS.md into an enforced, CI-runnable guardrail:
+#
+#   * DEC-01 — no async runtime (blocking `reqwest` + `rayon`).
+#   * DEC-04 — deterministic core, no LLM/AI calls in v0.1–v0.3.
+#   * DEC-05 — no telemetry; the only permitted network stack is the single
+#              sanctioned blocking `reqwest`, confined to getdev-registry and
+#              getdev-cli::update.
+#
+# The companion proof is crates/getdev-cli/tests/network_egress.rs, which
+# scans source for network *symbols/hosts*. deny.toml is the dependency-graph
+# layer: it fails the build if a future change pulls a second async runtime,
+# a second HTTP client, or an LLM SDK into the tree. Neither layer alone is a
+# complete proof (see 08-RESEARCH.md Open Question 2, locked D-02); together
+# they make "nothing leaves your machine except npm/PyPI/GitHub Releases"
+# verifiable rather than merely asserted.
+#
+# Keep this GREEN on the current tree. Adjust the license allow-list /
+# exceptions ONLY to accommodate already-sanctioned deps — never weaken the
+# async / extra-HTTP / LLM bans.
+
+[graph]
+# Check every target so a platform-specific banned crate cannot slip in on a
+# target we do not build in the local shell.
+all-features = false
+no-default-features = false
+
+[output]
+feature-depth = 1
+
+# ---------------------------------------------------------------------------
+# Advisories — RustSec DB (docs/CI.md `deny` job: licenses + advisories).
+# ---------------------------------------------------------------------------
+[advisories]
+# Vulnerabilities and unsound advisories deny by default in this cargo-deny
+# version; unmaintained crates are flagged too. `yanked` is escalated to a
+# hard error so a yanked dependency cannot ride along in a release.
+yanked = "deny"
+unmaintained = "workspace"
+ignore = []
+
+# ---------------------------------------------------------------------------
+# Licenses — Apache-2.0-compatible permissive set only.
+# getdev ships under Apache-2.0 (DEC-12); the allow-list is the set of
+# permissive licenses that redistribute cleanly under it. Anything NOT listed
+# here (notably strong copyleft: GPL/AGPL, and unlisted LGPL) is denied by
+# omission, which keeps a copyleft dependency from silently entering the tree.
+# ---------------------------------------------------------------------------
+[licenses]
+confidence-threshold = 0.8
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "MIT-0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unlicense",
+    "BSL-1.0",
+    "CC0-1.0",
+]
+
+# Per-crate license exceptions. These two transitive deps carry weak/permissive
+# licenses that are Apache-2.0-redistribution-compatible but are NOT added to
+# the global allow-list, so the exception stays narrowly scoped to the exact
+# crate that needs it (a new MPL/CDLA crate elsewhere still fails the gate).
+#   * version-ranges (MPL-2.0)   — via pyproject-toml → pep508_rs → pep440_rs;
+#     MPL-2.0 is file-level copyleft, compatible when linked unmodified.
+#   * webpki-root-certs (CDLA-Permissive-2.0) — Mozilla root store used by
+#     rustls; CDLA-Permissive is a permissive data license.
+exceptions = [
+    { allow = ["MPL-2.0"], crate = "version-ranges" },
+    { allow = ["CDLA-Permissive-2.0"], crate = "webpki-root-certs" },
+]
+
+[licenses.private]
+ignore = false
+
+# ---------------------------------------------------------------------------
+# Bans — the async / extra-HTTP / LLM-SDK denylist (DEC-01 / DEC-04 / DEC-05).
+# ---------------------------------------------------------------------------
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+highlight = "all"
+
+deny = [
+    # --- Async runtimes (DEC-01: no async runtime) -------------------------
+    #
+    # tokio is present TRANSITIVELY today, and only via the sanctioned
+    # blocking `reqwest` HTTP stack — this is DEC-01-sanctioned and must stay
+    # green. `wrappers` allows tokio ONLY when its direct parent is one of
+    # reqwest's internal transport crates. If any getdev-* crate (or any new
+    # dependency) were to take a direct tokio dependency, that crate would
+    # become a new direct parent NOT in this list and the gate would fail —
+    # exactly the regression we want to catch. The wrapper set is reqwest's
+    # current tokio-touching transport crates; a reqwest upgrade that reshapes
+    # this set intentionally forces a review of the async surface.
+    { crate = "tokio", wrappers = [
+        "h2",
+        "hyper",
+        "hyper-rustls",
+        "hyper-util",
+        "reqwest",
+        "tokio-rustls",
+        "tokio-util",
+        "tower",
+    ], reason = "DEC-01 no async runtime — tokio permitted ONLY transitively under blocking reqwest; a direct dependency is a forbidden async surface" },
+
+    # Alternative async runtimes have no sanctioned transitive path at all —
+    # hard-denied outright.
+    { crate = "async-std", reason = "DEC-01 no async runtime" },
+    { crate = "smol", reason = "DEC-01 no async runtime" },
+    { crate = "async-executor", reason = "DEC-01 no async runtime" },
+    { crate = "async-io", reason = "DEC-01 no async runtime" },
+    { crate = "async-global-executor", reason = "DEC-01 no async runtime" },
+
+    # --- Second HTTP client / network stack (DEC-05) -----------------------
+    #
+    # The ONLY sanctioned HTTP client is blocking `reqwest` (rustls). hyper is
+    # reqwest's internal transport and is permitted only under it; a direct
+    # hyper dependency would be a second, unsanctioned network stack.
+    { crate = "hyper", wrappers = [
+        "hyper-rustls",
+        "hyper-util",
+        "reqwest",
+    ], reason = "DEC-05 single sanctioned HTTP stack — hyper permitted ONLY as reqwest's transport, never as a direct 2nd client" },
+
+    # Standalone HTTP clients that would constitute a second network stack.
+    { crate = "ureq", reason = "DEC-05 single sanctioned HTTP client (blocking reqwest)" },
+    { crate = "isahc", reason = "DEC-05 single sanctioned HTTP client (blocking reqwest)" },
+    { crate = "surf", reason = "DEC-05 single sanctioned HTTP client (blocking reqwest)" },
+    { crate = "attohttpc", reason = "DEC-05 single sanctioned HTTP client (blocking reqwest)" },
+    { crate = "curl", reason = "DEC-05 single sanctioned HTTP client (blocking reqwest)" },
+    { crate = "curl-sys", reason = "DEC-05 single sanctioned HTTP client (blocking reqwest)" },
+
+    # --- LLM / AI SDKs (DEC-04: deterministic core, no LLM in v0.1–v0.3) ---
+    { crate = "async-openai", reason = "DEC-04 deterministic core — no LLM/AI SDK" },
+    { crate = "openai", reason = "DEC-04 deterministic core — no LLM/AI SDK" },
+    { crate = "openai-api-rs", reason = "DEC-04 deterministic core — no LLM/AI SDK" },
+    { crate = "openai_api_rust", reason = "DEC-04 deterministic core — no LLM/AI SDK" },
+    { crate = "anthropic", reason = "DEC-04 deterministic core — no LLM/AI SDK" },
+    { crate = "anthropic-sdk", reason = "DEC-04 deterministic core — no LLM/AI SDK" },
+    { crate = "anthropic-rs", reason = "DEC-04 deterministic core — no LLM/AI SDK" },
+    { crate = "google-generative-ai-rs", reason = "DEC-04 deterministic core — no LLM/AI SDK" },
+    { crate = "ollama-rs", reason = "DEC-04 deterministic core — no LLM/AI SDK" },
+    { crate = "llm", reason = "DEC-04 deterministic core — no LLM/AI SDK" },
+    { crate = "llm-chain", reason = "DEC-04 deterministic core — no LLM/AI SDK" },
+    { crate = "langchain-rust", reason = "DEC-04 deterministic core — no LLM/AI SDK" },
+    { crate = "genai", reason = "DEC-04 deterministic core — no LLM/AI SDK" },
+    { crate = "rig-core", reason = "DEC-04 deterministic core — no LLM/AI SDK" },
+]
+
+skip = []
+skip-tree = []
+
+# ---------------------------------------------------------------------------
+# Sources — only the canonical crates.io registry is permitted; no git or
+# alternative-registry deps (supply-chain surface reduction).
+# ---------------------------------------------------------------------------
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
