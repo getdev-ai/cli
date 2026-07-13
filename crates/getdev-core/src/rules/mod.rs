@@ -36,6 +36,15 @@ use crate::scan::Lang;
 /// [`load_embedded`], not by this embedding itself.
 static EMBEDDED_RULES: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/../../rules/audit");
 
+/// The shipped `rules/review/*.yaml` pack, embedded at compile time — a
+/// SECOND `Dir`, independent of [`EMBEDDED_RULES`] (06-RESEARCH.md Open Q2,
+/// LOCKED). Keeping the two packs siloed means an `audit` invocation never
+/// silently compiles `review/*` queries it never runs (and vice versa), and
+/// each command's pack stays independently testable. Loaded via
+/// [`load_embedded_review`].
+static EMBEDDED_REVIEW_RULES: Dir<'static> =
+    include_dir!("$CARGO_MANIFEST_DIR/../../rules/review");
+
 /// Every way a rule pack load can fail. Always carries `origin` (the
 /// source file/description this error came from) so a multi-rule pack load
 /// can report exactly which file was the problem.
@@ -325,8 +334,26 @@ pub(crate) fn compile_rule(
 /// Returns the first `RuleLoadError` encountered (YAML/schema violation,
 /// empty matchers, or a compile failure) — never panics.
 pub fn load_embedded() -> Result<RulePack, RuleLoadError> {
+    load_embedded_dir(&EMBEDDED_RULES)
+}
+
+/// Load, validate, and compile the shipped `rules/review/*.yaml` pack — the
+/// `review` command's counterpart to [`load_embedded`], reading the SECOND
+/// embedded [`EMBEDDED_REVIEW_RULES`] `Dir` (06-RESEARCH.md Open Q2, LOCKED).
+/// Same fatal-on-any-error policy as [`load_embedded`].
+///
+/// # Errors
+/// Returns the first `RuleLoadError` encountered — never panics.
+pub fn load_embedded_review() -> Result<RulePack, RuleLoadError> {
+    load_embedded_dir(&EMBEDDED_REVIEW_RULES)
+}
+
+/// Shared body for both embedded-pack loaders: walk one `Dir<'static>`'s
+/// `.yaml` files (skipping `schema.json` and anything else), parse + validate
+/// + compile each, ANY error fatal.
+fn load_embedded_dir(dir: &Dir<'static>) -> Result<RulePack, RuleLoadError> {
     let mut pack = RulePack::new();
-    for file in EMBEDDED_RULES.files() {
+    for file in dir.files() {
         let path = file.path();
         if path.extension().and_then(std::ffi::OsStr::to_str) != Some("yaml") {
             continue;

@@ -1,0 +1,62 @@
+id: review/debug-leftover
+severity: medium
+confidence: high
+languages: [javascript, typescript, tsx, python]
+description: >
+  A debug statement was left in the diff — a console.log/console.debug/
+  console.trace call or a bare `debugger` statement (JS/TS/TSX), or a
+  pdb.set_trace()/breakpoint() call or `import pdb` (Python). Bare Python
+  print(...) is deliberately NOT matched (too false-positive-prone).
+message: "Debug statement left in code"
+remediation: "Remove the debug statement before merging."
+refs:
+  - https://getdev.ai/rules/review/debug-leftover
+matchers:
+  # JS: console.log / console.debug / console.trace member calls, and the
+  # bare `debugger` statement. Narrow (anchored on the `console` object and
+  # an exact method set) to protect the FP budget.
+  - language: javascript
+    query: |
+      (call_expression
+        function: (member_expression
+          object: (identifier) @obj (#eq? @obj "console")
+          property: (property_identifier) @method (#match? @method "^(log|debug|trace)$"))) @finding
+      (debugger_statement) @finding
+  - language: typescript
+    query: |
+      (call_expression
+        function: (member_expression
+          object: (identifier) @obj (#eq? @obj "console")
+          property: (property_identifier) @method (#match? @method "^(log|debug|trace)$"))) @finding
+      (debugger_statement) @finding
+  - language: tsx
+    query: |
+      (call_expression
+        function: (member_expression
+          object: (identifier) @obj (#eq? @obj "console")
+          property: (property_identifier) @method (#match? @method "^(log|debug|trace)$"))) @finding
+      (debugger_statement) @finding
+  # Python: pdb.set_trace(), breakpoint(), and `import pdb`. Bare print() is
+  # intentionally excluded (a negative fixture pins this).
+  - language: python
+    query: |
+      (call
+        function: (attribute
+          object: (identifier) @obj (#eq? @obj "pdb")
+          attribute: (identifier) @attr (#eq? @attr "set_trace"))) @finding
+      (call
+        function: (identifier) @fn (#eq? @fn "breakpoint")) @finding
+      (import_statement
+        (dotted_name (identifier) @mod (#eq? @mod "pdb"))) @finding
+fixtures:
+  positive:
+    - positive/debug_console_log_js.js
+    - positive/debug_debugger_js.js
+    - positive/debug_console_trace_ts.ts
+    - positive/debug_console_debug_tsx.tsx
+    - positive/debug_breakpoint_py.py
+    - positive/debug_pdb_set_trace_py.py
+  negative:
+    - negative/debug_no_console_js.js
+    - negative/debug_logger_ts.ts
+    - negative/debug_bare_print_py.py

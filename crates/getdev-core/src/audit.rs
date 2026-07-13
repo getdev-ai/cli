@@ -225,7 +225,11 @@ fn process_lang_file(
 /// the vendored binding source). No manual predicate re-checking needed.
 /// The anchor capture is `@finding` if the query names one, else the
 /// match's first capture.
-fn run_ast_matcher<'tree>(
+///
+/// `pub(crate)` so `core::review`'s declarative path reuses this exact
+/// matcher-execution loop unchanged (06-02) — review only differs by adding
+/// an added-line-range post-filter over the returned nodes.
+pub(crate) fn run_ast_matcher<'tree>(
     query: &getdev_grammars::tree_sitter::Query,
     root: Node<'tree>,
     source: &[u8],

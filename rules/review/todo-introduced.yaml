@@ -1,0 +1,35 @@
+id: review/todo-introduced
+severity: info
+confidence: high
+languages: [javascript, typescript, tsx, python]
+description: >
+  A new TODO/FIXME/HACK/XXX marker was introduced in this diff. Matched as an
+  AST comment node (NOT a whole-file text regex), so the marker inside a
+  string literal is never flagged — only a real comment.
+message: "New TODO-style marker introduced"
+remediation: "Resolve or track the TODO before merging, or leave it if intentional."
+refs:
+  - https://getdev.ai/rules/review/todo-introduced
+matchers:
+  - language: javascript
+    query: |
+      (comment) @finding (#match? @finding "(?i)\\b(TODO|FIXME|HACK|XXX)\\b")
+  - language: typescript
+    query: |
+      (comment) @finding (#match? @finding "(?i)\\b(TODO|FIXME|HACK|XXX)\\b")
+  - language: tsx
+    query: |
+      (comment) @finding (#match? @finding "(?i)\\b(TODO|FIXME|HACK|XXX)\\b")
+  - language: python
+    query: |
+      (comment) @finding (#match? @finding "(?i)\\b(TODO|FIXME|HACK|XXX)\\b")
+fixtures:
+  positive:
+    - positive/todo_js.js
+    - positive/todo_fixme_ts.ts
+    - positive/todo_hack_tsx.tsx
+    - positive/todo_py.py
+  negative:
+    - negative/todo_in_string_js.js
+    - negative/todo_no_marker_js.js
+    - negative/todo_clean_py.py
