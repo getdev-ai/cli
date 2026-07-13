@@ -37,12 +37,19 @@ pub enum EnvError {
 pub struct EnvOptions {
     /// target env file name, default ".env"
     pub env_file: String,
+    /// also extract http(s) URLs + connection strings assigned to identifiers
+    /// (`--include-urls`). Default `false` — when unset, detection is
+    /// byte-identical to secret-only behaviour. The CLI flag / `[env]
+    /// include_urls` config that flips this is wired in 08-05; this crate only
+    /// owns the detection it gates.
+    pub include_urls: bool,
 }
 
 impl Default for EnvOptions {
     fn default() -> Self {
         Self {
             env_file: ".env".to_owned(),
+            include_urls: false,
         }
     }
 }
@@ -147,8 +154,17 @@ fn plan_from_assignments(
 
     let mut entries = Vec::new();
     for assignment in assignments {
-        let Some(secret) = patterns.classify(&assignment.value, &assignment.name) else {
-            continue;
+        // Secret patterns first (unchanged). When `--include-urls` is on and a
+        // value is NOT already a secret, additionally test it against the
+        // deterministic URL / connection-string classifier — folded into the
+        // same loop, gated so default behaviour is byte-identical.
+        let secret = match patterns.classify(&assignment.value, &assignment.name) {
+            Some(secret) => secret,
+            None if options.include_urls => match crate::secrets::classify_url(&assignment.value) {
+                Some(url_match) => url_match,
+                None => continue,
+            },
+            None => continue,
         };
         let base_name = if secret.env_key.is_empty() {
             identifier_to_env_key(&assignment.name)
@@ -1010,6 +1026,93 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The gate defaults off: `EnvOptions::default()` never enables URL
+    /// detection, so today's secret-only behaviour is preserved untouched.
+    #[test]
+    fn include_urls_defaults_off() {
+        assert!(!EnvOptions::default().include_urls);
+    }
+
+    /// Regression: with `include_urls=false`, a file that contains BOTH a real
+    /// secret and a URL/DSN plans EXACTLY the secret — byte-identical to
+    /// today. The URL is invisible unless the gate is on.
+    #[test]
+    fn include_urls_off_is_byte_identical_to_secret_only() {
+        let dir = fresh_dir("gate-off");
+        std::fs::write(
+            dir.join("cfg.js"),
+            "const stripeKey = \"sk_live_FAKEFAKEFAKE1234\";\n\
+             const dbUrl = \"postgres://u:p@host:5432/db\";\n\
+             const apiBase = \"https://api.example.com/v1\";\n",
+        )
+        .unwrap();
+
+        let plan = plan(&dir, &EnvOptions::default()).unwrap();
+        assert_eq!(
+            plan.entries.len(),
+            1,
+            "only the secret is planned when the gate is off"
+        );
+        assert_eq!(plan.entries[0].var_name, "STRIPE_SECRET_KEY");
+        assert_eq!(plan.entries[0].secret.provider, "stripe");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// With the gate ON: the credentialed DSN and the plain URL are planned
+    /// alongside the secret, and the DSN's finding masks the credential — the
+    /// raw password never reaches the output (T-08-04).
+    #[test]
+    fn include_urls_on_plans_urls_and_masks_credentials() {
+        let dir = fresh_dir("gate-on");
+        std::fs::write(
+            dir.join("cfg.js"),
+            "const stripeKey = \"sk_live_FAKEFAKEFAKE1234\";\n\
+             const dbUrl = \"postgres://admin:s3cr3tP@db.internal:5432/app\";\n\
+             const apiBase = \"https://api.example.com/v1\";\n",
+        )
+        .unwrap();
+
+        let opts = EnvOptions {
+            include_urls: true,
+            ..Default::default()
+        };
+        let plan = plan(&dir, &opts).unwrap();
+        let names: Vec<&str> = plan.entries.iter().map(|e| e.var_name.as_str()).collect();
+        assert_eq!(plan.entries.len(), 3, "secret + DSN + URL: {names:?}");
+        assert!(names.contains(&"STRIPE_SECRET_KEY"), "{names:?}");
+        assert!(names.contains(&"DB_URL"), "{names:?}");
+        assert!(names.contains(&"API_BASE"), "{names:?}");
+
+        // credential never leaks into any finding field
+        let findings = findings(&plan, &opts);
+        let json = serde_json::to_string(&findings).unwrap();
+        assert!(
+            !json.contains("s3cr3tP"),
+            "raw DSN credential leaked into findings: {json}"
+        );
+        assert!(
+            json.contains("postgres://admin:…@db.internal:5432/app"),
+            "masked DSN preview missing: {json}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn fresh_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "getdev-env-{tag}-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 
     #[test]

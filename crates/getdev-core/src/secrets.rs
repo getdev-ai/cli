@@ -206,6 +206,136 @@ pub fn mask(value: &str, prefix: &str) -> String {
     format!("{head}…{tail}")
 }
 
+/// Connection-string / DSN schemes whose `scheme://…` shape is a database or
+/// message-broker endpoint. With `env --include-urls` these are extracted even
+/// without embedded credentials — the endpoint is deployment config that
+/// belongs in `.env`. A credentialed member additionally masks its userinfo.
+const DSN_SCHEMES: &[&str] = &[
+    "postgres",
+    "postgresql",
+    "mysql",
+    "mysqlx",
+    "mariadb",
+    "redis",
+    "rediss",
+    "mongodb",
+    "mongodb+srv",
+    "amqp",
+    "amqps",
+];
+
+/// Deterministic URL / connection-string classifier for `env --include-urls`
+/// (docs/SPEC-COMMANDS.md §env). Pure, no network, a single bounded
+/// left-to-right scan (no regex, so no catastrophic backtracking — T-08-06).
+/// Returns a [`SecretMatch`] reusing the secret pipeline's shape so the env
+/// plan + `env/hardcoded-secret` finding path stay unchanged; `env_key` is
+/// left empty so [`crate::env::plan`] derives the var name from the identifier
+/// (mirroring the entropy fallback).
+///
+/// Fires on:
+///   - any `scheme://user[:pass]@host…` embedding credentials — a credentialed
+///     DSN, or a userinfo-token URL like a Sentry `https://<key>@sentry.io/…`
+///     DSN → high severity, credential masked ([`mask_url_credential`]);
+///   - a known DSN scheme (`postgres://`, `redis://`, `mongodb+srv://`, …) with
+///     a host, even without credentials → deployment config;
+///   - a plain `http(s)://host/…` URL → deployment config.
+///
+/// Rejects (the negative-fixture FP posture): scheme-less values (relative
+/// paths), bare schemes with no host, and any non-http/non-DSN scheme that
+/// carries no embedded credential. Import specifiers and commented-out URLs
+/// never reach here — the string-assignment walk only yields real assignment
+/// RHS literals.
+pub fn classify_url(value: &str) -> Option<SecretMatch> {
+    let value = value.trim();
+    let (scheme, rest) = value.split_once("://")?;
+    // RFC-3986 scheme: ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )
+    let mut scheme_chars = scheme.chars();
+    if !scheme_chars.next().is_some_and(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    if !scheme_chars.all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.') {
+        return None;
+    }
+    let scheme_l = scheme.to_ascii_lowercase();
+
+    // authority runs up to the first path / query / fragment delimiter
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    let (userinfo, host_port) = match authority.rsplit_once('@') {
+        Some((u, h)) => (Some(u), h),
+        None => (None, authority),
+    };
+    // a host must be present — rejects a bare `scheme://` with no authority
+    let host = host_port.split(':').next().unwrap_or("");
+    if host.is_empty() {
+        return None;
+    }
+
+    let has_credential = userinfo.is_some_and(|u| !u.is_empty());
+    let is_http = scheme_l == "http" || scheme_l == "https";
+    let is_dsn = DSN_SCHEMES.contains(&scheme_l.as_str());
+
+    if has_credential {
+        // a credentialed URL/DSN carries a secret in its userinfo — never
+        // print it raw; mask the credential (T-08-04).
+        Some(SecretMatch {
+            pattern_id: "connection-string".to_owned(),
+            provider: "url".to_owned(),
+            env_key: String::new(),
+            severity: Severity::High,
+            confidence: Confidence::High,
+            masked: mask_url_credential(value),
+        })
+    } else if is_dsn {
+        // a DSN endpoint without embedded credentials — deployment config
+        Some(SecretMatch {
+            pattern_id: "connection-string".to_owned(),
+            provider: "url".to_owned(),
+            env_key: String::new(),
+            severity: Severity::Low,
+            confidence: Confidence::Medium,
+            masked: value.to_owned(),
+        })
+    } else if is_http {
+        // a plain public http(s) URL — deployment config, no secret
+        Some(SecretMatch {
+            pattern_id: "url".to_owned(),
+            provider: "url".to_owned(),
+            env_key: String::new(),
+            severity: Severity::Low,
+            confidence: Confidence::Medium,
+            masked: value.to_owned(),
+        })
+    } else {
+        None
+    }
+}
+
+/// Mask the credential embedded in a `scheme://user[:pass]@host…` value so a
+/// finding can name the endpoint without ever printing the secret userinfo
+/// (T-08-04). The password (and a bare userinfo token) is elided; the scheme,
+/// host, and path stay visible — they are deployment config, not secrets. A
+/// value with no userinfo is returned unchanged.
+pub fn mask_url_credential(value: &str) -> String {
+    let value = value.trim();
+    let Some((scheme, rest)) = value.split_once("://") else {
+        return value.to_owned();
+    };
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    let tail = &rest[authority_end..];
+    let Some((userinfo, host_port)) = authority.rsplit_once('@') else {
+        return value.to_owned();
+    };
+    let masked_userinfo = match userinfo.split_once(':') {
+        // `user:pass` → keep the username, elide the password
+        Some((user, _pass)) => format!("{user}:…"),
+        // a bare userinfo token (e.g. a Sentry DSN key) → elide entirely
+        None => "…".to_owned(),
+    };
+    format!("{scheme}://{masked_userinfo}@{host_port}{tail}")
+}
+
 pub fn identifier_suggests_secret(identifier: &str) -> bool {
     let lower = identifier.to_lowercase();
     [
@@ -410,5 +540,89 @@ mod tests {
         );
         assert_eq!(mask("abcdefghijklmnop", ""), "abc…mnop");
         assert_eq!(mask("short", ""), "…");
+    }
+
+    #[test]
+    fn classify_url_detects_plain_http() {
+        let m = classify_url("https://api.example.com/v1").unwrap();
+        assert_eq!(m.provider, "url");
+        assert_eq!(m.pattern_id, "url");
+        assert_eq!(m.severity, Severity::Low);
+        assert!(m.env_key.is_empty(), "env_key derived from identifier");
+        // no credential → nothing to hide, endpoint stays visible
+        assert_eq!(m.masked, "https://api.example.com/v1");
+    }
+
+    #[test]
+    fn classify_url_detects_credentialless_dsn() {
+        let m = classify_url("redis://cache.internal:6379/0").unwrap();
+        assert_eq!(m.provider, "url");
+        assert_eq!(m.pattern_id, "connection-string");
+        assert_eq!(m.severity, Severity::Low);
+    }
+
+    /// T-08-04: a credentialed DSN must be classified high severity and its
+    /// password must never appear in the masked preview.
+    #[test]
+    fn classify_url_masks_credentialed_dsn() {
+        let raw = "postgres://admin:s3cr3tP@ss@db.example.com:5432/app";
+        let m = classify_url(raw).unwrap();
+        assert_eq!(m.provider, "url");
+        assert_eq!(m.pattern_id, "connection-string");
+        assert_eq!(m.severity, Severity::High);
+        assert_eq!(m.confidence, Confidence::High);
+        assert!(
+            !m.masked.contains("s3cr3tP"),
+            "password leaked into mask: {}",
+            m.masked
+        );
+        // username + host stay visible; password elided (rsplit on the last @)
+        assert_eq!(m.masked, "postgres://admin:…@db.example.com:5432/app");
+    }
+
+    /// A Sentry-style DSN embeds its key as a bare userinfo token — elide it
+    /// whole (no colon → no username to keep).
+    #[test]
+    fn classify_url_masks_userinfo_token() {
+        let raw = "https://abc123deadbeef@o123.ingest.sentry.io/456";
+        let m = classify_url(raw).unwrap();
+        assert_eq!(m.severity, Severity::High);
+        assert!(!m.masked.contains("abc123deadbeef"), "{}", m.masked);
+        assert_eq!(m.masked, "https://…@o123.ingest.sentry.io/456");
+    }
+
+    #[test]
+    fn classify_url_rejects_relative_paths_and_bare_schemes() {
+        // no scheme (relative filesystem path) → not a URL
+        assert!(classify_url("./config/settings.json").is_none());
+        assert!(classify_url("../secrets/prod.pem").is_none());
+        assert!(classify_url("config/app.yaml").is_none());
+        // scheme with no host → rejected
+        assert!(classify_url("https://").is_none());
+        assert!(classify_url("postgres://").is_none());
+        // an unknown scheme with no credential is not extracted
+        assert!(classify_url("file:///etc/hosts").is_none());
+        assert!(classify_url("custom://plain-host").is_none());
+        // not even a URL shape
+        assert!(classify_url("just a sentence").is_none());
+    }
+
+    /// An unknown scheme that DOES embed a credential is still secret-bearing
+    /// and must be caught + masked.
+    #[test]
+    fn classify_url_catches_credentialed_unknown_scheme() {
+        let m = classify_url("ftp://user:hunter2@files.example.com/x").unwrap();
+        assert_eq!(m.severity, Severity::High);
+        assert!(!m.masked.contains("hunter2"), "{}", m.masked);
+    }
+
+    #[test]
+    fn mask_url_credential_passthrough_without_userinfo() {
+        // nothing to mask — returned unchanged
+        assert_eq!(
+            mask_url_credential("https://api.example.com/v1"),
+            "https://api.example.com/v1"
+        );
+        assert_eq!(mask_url_credential("not-a-url"), "not-a-url");
     }
 }
