@@ -99,9 +99,8 @@ pub fn run(args: &InitArgs) -> anyhow::Result<u8> {
         if offer("install a pre-commit hook (getdev check)?", args.yes)? {
             let hook_path = git_dir.join("hooks").join("pre-commit");
             if hook_path.exists() {
-                notes.push(
-                    ".git/hooks/pre-commit already exists — leaving it untouched".to_owned(),
-                );
+                notes
+                    .push(".git/hooks/pre-commit already exists — leaving it untouched".to_owned());
             } else {
                 writes.push(PlannedWrite::WriteFile {
                     path: hook_path.clone(),
