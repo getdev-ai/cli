@@ -240,8 +240,13 @@ fn bench_audit(c: &mut Criterion) {
 
     c.bench_function("audit::run 500-file/100k-LOC", |b| {
         b.iter(|| {
+            // Parse-once: the walk + parse now live in `ScanContext::build`;
+            // build it inside the timed loop so the bench keeps reporting the
+            // full command cost (walk + parse + analyze) after 07-02.
+            let ctx = getdev_core::scan::ScanContext::build(black_box(&root))
+                .expect("build scan context");
             let (findings, _skipped) =
-                audit::run(black_box(&root), &pack, &detected, &opts).expect("audit run");
+                audit::run(&ctx, &pack, &detected, &opts).expect("audit run");
             black_box(findings.len());
         });
     });

@@ -72,8 +72,13 @@ pub fn run(args: &AuditArgs) -> anyhow::Result<u8> {
         embedded
     };
 
+    // Parse-once: build the shared scan context ONCE (walk + parse), then hand
+    // it to the analyzer — there is exactly one walk/parse code path (07-02).
+    // `ctx.skipped` carries the oversized/unreadable SOURCE files; `audit::run`
+    // returns any non-source read failures it incurs on top.
+    let ctx = getdev_core::scan::ScanContext::build(&args.path)?;
     let (mut findings, audit_skipped) = audit::run(
-        &args.path,
+        &ctx,
         &pack,
         &detected,
         &AuditOptions {
@@ -81,6 +86,7 @@ pub fn run(args: &AuditArgs) -> anyhow::Result<u8> {
         },
     )?;
     skip_errors.extend(audit_skipped);
+    skip_errors.extend(ctx.skipped);
 
     // `--ignore <rule-id>` merges into `[ignore] rules` so it flows through
     // the same `suppress::filter_findings` path as the config-file

@@ -19,13 +19,36 @@
 
 use std::path::PathBuf;
 
-use getdev_core::audit::{self, AuditOptions};
+use getdev_core::audit::AuditOptions;
 use getdev_core::frameworks::DetectedFrameworks;
 use getdev_core::rules::{self, Framework, Matcher, Rule, RulePack};
 use getdev_core::scan::Lang;
 
 fn fixtures_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/fixtures/audit")
+}
+
+/// Test-local `audit::run` shim: build a one-shot parse-once `ScanContext` for
+/// `root` and drive the real `getdev_core::audit::run` over it — exactly how
+/// the CLI (and, in 07-04, `check`) invoke audit post-07-02. Keeps every
+/// `audit::run(&root, …)` fixture assertion below byte-identical while the
+/// analyzer's public entry now takes `&ScanContext` instead of `&Path`.
+mod audit {
+    use getdev_core::audit::{AuditError, AuditOptions};
+    use getdev_core::findings::Finding;
+    use getdev_core::frameworks::DetectedFrameworks;
+    use getdev_core::rules::RulePack;
+    use getdev_core::scan::{ScanContext, ScanError};
+
+    pub fn run(
+        root: &std::path::Path,
+        pack: &RulePack,
+        frameworks: &DetectedFrameworks,
+        opts: &AuditOptions,
+    ) -> Result<(Vec<Finding>, Vec<ScanError>), AuditError> {
+        let ctx = ScanContext::build(root).unwrap();
+        getdev_core::audit::run(&ctx, pack, frameworks, opts)
+    }
 }
 
 /// A `DetectedFrameworks` with every framework `rule` declares forced

@@ -11,15 +11,16 @@
 
 use std::path::Path;
 
-use getdev_grammars::tree_sitter::{Node, Parser, QueryCursor};
+use getdev_grammars::tree_sitter::{Node, QueryCursor};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use streaming_iterator::StreamingIterator;
 
-use crate::deps::relative_display;
 use crate::findings::{Confidence, Finding, Severity};
 use crate::frameworks::DetectedFrameworks;
 use crate::rules::{CompiledTextMatcher, Matcher, Rule, RulePack};
-use crate::scan::{project_walker, read_source_capped, Lang, ScanError, StringAssignment};
+use crate::scan::{
+    read_source_capped, Lang, ScanContext, ScanError, ScannedFile, StringAssignment,
+};
 use crate::secrets::{PatternError, SecretMatch, SecretPatterns};
 
 /// Everything that filters findings after they're produced.
@@ -50,19 +51,28 @@ pub enum AuditError {
     Secrets(#[from] PatternError),
 }
 
-/// Run every rule in `pack` over every file under `root`, gated by
-/// `frameworks` (project-level `frameworks:` selector) and each rule's
-/// `languages`/`path_glob` selectors, producing schema-conformant
+/// Run every rule in `pack` over the shared parse-once [`ScanContext`] `ctx`,
+/// gated by `frameworks` (project-level `frameworks:` selector) and each
+/// rule's `languages`/`path_glob` selectors, producing schema-conformant
 /// [`Finding`]s. Findings below `opts.severity_min` are dropped before
 /// returning.
+///
+/// Parse-once (CLAUDE.md rule 5): audit does NO walk and NO parse of its own —
+/// it iterates `ctx.files` (already walked + parsed ONCE by
+/// [`ScanContext::build`]) for the AST/secret/text matchers over source files,
+/// and `ctx.other_files` for the text-regex matcher kind over non-source files
+/// (Firebase `.rules`/`.rules.json`), reading only the few that a `file_glob`
+/// selects. The oversized/unreadable SOURCE files the shared scan pass already
+/// skipped live in `ctx.skipped`; the second return value here carries only the
+/// non-source read failures audit itself incurs.
 ///
 /// # Errors
 /// Returns [`AuditError`] only for fatal engine conditions (a grammar/query
 /// mismatch, or the embedded secret pattern pack failing to parse) — never
 /// for a single unreadable/oversized project file, which is collected in
-/// the second return value instead.
+/// the second return value (or `ctx.skipped`) instead.
 pub fn run(
-    root: &Path,
+    ctx: &ScanContext,
     pack: &RulePack,
     frameworks: &DetectedFrameworks,
     opts: &AuditOptions,
@@ -80,67 +90,96 @@ pub fn run(
     let mut findings = Vec::new();
     let mut skipped = Vec::new();
 
-    for entry in project_walker(root).build().flatten() {
-        if !entry.file_type().is_some_and(|t| t.is_file()) {
-            continue;
-        }
-        let path = entry.path();
-        let rel = relative_display(path, root);
-        // IN-02: glob text-regex `file_glob` against the SAME base the AST
-        // `path_glob` gate uses — the project-relative path — not the
-        // absolute `entry.path()`. Previously text matchers globbed the
-        // absolute path while `path_glob_gate` globbed `rel`, so a
-        // root-relative `file_glob` (e.g. "config/*.rules") silently never
-        // matched (shipped firebase globs only worked via their `**/` prefix).
-        let rel_path = Path::new(rel.as_str());
-        let lang = Lang::from_path(path);
+    // Source files: walked + parsed exactly once by `ScanContext`. Run the
+    // text-regex matchers over the cached source, then the AST/secret matchers
+    // over the cached tree — no re-read, no re-parse.
+    for file in &ctx.files {
+        let rel = file.rel.to_string_lossy();
+        // IN-02: glob text-regex `file_glob` against the SAME project-relative
+        // base the AST `path_glob` gate uses, never the absolute path.
+        let rel_path = file.rel.as_path();
+        run_text_matchers(
+            &text_rules,
+            &path_globs,
+            frameworks,
+            rel_path,
+            &rel,
+            file.source.as_bytes(),
+            &mut findings,
+        );
 
-        let candidate_text: Vec<&TextRule<'_>> = text_rules
+        match process_lang_file(file, &rel, &lang_ctx) {
+            Ok(mut hits) => findings.append(&mut hits),
+            Err(err @ (ScanError::Grammar(_) | ScanError::Query(_))) => {
+                return Err(err.into());
+            }
+            Err(err) => skipped.push(err),
+        }
+    }
+
+    // Non-source files: the text-regex matcher kind only (Firebase
+    // `.rules`/`.rules.json` — no tree-sitter grammar). Enumerated from the
+    // SAME single walk via `ctx.other_files`; a file no `file_glob` selects is
+    // never read (F7-adjacent: don't pay a read cost for files no rule cares
+    // about).
+    for other in &ctx.other_files {
+        let rel = other.rel.to_string_lossy();
+        let rel_path = other.rel.as_path();
+        let has_candidate = text_rules
             .iter()
-            .filter(|tr| tr.matcher.glob_matches(rel_path))
-            .collect();
-
-        // Nothing in the pack could possibly apply to this file — skip it
-        // without even reading it (F7-adjacent: don't pay a read cost for
-        // files no rule cares about).
-        if lang.is_none() && candidate_text.is_empty() {
+            .any(|tr| tr.matcher.glob_matches(rel_path));
+        if !has_candidate {
             continue;
         }
-
-        let source = match read_source_capped(path) {
+        let source = match read_source_capped(&other.abs) {
             Ok(source) => source,
             Err(err) => {
                 skipped.push(err);
                 continue;
             }
         };
-        let bytes = source.as_bytes();
-
-        for tr in &candidate_text {
-            if !framework_gate(tr.rule, frameworks) {
-                continue;
-            }
-            if !path_glob_gate(path_globs[tr.rule_index].as_ref(), &rel) {
-                continue;
-            }
-            if tr.matcher.is_match(rel_path, bytes) {
-                findings.push(text_hit_to_finding(tr.rule, &rel));
-            }
-        }
-
-        if let Some(lang) = lang {
-            match process_lang_file(path, &rel, lang, &source, &lang_ctx) {
-                Ok(mut hits) => findings.append(&mut hits),
-                Err(err @ (ScanError::Grammar(_) | ScanError::Query(_))) => {
-                    return Err(err.into());
-                }
-                Err(err) => skipped.push(err),
-            }
-        }
+        run_text_matchers(
+            &text_rules,
+            &path_globs,
+            frameworks,
+            rel_path,
+            &rel,
+            source.as_bytes(),
+            &mut findings,
+        );
     }
 
     findings.retain(|f| f.severity >= opts.severity_min);
     Ok((findings, skipped))
+}
+
+/// Run every `{file_glob, text_pattern}` matcher whose glob selects `rel_path`
+/// against `bytes`, honoring the rule's `frameworks:` and `path_glob:` gates —
+/// shared verbatim between the source-file and non-source-file passes so the
+/// text-regex behavior can never drift between them.
+fn run_text_matchers(
+    text_rules: &[TextRule<'_>],
+    path_globs: &[Option<GlobSet>],
+    frameworks: &DetectedFrameworks,
+    rel_path: &Path,
+    rel: &str,
+    bytes: &[u8],
+    findings: &mut Vec<Finding>,
+) {
+    for tr in text_rules {
+        if !tr.matcher.glob_matches(rel_path) {
+            continue;
+        }
+        if !framework_gate(tr.rule, frameworks) {
+            continue;
+        }
+        if !path_glob_gate(path_globs[tr.rule_index].as_ref(), rel) {
+            continue;
+        }
+        if tr.matcher.is_match(rel_path, bytes) {
+            findings.push(text_hit_to_finding(tr.rule, rel));
+        }
+    }
 }
 
 /// Everything [`process_lang_file`] needs beyond the current file itself —
@@ -153,24 +192,18 @@ struct LangFileContext<'a> {
     secret_patterns: &'a SecretPatterns,
 }
 
-/// One file's worth of AST/secret matching — parses `source` exactly ONCE
-/// (Pitfall 7) and runs every applicable rule's AST or secret matcher
-/// against that single tree.
+/// One file's worth of AST/secret matching over an ALREADY-parsed
+/// [`ScannedFile`] (Pitfall 7 / CLAUDE.md rule 5 — the file was parsed once by
+/// [`ScanContext::build`], never re-parsed here): runs every applicable rule's
+/// AST or secret matcher against that single cached tree.
 fn process_lang_file(
-    path: &Path,
+    file: &ScannedFile,
     rel: &str,
-    lang: Lang,
-    source: &str,
     ctx: &LangFileContext<'_>,
 ) -> Result<Vec<Finding>, ScanError> {
-    let language = lang.language();
-    let mut parser = Parser::new();
-    parser.set_language(&language)?;
-    let tree = parser.parse(source, None).ok_or_else(|| ScanError::Parse {
-        path: path.to_path_buf(),
-    })?;
-    let root_node = tree.root_node();
-    let bytes = source.as_bytes();
+    let lang = file.lang;
+    let root_node = file.tree.root_node();
+    let bytes = file.source.as_bytes();
 
     let mut findings = Vec::new();
 
@@ -203,7 +236,12 @@ fn process_lang_file(
         // Secret: classify the file's string assignments once if this rule
         // declares a secret matcher.
         if rule.matchers.iter().any(|m| matches!(m, Matcher::Secret)) {
-            let assignments = crate::scan::string_assignments_from_tree(&tree, source, lang, path)?;
+            let assignments = crate::scan::string_assignments_from_tree(
+                &file.tree,
+                &file.source,
+                lang,
+                &file.abs,
+            )?;
             for assignment in &assignments {
                 if let Some(secret) = ctx
                     .secret_patterns
@@ -443,6 +481,21 @@ mod tests {
     use super::*;
     use crate::rules::{self, QueryCache};
     use std::path::PathBuf;
+
+    /// Test-local shim: build a one-shot parse-once [`ScanContext`] for `root`
+    /// and drive the real `super::run` over it — exactly how the CLI (and, in
+    /// 07-04, `check`) invoke audit post-07-02. Shadows the glob-imported
+    /// `super::run` so every fixture assertion below stays byte-identical while
+    /// the analyzer's public entry now takes `&ScanContext` instead of `&Path`.
+    fn run(
+        root: &Path,
+        pack: &RulePack,
+        frameworks: &DetectedFrameworks,
+        opts: &AuditOptions,
+    ) -> Result<(Vec<Finding>, Vec<ScanError>), AuditError> {
+        let ctx = crate::scan::ScanContext::build(root).unwrap();
+        super::run(&ctx, pack, frameworks, opts)
+    }
 
     fn tempdir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(

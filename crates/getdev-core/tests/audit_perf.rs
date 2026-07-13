@@ -266,16 +266,21 @@ fn audit_run_completes_under_2s_on_500_file_100k_loc_tree() {
     let detected = frameworks::detect(&graph, &root);
     let opts = AuditOptions::default();
 
+    // Build the shared parse-once context INSIDE the timed block so the gate
+    // still measures the true `getdev audit` command cost (walk + parse +
+    // analyze), now that walk/parse live in `ScanContext::build` (07-02).
     let start = Instant::now();
+    let ctx = getdev_core::scan::ScanContext::build(&root).expect("build scan context");
     let (findings, skipped) =
-        audit::run(&root, &pack, &detected, &opts).expect("audit run must succeed");
+        audit::run(&ctx, &pack, &detected, &opts).expect("audit run must succeed");
     let elapsed = start.elapsed();
 
     let _ = std::fs::remove_dir_all(&root);
 
     assert!(
-        skipped.is_empty(),
-        "no file in the generated tree should be unreadable/oversized: {skipped:?}"
+        skipped.is_empty() && ctx.skipped.is_empty(),
+        "no file in the generated tree should be unreadable/oversized: {skipped:?} / {:?}",
+        ctx.skipped
     );
     assert!(
         !findings.is_empty(),

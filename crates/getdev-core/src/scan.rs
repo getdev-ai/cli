@@ -275,29 +275,43 @@ pub struct FileScan {
     pub has_syntax_errors: bool,
 }
 
-/// The single source-file walk every collector in this crate builds on
-/// (IN-05): apply [`project_walker`], keep only regular files with a
-/// supported extension, and invoke `visit(path, lang)` for each. Extracting
-/// it means the prune/skip semantics (which dirs are excluded, which entries
-/// count as files) can never drift between `scan_path` and
-/// `collect_string_assignments`. `visit` may return `Err(E)` to abort the
-/// whole walk early (used to fail loudly on grammar/query bugs); a normal
-/// per-file skip is handled inside `visit` and returns `Ok(())`.
-fn for_each_source_file<E>(
+/// The single PROJECT-file walk every collector in this crate builds on
+/// (IN-05): apply [`project_walker`], keep every regular file, and invoke
+/// `visit(path, Lang::from_path(path))` for each — `Some(lang)` for a
+/// supported source file, `None` for any other project file (a Firebase
+/// `.rules`/`.rules.json`, a `.md`, etc.). Extracting it means the
+/// prune/skip semantics (which dirs are excluded, which entries count as
+/// files) can never drift between the source collectors and
+/// [`ScanContext::build`]'s non-source capture. `visit` may return `Err(E)`
+/// to abort the whole walk early (used to fail loudly on grammar/query
+/// bugs); a normal per-file skip is handled inside `visit` and returns
+/// `Ok(())`.
+fn for_each_project_file<E>(
     root: &Path,
-    mut visit: impl FnMut(&Path, Lang) -> Result<(), E>,
+    mut visit: impl FnMut(&Path, Option<Lang>) -> Result<(), E>,
 ) -> Result<(), E> {
     for entry in project_walker(root).build().flatten() {
         if !entry.file_type().is_some_and(|t| t.is_file()) {
             continue;
         }
         let path = entry.path();
-        let Some(lang) = Lang::from_path(path) else {
-            continue;
-        };
-        visit(path, lang)?;
+        visit(path, Lang::from_path(path))?;
     }
     Ok(())
+}
+
+/// The SOURCE-file slice of [`for_each_project_file`]: same walk, but only the
+/// supported-language files are visited. `scan_path` /
+/// `collect_string_assignments` build on this so a non-source file is never
+/// handed to a tree-sitter parser.
+fn for_each_source_file<E>(
+    root: &Path,
+    mut visit: impl FnMut(&Path, Lang) -> Result<(), E>,
+) -> Result<(), E> {
+    for_each_project_file(root, |path, lang| match lang {
+        Some(lang) => visit(path, lang),
+        None => Ok(()),
+    })
 }
 
 /// Walk `root` (honoring .gitignore) and parse every supported source file,
@@ -427,6 +441,27 @@ impl fmt::Debug for ScannedFile {
     }
 }
 
+/// A non-source project file recorded by [`ScanContext::build`] during its
+/// single walk — one with no supported tree-sitter grammar (a Firebase
+/// `firestore.rules` / `database.rules.json`, a `.md`, a `.lock`, …). Only its
+/// path is captured, never its contents: the sole consumer today is `audit`'s
+/// `{file_glob, text_pattern}` matcher kind (the Firebase-open-rules rule), and
+/// it reads ONLY the handful of files whose `file_glob` actually matches (via
+/// [`read_source_capped`]) rather than every non-source file in the tree.
+///
+/// This is what lets `audit::run` text-scan non-source files WITHOUT a second
+/// project walk of its own — there is exactly one walk code path
+/// ([`ScanContext::build`]), source and non-source alike (Phase 7 Success
+/// Criterion 1 / 07-02 "no parallel solo path").
+#[derive(Debug, Clone)]
+pub struct OtherFile {
+    /// project-relative display path (forward slashes), same convention as
+    /// [`ScannedFile::rel`]
+    pub rel: PathBuf,
+    /// absolute on-disk path, as yielded by the walker
+    pub abs: PathBuf,
+}
+
 /// A parse-once shared context: walks the project tree EXACTLY ONCE (via the
 /// same [`project_walker`] every analyzer uses today) and parses every
 /// eligible JS/TS/TSX/Python source file EXACTLY ONCE, caching the result in
@@ -444,6 +479,11 @@ impl fmt::Debug for ScannedFile {
 pub struct ScanContext {
     pub root: PathBuf,
     pub files: Vec<ScannedFile>,
+    /// Non-source project files (no supported grammar), captured in the SAME
+    /// walk as [`Self::files`] so a text-only consumer (`audit`'s Firebase
+    /// `{file_glob, text_pattern}` matcher) needs no second walk. See
+    /// [`OtherFile`].
+    pub other_files: Vec<OtherFile>,
     pub skipped: Vec<ScanError>,
 }
 
@@ -457,24 +497,33 @@ impl ScanContext {
     /// a per-file read/parse failure is folded into [`Self::skipped`] instead.
     pub fn build(root: &Path) -> Result<Self, ScanError> {
         let mut files = Vec::new();
+        let mut other_files = Vec::new();
         let mut skipped = Vec::new();
 
         // Same walker, same eligibility gate, same read/parse idiom as
         // `scan_path`/`audit::run` — absorbed here ONCE so no analyzer repeats
         // it and the file set can never silently drift between them (Pitfall 1).
-        for_each_source_file(root, |path, lang| {
-            match parse_source_file(path, lang) {
-                Ok((source, tree)) => files.push(ScannedFile {
+        // Source files are parsed once; non-source files are recorded path-only
+        // (no read, no parse) for `audit`'s text-regex matcher kind.
+        for_each_project_file(root, |path, lang| {
+            match lang {
+                Some(lang) => match parse_source_file(path, lang) {
+                    Ok((source, tree)) => files.push(ScannedFile {
+                        rel: PathBuf::from(relative_display(path, root)),
+                        abs: path.to_path_buf(),
+                        lang,
+                        source,
+                        tree,
+                    }),
+                    // grammar/query errors are programming bugs — fail loudly;
+                    // per-file read/parse trouble is expected in the wild — skip.
+                    Err(err @ (ScanError::Grammar(_) | ScanError::Query(_))) => return Err(err),
+                    Err(err) => skipped.push(err),
+                },
+                None => other_files.push(OtherFile {
                     rel: PathBuf::from(relative_display(path, root)),
                     abs: path.to_path_buf(),
-                    lang,
-                    source,
-                    tree,
                 }),
-                // grammar/query errors are programming bugs — fail loudly;
-                // per-file read/parse trouble is expected in the wild — skip.
-                Err(err @ (ScanError::Grammar(_) | ScanError::Query(_))) => return Err(err),
-                Err(err) => skipped.push(err),
             }
             Ok(())
         })?;
@@ -482,6 +531,7 @@ impl ScanContext {
         Ok(Self {
             root: root.to_path_buf(),
             files,
+            other_files,
             skipped,
         })
     }
