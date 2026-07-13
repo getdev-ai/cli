@@ -18,6 +18,7 @@ pub mod review;
 pub mod rules;
 pub mod scan;
 pub mod secrets;
+pub mod ship;
 pub mod suppress;
 
 /// The parse-once shared context (walk once, parse once, analyzers as
