@@ -26,7 +26,7 @@ use getdev_core::audit::{self, AuditOptions};
 use getdev_core::config::Config;
 use getdev_core::deps;
 use getdev_core::env::{self, EnvOptions};
-use getdev_core::findings::{FindingsReport, ProjectInfo, Severity, SkippedEntry};
+use getdev_core::findings::{Finding, FindingsReport, ProjectInfo, Severity, SkippedEntry};
 use getdev_core::frameworks;
 use getdev_core::report::{self, ColorMode};
 use getdev_core::review::{self, ReviewOptions};
@@ -62,57 +62,101 @@ pub fn run(args: &CheckArgs) -> anyhow::Result<u8> {
     // carries the oversized/unreadable SOURCE skips, surfaced once at the end.
     let ctx = ScanContext::build(&args.path)?;
 
-    let mut findings = Vec::new();
     let mut skip_errors: Vec<getdev_core::scan::ScanError> = Vec::new();
 
-    // --- real: deps/registry + apis + model strings over the shared context ---
+    // --- shared prerequisites for the graph-dependent legs (real + audit) ---
     // The dependency graph is built over the SAME context (no second walk);
     // `build_graph_with_context` returns only manifest parse skips — the
-    // context's own source skips live in `ctx.skipped`, surfaced below.
+    // context's own source skips live in `ctx.skipped`, surfaced below. Both
+    // `real` (registry/phantom-import verdicts) and `audit` (framework
+    // detection) read this one graph, and `audit` also needs the detected
+    // frameworks + the embedded pack — so these are computed ONCE up front,
+    // before the parallel fan-out.
     let (graph, manifest_skipped) = deps::build_graph_with_context(&ctx, &args.path)?;
     skip_errors.extend(manifest_skipped);
-    let real_findings = real::collect_real_findings(
-        &ctx,
-        &graph,
-        &args.path,
-        args.offline,
-        &args.cfg.real.typosquat_sensitivity,
-        args.cfg.real.check_apis,
-    )?;
-    findings.extend(real_findings);
-
-    // --- audit: framework detection off the same graph, matchers over ctx ---
     let detected = frameworks::detect(&graph, &args.path);
     let pack = rules::load_embedded()?;
-    let (audit_findings, audit_skipped) = audit::run(
-        &ctx,
-        &pack,
-        &detected,
-        // check reports every finding it aggregates; the Ship Score already
-        // weights by severity, so no display floor is applied here.
-        &AuditOptions {
-            severity_min: Severity::Info,
-        },
-    )?;
-    findings.extend(audit_findings);
-    skip_errors.extend(audit_skipped);
 
-    // --- env DETECT (never --write from check): secrets over the shared ctx ---
-    // `--fix` maps to `env --write` via the existing global path in `main`,
-    // out of this default aggregation (docs/SPEC-COMMANDS.md `check` Flags).
+    // check reports every finding it aggregates; the Ship Score already weights
+    // by severity, so no display floor is applied to any leg.
+    let audit_options = AuditOptions {
+        severity_min: Severity::Info,
+    };
+    let review_options = ReviewOptions {
+        severity_min: Severity::Info,
+    };
+    // `--fix` maps to `env --write` via the existing global path in `main`, out
+    // of this default aggregation (docs/SPEC-COMMANDS.md `check` Flags) — env is
+    // DETECT-only here.
     let env_options = EnvOptions::default();
-    let env_plan = env::plan_from_context(&ctx, &env_options)?;
-    findings.extend(env::findings(&env_plan, &env_options));
 
-    // --- review --all over the shared context ---
-    // All-scope has no per-file skips of its own (they are in `ctx.skipped`).
-    let (review_findings, _review_skipped) = review::run_all(
-        &ctx,
-        &ReviewOptions {
-            severity_min: Severity::Info,
-        },
-    )?;
+    // --- fan the FOUR independent analyzer legs out over the shared context ---
+    // Each leg (`real` / `audit` / `env` detect / `review --all`) is a
+    // read-only visitor over the SAME shared `&ScanContext` (which is
+    // `Send + Sync` — the parse-once immutability established in 07-01/02/03),
+    // so they run CONCURRENTLY with rayon (CLAUDE.md's settled blocking + rayon
+    // model — never async/tokio). `real` fans its own registry lookups across
+    // rayon internally; nested rayon composes via work-stealing.
+    //
+    // DETERMINISM (CLAUDE.md "same input → same output"): thread completion
+    // order must NOT affect output. Each leg produces its findings in its own
+    // deterministic order; we reassemble them in a FIXED leg order below, and
+    // `FindingsReport::new` then re-sorts the whole set on a TOTAL key
+    // (severity → file → line → column → id → message, findings.rs IN-04) — so
+    // the aggregated report is byte-identical regardless of how the threads
+    // interleave.
+    type LegOutput = anyhow::Result<(Vec<Finding>, Vec<getdev_core::scan::ScanError>)>;
+    let real_leg = || -> LegOutput {
+        // deps/registry + apis + model strings over the shared context; its
+        // manifest skips were already surfaced above, so it contributes none.
+        let findings = real::collect_real_findings(
+            &ctx,
+            &graph,
+            &args.path,
+            args.offline,
+            &args.cfg.real.typosquat_sensitivity,
+            args.cfg.real.check_apis,
+        )?;
+        Ok((findings, Vec::new()))
+    };
+    let audit_leg = || -> LegOutput {
+        let (findings, skipped) = audit::run(&ctx, &pack, &detected, &audit_options)?;
+        Ok((findings, skipped))
+    };
+    let env_leg = || -> LegOutput {
+        let env_plan = env::plan_from_context(&ctx, &env_options)?;
+        Ok((env::findings(&env_plan, &env_options), Vec::new()))
+    };
+    let review_leg = || -> LegOutput {
+        // All-scope has no per-file skips of its own (they are in `ctx.skipped`).
+        let (findings, _review_skipped) = review::run_all(&ctx, &review_options)?;
+        Ok((findings, Vec::new()))
+    };
+
+    let ((real_out, audit_out), (env_out, review_out)) = rayon::join(
+        || rayon::join(real_leg, audit_leg),
+        || rayon::join(env_leg, review_leg),
+    );
+    let (real_findings, real_skipped) = real_out?;
+    let (audit_findings, audit_skipped) = audit_out?;
+    let (env_findings, env_skipped) = env_out?;
+    let (review_findings, review_skipped) = review_out?;
+
+    // Reassemble in a FIXED order (real → audit → env → review) — the same
+    // concatenation the sequential version produced; the total-key sort in
+    // `FindingsReport::new` makes this order immaterial to the final output,
+    // but keeping it fixed keeps the pre-sort intermediate deterministic too.
+    let mut findings = Vec::with_capacity(
+        real_findings.len() + audit_findings.len() + env_findings.len() + review_findings.len(),
+    );
+    findings.extend(real_findings);
+    findings.extend(audit_findings);
+    findings.extend(env_findings);
     findings.extend(review_findings);
+    skip_errors.extend(real_skipped);
+    skip_errors.extend(audit_skipped);
+    skip_errors.extend(env_skipped);
+    skip_errors.extend(review_skipped);
 
     // The shared context's own source read/parse skips, surfaced EXACTLY once
     // (each `_with_context` entry deliberately omits them — no double-count).
