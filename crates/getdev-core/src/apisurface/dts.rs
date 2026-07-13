@@ -18,7 +18,7 @@ use serde::Deserialize;
 use streaming_iterator::StreamingIterator;
 
 use crate::deps::Ecosystem;
-use crate::scan::{Lang, ScanError};
+use crate::scan::{Lang, ScanContext, ScanError, ScannedFile};
 
 use super::{relative_display, ApiSurface, SurfaceError, SurfaceTier, UsageSite};
 
@@ -656,49 +656,33 @@ fn import_binding_query(lang: Lang) -> &'static str {
 const MEMBER_EXPRESSION_QUERY: &str =
     "(member_expression object: (identifier) @obj property: (property_identifier) @prop)";
 
-/// Walk `root`'s project source (never `node_modules`) and collect every
-/// `pkg.member` / named-import usage site. Same skip-not-fail contract as
-/// [`crate::scan::collect_string_assignments`].
-pub(crate) fn collect_js_usages(
-    root: &Path,
-) -> Result<(Vec<UsageSite>, Vec<ScanError>), ScanError> {
+/// Collect every `pkg.member` / named-import usage site across a parse-once
+/// [`ScanContext`]'s JS/TS/TSX project source WITHOUT a walk or parse of its
+/// own: each already-parsed [`ScannedFile`] is queried against its cached
+/// `tree`/`source` (CLAUDE.md rule 5). This is the PROJECT-source usage walk
+/// only — installed-package surface enumeration (`enumerate_js` /
+/// `parse_dts_file` over `node_modules/<pkg>`) is a SEPARATE, unchanged path
+/// over files the context never walks. Source read/parse skips already live in
+/// [`ScanContext::skipped`]; a per-file query-compile failure (a programming
+/// bug proven impossible by the in-crate tests) is folded away.
+pub(crate) fn collect_js_usages(ctx: &ScanContext) -> Vec<UsageSite> {
     let mut results = Vec::new();
-    let mut skipped = Vec::new();
 
-    for entry in crate::scan::project_walker(root).build().flatten() {
-        if !entry.file_type().is_some_and(|t| t.is_file()) {
+    for file in &ctx.files {
+        if !matches!(file.lang, Lang::JavaScript | Lang::TypeScript | Lang::Tsx) {
             continue;
         }
-        let path = entry.path();
-        let Some(lang) = Lang::from_path(path) else {
-            continue;
-        };
-        if !matches!(lang, Lang::JavaScript | Lang::TypeScript | Lang::Tsx) {
-            continue;
-        }
-        match usages_in_file(path, lang, root) {
-            Ok(mut found) => results.append(&mut found),
-            Err(err @ (ScanError::Grammar(_) | ScanError::Query(_))) => return Err(err),
-            Err(err) => skipped.push(err),
-        }
+        results.extend(usages_in_tree(file, &ctx.root));
     }
 
-    Ok((results, skipped))
+    results
 }
 
-fn usages_in_file(path: &Path, lang: Lang, root: &Path) -> Result<Vec<UsageSite>, ScanError> {
-    let source = crate::scan::read_source_capped(path)?;
-
-    let language = lang.language();
-    let mut parser = Parser::new();
-    parser.set_language(&language)?;
-    let tree = parser
-        .parse(&source, None)
-        .ok_or_else(|| ScanError::Parse {
-            path: path.to_path_buf(),
-        })?;
-    let bytes = source.as_bytes();
-    let file_display = relative_display(path, root);
+fn usages_in_tree(file: &ScannedFile, root: &Path) -> Vec<UsageSite> {
+    let lang = file.lang;
+    let bytes = file.source.as_bytes();
+    let root_node = file.tree.root_node();
+    let file_display = relative_display(&file.abs, root);
 
     let mut results = Vec::new();
     // binding -> (bare package, subpath) — A13 carries the subpath forward
@@ -707,13 +691,15 @@ fn usages_in_file(path: &Path, lang: Lang, root: &Path) -> Result<Vec<UsageSite>
     let mut bindings: std::collections::HashMap<String, (String, Option<String>)> =
         std::collections::HashMap::new();
 
-    let binding_query = Query::new(&language, import_binding_query(lang))?;
+    let Ok(binding_query) = Query::new(&lang.language(), import_binding_query(lang)) else {
+        return results;
+    };
     let src_idx = binding_query.capture_index_for_name("src");
     let binding_idx = binding_query.capture_index_for_name("binding");
     let named_name_idx = binding_query.capture_index_for_name("named_name");
 
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&binding_query, tree.root_node(), bytes);
+    let mut matches = cursor.matches(&binding_query, root_node, bytes);
     while let Some(m) = matches.next() {
         let mut src = None;
         let mut binding = None;
@@ -746,12 +732,14 @@ fn usages_in_file(path: &Path, lang: Lang, root: &Path) -> Result<Vec<UsageSite>
         }
     }
 
-    let member_query = Query::new(&language, MEMBER_EXPRESSION_QUERY)?;
+    let Ok(member_query) = Query::new(&lang.language(), MEMBER_EXPRESSION_QUERY) else {
+        return results;
+    };
     let obj_idx = member_query.capture_index_for_name("obj");
     let prop_idx = member_query.capture_index_for_name("prop");
 
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&member_query, tree.root_node(), bytes);
+    let mut matches = cursor.matches(&member_query, root_node, bytes);
     while let Some(m) = matches.next() {
         let mut obj = None;
         let mut prop = None;
@@ -780,7 +768,7 @@ fn usages_in_file(path: &Path, lang: Lang, root: &Path) -> Result<Vec<UsageSite>
         }
     }
 
-    Ok(results)
+    results
 }
 
 #[cfg(test)]
@@ -1097,8 +1085,9 @@ mod tests {
         )
         .unwrap();
 
-        let (usages, skipped) = collect_js_usages(&dir).unwrap();
-        assert!(skipped.is_empty());
+        let ctx = crate::scan::ScanContext::build(&dir).unwrap();
+        let usages = collect_js_usages(&ctx);
+        assert!(ctx.skipped.is_empty());
         let pairs: Vec<(&str, &str)> = usages
             .iter()
             .map(|u| (u.package.as_str(), u.member.as_str()))
@@ -1120,8 +1109,9 @@ mod tests {
         )
         .unwrap();
 
-        let (usages, skipped) = collect_js_usages(&dir).unwrap();
-        assert!(skipped.is_empty());
+        let ctx = crate::scan::ScanContext::build(&dir).unwrap();
+        let usages = collect_js_usages(&ctx);
+        assert!(ctx.skipped.is_empty());
         let hit = usages
             .iter()
             .find(|u| u.package == "react-dom" && u.member == "renderToString")

@@ -28,7 +28,7 @@ use std::path::Path;
 
 use crate::deps::{normalize_pep503, DependencyGraph, Ecosystem};
 use crate::findings::Confidence;
-use crate::scan::ScanError;
+use crate::scan::{ScanContext, ScanError};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SurfaceError {
@@ -345,11 +345,27 @@ fn enumerate_installed(
 /// [`crate::scan::scan_path`]: grammar/query errors are programming bugs
 /// and propagate; per-file read/parse trouble is collected, never fatal.
 pub fn collect_usages(root: &Path) -> Result<(Vec<UsageSite>, Vec<ScanError>), ScanError> {
-    let (mut sites, mut skipped) = dts::collect_js_usages(root)?;
-    let (py_sites, py_skipped) = pysurface::collect_py_usages(root)?;
-    sites.extend(py_sites);
-    skipped.extend(py_skipped);
-    Ok((sites, skipped))
+    // Standalone entry: walk + parse the project ONCE into a `ScanContext`, then
+    // collect usage sites from it. This owns the context, so it surfaces the
+    // context's own source read/parse skips (`check`, 07-04, shares one context
+    // across all four analyzers via `collect_usages_with_context`).
+    let ctx = ScanContext::build(root)?;
+    let sites = collect_usages_with_context(&ctx);
+    Ok((sites, ctx.skipped))
+}
+
+/// [`collect_usages`] over a caller-provided parse-once [`ScanContext`] — the
+/// path `check` (07-04) uses to collect usage sites from its single shared scan
+/// instead of walking + parsing the project a second time (CLAUDE.md rule 5 /
+/// Phase 7 Success Criterion 1). Only the PROJECT-source usage walk is
+/// context-fed; installed-package surface enumeration
+/// (`dts::enumerate_js`/`pysurface::enumerate_py` over
+/// `node_modules`/`site-packages`) remains a separate path over files the
+/// context never walks.
+pub fn collect_usages_with_context(ctx: &ScanContext) -> Vec<UsageSite> {
+    let mut sites = dts::collect_js_usages(ctx);
+    sites.extend(pysurface::collect_py_usages(ctx));
+    sites
 }
 
 /// Project-relative display path, forward slashes — mirrors

@@ -17,7 +17,7 @@ use getdev_grammars::tree_sitter::{Node, Parser, Query, QueryCursor};
 use streaming_iterator::StreamingIterator;
 
 use crate::deps::Ecosystem;
-use crate::scan::{Lang, ScanError};
+use crate::scan::{Lang, ScanContext, ScanError, ScannedFile};
 
 use super::{relative_display, ApiSurface, SurfaceError, SurfaceTier, UsageSite};
 
@@ -497,57 +497,46 @@ const IMPORT_QUERY: &str = "\
     (import_from_statement module_name: (dotted_name) @module name: (dotted_name) @member)\n\
     (import_from_statement module_name: (dotted_name) @module name: (aliased_import name: (dotted_name) @member))";
 
-/// Walk `root`'s project source (never `site-packages`) and collect every
-/// `pkg.member` / `from pkg import member` usage site. Same skip-not-fail
-/// contract as [`crate::scan::collect_string_assignments`].
-pub(crate) fn collect_py_usages(
-    root: &Path,
-) -> Result<(Vec<UsageSite>, Vec<ScanError>), ScanError> {
+/// Collect every `pkg.member` / `from pkg import member` usage site across a
+/// parse-once [`ScanContext`]'s Python project source WITHOUT a walk or parse
+/// of its own: each already-parsed Python [`ScannedFile`] is queried against
+/// its cached `tree`/`source` (CLAUDE.md rule 5). This is the PROJECT-source
+/// usage walk only — installed-package surface enumeration (`enumerate_py` /
+/// `parse_py_module` over `site-packages/<pkg>`) is a SEPARATE, unchanged path
+/// over files the context never walks. Source read/parse skips already live in
+/// [`ScanContext::skipped`]; a per-file query-compile failure (a programming
+/// bug proven impossible by the in-crate tests) is folded away.
+pub(crate) fn collect_py_usages(ctx: &ScanContext) -> Vec<UsageSite> {
     let mut results = Vec::new();
-    let mut skipped = Vec::new();
 
-    for entry in crate::scan::project_walker(root).build().flatten() {
-        if !entry.file_type().is_some_and(|t| t.is_file()) {
+    for file in &ctx.files {
+        if file.lang != Lang::Python {
             continue;
         }
-        let path = entry.path();
-        if Lang::from_path(path) != Some(Lang::Python) {
-            continue;
-        }
-        match usages_in_file(path, root) {
-            Ok(mut found) => results.append(&mut found),
-            Err(err @ (ScanError::Grammar(_) | ScanError::Query(_))) => return Err(err),
-            Err(err) => skipped.push(err),
-        }
+        results.extend(usages_in_tree(file, &ctx.root));
     }
 
-    Ok((results, skipped))
+    results
 }
 
-fn usages_in_file(path: &Path, root: &Path) -> Result<Vec<UsageSite>, ScanError> {
-    let source = crate::scan::read_source_capped(path)?;
-
+fn usages_in_tree(file: &ScannedFile, root: &Path) -> Vec<UsageSite> {
     let language = Lang::Python.language();
-    let mut parser = Parser::new();
-    parser.set_language(&language)?;
-    let tree = parser
-        .parse(&source, None)
-        .ok_or_else(|| ScanError::Parse {
-            path: path.to_path_buf(),
-        })?;
-    let bytes = source.as_bytes();
-    let file_display = relative_display(path, root);
+    let bytes = file.source.as_bytes();
+    let root_node = file.tree.root_node();
+    let file_display = relative_display(&file.abs, root);
 
     let mut results = Vec::new();
     let mut bindings: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
-    let import_query = Query::new(&language, IMPORT_QUERY)?;
+    let Ok(import_query) = Query::new(&language, IMPORT_QUERY) else {
+        return results;
+    };
     let module_idx = import_query.capture_index_for_name("module");
     let alias_idx = import_query.capture_index_for_name("alias");
     let member_idx = import_query.capture_index_for_name("member");
 
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&import_query, tree.root_node(), bytes);
+    let mut matches = cursor.matches(&import_query, root_node, bytes);
     while let Some(m) = matches.next() {
         let mut module = None;
         let mut alias = None;
@@ -583,12 +572,14 @@ fn usages_in_file(path: &Path, root: &Path) -> Result<Vec<UsageSite>, ScanError>
         }
     }
 
-    let attr_query = Query::new(&language, ATTRIBUTE_QUERY)?;
+    let Ok(attr_query) = Query::new(&language, ATTRIBUTE_QUERY) else {
+        return results;
+    };
     let obj_idx = attr_query.capture_index_for_name("obj");
     let attr_idx = attr_query.capture_index_for_name("member");
 
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&attr_query, tree.root_node(), bytes);
+    let mut matches = cursor.matches(&attr_query, root_node, bytes);
     while let Some(m) = matches.next() {
         let mut obj = None;
         let mut attr = None;
@@ -617,7 +608,7 @@ fn usages_in_file(path: &Path, root: &Path) -> Result<Vec<UsageSite>, ScanError>
         }
     }
 
-    Ok(results)
+    results
 }
 
 fn first_dotted_segment(text: &str) -> String {
@@ -801,8 +792,9 @@ mod tests {
         )
         .unwrap();
 
-        let (usages, skipped) = collect_py_usages(&dir).unwrap();
-        assert!(skipped.is_empty());
+        let ctx = crate::scan::ScanContext::build(&dir).unwrap();
+        let usages = collect_py_usages(&ctx);
+        assert!(ctx.skipped.is_empty());
         let pairs: Vec<(&str, &str)> = usages
             .iter()
             .map(|u| (u.package.as_str(), u.member.as_str()))
