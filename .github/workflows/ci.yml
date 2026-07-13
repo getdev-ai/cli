@@ -70,3 +70,113 @@ jobs:
           "$BIN" ship --write --target docker
           test -f Dockerfile
           docker build -t "getdev-ship-$PRESET" .
+
+  # REQ-quality-gates / REQ-deterministic (SC2): the coverage floor is measured
+  # on the LIBRARY crates ONLY — getdev-core / getdev-registry / getdev-gitx —
+  # NOT `--workspace` (which dilutes the number with getdev-grammars' untestable
+  # FFI glue and getdev-cli's thin command wiring). This matches docs' "80% on
+  # library crates" intent (08-RESEARCH Pitfall 5). The library test suites are
+  # already hermetic (getdev-registry's client tests drive a local mock; core/
+  # gitx touch no network), so — per docs/CI.md — GETDEV_OFFLINE is NOT set
+  # here: it is set "for everything EXCEPT the dedicated registry-client tests
+  # (which use mocks anyway)", and forcing offline makes those mock probes map
+  # to Inconclusive and fail the suite.
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: coverage (library crates only, fail under 80%)
+        run: cargo llvm-cov -p getdev-core -p getdev-registry -p getdev-gitx --fail-under-lines 80
+
+  # REQ-deterministic (SC4, dep-graph half): cargo-deny over 08-03's deny.toml —
+  # licenses + RustSec advisories + the async-runtime / extra-HTTP-client /
+  # LLM-SDK bans that encode DEC-01/04/05. GREEN on today's tree, RED on a
+  # forbidden dependency addition.
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@cargo-deny
+      - run: cargo deny check
+
+  # REQ-deterministic (SC4, source-symbol half): 08-03's network-egress proof —
+  # network symbols confined to getdev-registry + getdev-cli::update, hosts
+  # limited to npm / PyPI / GitHub Releases. The deny job is the dependency-graph
+  # half; this is the source-symbol half (D-02 — neither alone is complete).
+  determinism:
+    runs-on: ubuntu-latest
+    env:
+      GETDEV_OFFLINE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: network-egress confinement proof (08-03)
+        run: cargo test -p getdev --test network_egress
+
+  # REQ-quality-gates (SC2): rustdoc must build warnings-clean (-D warnings) and
+  # every relative link in docs/*.md must resolve (no network — local-first).
+  docs:
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo doc (warnings-as-errors)
+        run: cargo doc --no-deps --workspace
+      - name: link check on docs/*.md (relative links resolve; no network)
+        run: |
+          set -uo pipefail
+          broken=""
+          for f in docs/*.md; do
+            dir=$(dirname "$f")
+            while IFS= read -r link; do
+              case "$link" in
+                http://*|https://*|mailto:*|\#*) continue ;;
+              esac
+              target="${link%%#*}"
+              [ -z "$target" ] && continue
+              if [ ! -e "$dir/$target" ] && [ ! -e "$target" ]; then
+                broken="$broken
+          $f -> $link"
+              fi
+            done < <(grep -oE '\]\([^)]+\)' "$f" | sed -E 's/^\]\(//; s/\)$//')
+          done
+          if [ -n "$broken" ]; then
+            printf 'broken relative links in docs:%s\n' "$broken"
+            exit 1
+          fi
+          echo "docs/*.md relative links OK"
+
+  # REQ-perf-budgets (SC2): every documented perf budget is enforced, not just
+  # audit/review. The `*_perf.rs` #[test] gates assert the RELEASE-strict budget
+  # under `--release` (warm check < 3s, snap < 1s, audit/review < 2s); the
+  # criterion benches (--test smoke-run) confirm EVERY budget has a bench, so a
+  # future budget can be regression-tracked against a saved baseline
+  # (docs/CI.md — >10% vs baseline = red; do not assert absolute wall-clock).
+  bench:
+    runs-on: ubuntu-latest
+    env:
+      GETDEV_OFFLINE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: perf budgets (release-strict) — audit/review/check within budget
+        run: cargo test -p getdev-core --release --test audit_perf --test review_perf --test check_perf
+      - name: perf budget (release-strict) — snap < 1s
+        run: cargo test -p getdev-gitx --release --test snap_perf
+      - name: criterion benches — every documented budget has a bench
+        run: |
+          cargo bench -p getdev-core --bench audit -- --test
+          cargo bench -p getdev-core --bench review -- --test
+          cargo bench -p getdev-core --bench check -- --test
+          cargo bench -p getdev-gitx --bench snap -- --test
