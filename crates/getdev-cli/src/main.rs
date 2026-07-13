@@ -118,6 +118,11 @@ enum Command {
         /// Apply the plan: write the env files and rewrite references
         #[arg(long)]
         write: bool,
+        /// Also extract http(s) URLs and connection strings (DSNs) assigned to
+        /// identifiers, not just secret-pattern matches (docs/SPEC-COMMANDS.md
+        /// `env`). ORs with `[env] include_urls` config.
+        #[arg(long)]
+        include_urls: bool,
     },
     /// Verify packages / APIs / model strings actually exist
     Real {
@@ -344,29 +349,29 @@ fn run(cli: Cli) -> anyhow::Result<u8> {
         // findings are all `fixable: true`, and docs/SPEC-COMMANDS.md's
         // "--fix on check maps to this" implies the same for the bare
         // command. Previously `--fix` silently did nothing here.
-        Command::Env { env_file, write } => {
+        Command::Env {
+            env_file,
+            write,
+            include_urls,
+        } => {
             // B2(a): `[env] env_file` feeds EnvOptions when `--env-file`
             // wasn't explicitly passed — the flag stays `Option<String>`
             // (no `default_value`) specifically so "unset" is distinguishable
             // from "user passed .env", which a `value_source` lookup would
             // otherwise be needed for.
             let env_file = env_file.unwrap_or_else(|| cfg.env.env_file.clone());
-            // B2(c): `[env] include_urls` is a documented-but-unimplemented
-            // key (docs/SPEC-CONFIG.md carries it forward for a later
-            // phase) — warn rather than silently ignore or half-build URL
-            // detection.
-            if cfg.env.include_urls {
-                eprintln!(
-                    "warning: [env] include_urls is set in config but not yet implemented \
-                     (docs/SPEC-CONFIG.md) — no URLs/connection strings will be detected"
-                );
-            }
+            // The `--include-urls` flag ORs with `[env] include_urls` config —
+            // either turns on 08-02's URL/DSN detection (mirroring the env_file
+            // flag-over-config precedence above). 08-02 shipped the detection
+            // engine, so the old "documented-but-unimplemented" warning is gone.
+            let include_urls = include_urls || cfg.env.include_urls;
             commands::env::run(&commands::env::EnvArgs {
                 path,
                 json,
                 no_color,
                 fail_on,
                 env_file,
+                include_urls,
                 write: write || cli.global.fix,
                 cfg: cfg.clone(),
                 quiet,

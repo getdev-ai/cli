@@ -241,6 +241,7 @@ mod tests {
             no_color: true,
             fail_on: None,
             env_file: ".env".to_owned(),
+            include_urls: false,
             write: true,
             cfg: cfg.clone(),
             quiet: true,

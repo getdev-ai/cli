@@ -16,6 +16,10 @@ pub struct EnvArgs {
     pub no_color: bool,
     pub fail_on: Option<Severity>,
     pub env_file: String,
+    /// Also extract http(s) URLs + connection strings (08-02's detection),
+    /// resolved in `main.rs` as `--include-urls` flag OR `[env] include_urls`
+    /// config. Threads straight into [`EnvOptions::include_urls`].
+    pub include_urls: bool,
     pub write: bool,
     /// Resolved config (B2 audit fix) — `[ignore]`/`[[suppress]]` filtering.
     pub cfg: Config,
@@ -30,10 +34,10 @@ pub struct EnvArgs {
 pub fn run(args: &EnvArgs) -> anyhow::Result<u8> {
     let options = EnvOptions {
         env_file: args.env_file.clone(),
-        // include_urls stays at its default (false) here — the `--include-urls`
-        // flag / `[env] include_urls` resolution into this field is wired in
-        // 08-05 (which owns the CLI surface + removes main.rs's stub warning).
-        ..Default::default()
+        // Resolved in `main.rs` (`--include-urls` flag OR `[env] include_urls`
+        // config) and threaded through here to switch on 08-02's URL/DSN
+        // detection.
+        include_urls: args.include_urls,
     };
     let mut plan = env::plan(&args.path, &options)?;
     let mut findings = env::findings(&plan, &options);
@@ -378,6 +382,7 @@ mod tests {
             no_color: true,
             fail_on: None,
             env_file: ".env".to_owned(),
+            include_urls: false,
             write: true,
             cfg,
             quiet: true,
@@ -483,6 +488,55 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// SC5 spot-check: `include_urls` (the resolved `--include-urls` flag /
+    /// `[env] include_urls` config) switches on 08-02's URL/DSN detection —
+    /// a bare connection string is extracted to `.env` under `--write` ONLY
+    /// when the gate is on. With it off, the same file is left untouched
+    /// (byte-identical to secret-only behaviour).
+    #[test]
+    fn include_urls_flag_gates_dsn_extraction() {
+        // include_urls = TRUE → the DSN is extracted.
+        let on = unique_dir("include-urls-on");
+        std::fs::write(
+            on.join("db.js"),
+            "const dbUrl = \"postgres://u:p@host:5432/db\";\n",
+        )
+        .unwrap();
+        let mut args = write_args(&on, false);
+        args.include_urls = true;
+        run(&args).unwrap();
+        let src = std::fs::read_to_string(on.join("db.js")).unwrap();
+        assert!(
+            src.contains("process.env"),
+            "with --include-urls the DSN source must be rewritten, got:\n{src}"
+        );
+        let env_on = std::fs::read_to_string(on.join(".env")).unwrap();
+        assert!(
+            env_on.contains("postgres://u:p@host:5432/db"),
+            "the DSN value must land in .env, got:\n{env_on}"
+        );
+        let _ = std::fs::remove_dir_all(&on);
+
+        // include_urls = FALSE → the same DSN is NOT touched (no .env written).
+        let off = unique_dir("include-urls-off");
+        std::fs::write(
+            off.join("db.js"),
+            "const dbUrl = \"postgres://u:p@host:5432/db\";\n",
+        )
+        .unwrap();
+        run(&write_args(&off, false)).unwrap();
+        let src_off = std::fs::read_to_string(off.join("db.js")).unwrap();
+        assert!(
+            src_off.contains("\"postgres://u:p@host:5432/db\""),
+            "without the gate the DSN source must be untouched, got:\n{src_off}"
+        );
+        assert!(
+            !off.join(".env").exists(),
+            "without the gate no .env should be created"
+        );
+        let _ = std::fs::remove_dir_all(&off);
+    }
+
     /// CR-02 regression: a secret the user suppressed via `[ignore] paths`
     /// must be neither rewritten in source nor appended to `.env` under
     /// `--write`, while a NON-suppressed secret in the same run still is.
@@ -513,6 +567,7 @@ mod tests {
             no_color: true,
             fail_on: None,
             env_file: ".env".to_owned(),
+            include_urls: false,
             write: true,
             cfg,
             quiet: true,
