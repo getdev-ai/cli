@@ -41,3 +41,7 @@ criterion = "0.5"
 [[bench]]
 name = "audit"
 harness = false
+
+[[bench]]
+name = "review"
+harness = false
