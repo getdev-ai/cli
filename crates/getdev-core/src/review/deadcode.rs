@@ -71,17 +71,31 @@ pub(crate) fn detect(files: &[ReviewFile]) -> Vec<Finding> {
     let index = ReferenceIndex::build(files);
     let exemptions = compile_exemptions();
 
+    // Compile the declaration query once per language, not once per file (the
+    // per-file recompile was an O(files) cost inside the `< 2 s` perf budget).
+    let mut query_cache: Vec<(Lang, Query)> = Vec::new();
+
     let mut findings = Vec::new();
     for file in files {
         // FP guard: framework-entry / test files are exempt whole.
         if path_is_exempt(exemptions.as_ref(), &file.rel) {
             continue;
         }
-        let Ok(query) = Query::new(&file.lang.language(), declaration_query(file.lang)) else {
+        if !query_cache.iter().any(|(l, _)| *l == file.lang) {
+            let Ok(q) = Query::new(&file.lang.language(), declaration_query(file.lang)) else {
+                continue;
+            };
+            query_cache.push((file.lang, q));
+        }
+        let Some(query) = query_cache
+            .iter()
+            .find(|(l, _)| *l == file.lang)
+            .map(|(_, q)| q)
+        else {
             continue;
         };
         let bytes = file.source.as_bytes();
-        for decl in named_declarations(&query, file.tree.root_node(), bytes) {
+        for decl in named_declarations(query, file.tree.root_node(), bytes) {
             let span = (decl.start_line, decl.end_line);
             if !is_introduced_declaration(span, &file.added_ranges) {
                 continue;
@@ -102,16 +116,29 @@ pub(crate) fn detect(files: &[ReviewFile]) -> Vec<Finding> {
 
 /// Whole-project reference index: identifier occurrence counts plus the raw
 /// text of every string literal (widened reference search, Pitfall 5(a)).
+///
+/// String literals are accumulated into a SINGLE newline-joined blob rather
+/// than a `Vec<String>`: the widened check is a substring search, and doing it
+/// per-declaration over a `Vec` is `O(declarations × string-literals)` — a
+/// quadratic blow-up that is invisible on a small diff but dominates
+/// `ReviewScope::All` on a large repo (every declaration is "introduced", so
+/// every one runs the string scan). Joining once turns each declaration's
+/// widened check into a single `str::contains` over the blob (memchr-optimized
+/// first-byte scan), keeping `review --all` inside the `< 2 s` perf budget
+/// (docs/PLAN.md §3.5). The separator is `\n`, which can never appear inside an
+/// identifier name, so no name can spuriously match across two adjacent
+/// literals' boundary — the substring semantics of the original per-literal
+/// check are preserved exactly.
 struct ReferenceIndex {
     ident_counts: HashMap<String, usize>,
-    strings: Vec<String>,
+    string_blob: String,
 }
 
 impl ReferenceIndex {
     fn build(files: &[ReviewFile]) -> Self {
         let mut index = Self {
             ident_counts: HashMap::new(),
-            strings: Vec::new(),
+            string_blob: String::new(),
         };
         for file in files {
             collect_references(file.tree.root_node(), file.source.as_bytes(), &mut index);
@@ -133,7 +160,7 @@ impl ReferenceIndex {
         if external > 0 {
             return true;
         }
-        self.strings.iter().any(|literal| literal.contains(name))
+        self.string_blob.contains(name)
     }
 }
 
@@ -154,7 +181,8 @@ fn collect_references(node: Node<'_>, bytes: &[u8], index: &mut ReferenceIndex) 
         }
         "string" => {
             if let Ok(text) = node.utf8_text(bytes) {
-                index.strings.push(text.to_owned());
+                index.string_blob.push_str(text);
+                index.string_blob.push('\n');
             }
             return;
         }
@@ -163,7 +191,8 @@ fn collect_references(node: Node<'_>, bytes: &[u8], index: &mut ReferenceIndex) 
         // and still descend so interpolated references are counted.
         "template_string" => {
             if let Ok(text) = node.utf8_text(bytes) {
-                index.strings.push(text.to_owned());
+                index.string_blob.push_str(text);
+                index.string_blob.push('\n');
             }
         }
         _ => {}

@@ -45,6 +45,19 @@ const SHINGLE_K: usize = 5;
 /// How many of the smallest shingle values form the MinHash-LSH sketch used
 /// for candidate bucketing.
 const MINHASH_N: usize = 4;
+/// LSH candidate-generation cap: an LSH bucket larger than this is skipped when
+/// gathering a function's candidate partners. A MinHash value shared by more
+/// than this many functions is boilerplate noise, not a discriminating
+/// near-duplicate signal — LSH's whole premise is that a shared value is RARE,
+/// so an enormous bucket both violates that premise and, unbounded, degrades
+/// candidate generation to O(n²) on a repo full of structurally-similar helpers
+/// (blowing the `< 2 s` perf budget, docs/PLAN.md §3.5). Genuine duplicate
+/// pairs share multiple shingles, so at least one of their shared values lands
+/// in a small, discriminating bucket; capping here bounds the work to
+/// O(functions × MINHASH_N × MAX_LSH_BUCKET) while preserving detection on the
+/// small buckets real duplicates live in (a duplicate-helper miss on a
+/// boilerplate-saturated file is an acceptable trade for a low-severity nudge).
+const MAX_LSH_BUCKET: usize = 64;
 
 /// One fingerprinted function-like node.
 struct FnRecord {
@@ -85,6 +98,12 @@ pub(crate) fn detect(files: &[ReviewFile]) -> Vec<Finding> {
         let mut candidates: BTreeSet<usize> = BTreeSet::new();
         for &h in &records[i].minhash {
             if let Some(list) = buckets.get(&h) {
+                // Skip boilerplate buckets — see MAX_LSH_BUCKET. This is what
+                // keeps candidate generation near-linear instead of O(n²) on a
+                // repo full of structurally-similar helper functions.
+                if list.len() > MAX_LSH_BUCKET {
+                    continue;
+                }
                 for &j in list {
                     if j != i {
                         candidates.insert(j);
@@ -109,12 +128,26 @@ pub(crate) fn detect(files: &[ReviewFile]) -> Vec<Finding> {
 /// deterministic (file order, then source order) sequence.
 fn fingerprint_functions(files: &[ReviewFile]) -> Vec<FnRecord> {
     let mut records = Vec::new();
+    // Compile the function query once per language, not once per file — on a
+    // 500-file tree the per-file recompile was a needless O(files) query-build
+    // cost inside the `< 2 s` perf budget (docs/PLAN.md §3.5).
+    let mut query_cache: Vec<(Lang, Query)> = Vec::new();
     for file in files {
-        let Ok(query) = Query::new(&file.lang.language(), function_query(file.lang)) else {
+        if !query_cache.iter().any(|(l, _)| *l == file.lang) {
+            let Ok(q) = Query::new(&file.lang.language(), function_query(file.lang)) else {
+                continue;
+            };
+            query_cache.push((file.lang, q));
+        }
+        let Some(query) = query_cache
+            .iter()
+            .find(|(l, _)| *l == file.lang)
+            .map(|(_, q)| q)
+        else {
             continue;
         };
         let bytes = file.source.as_bytes();
-        let mut nodes = crate::audit::run_ast_matcher(&query, file.tree.root_node(), bytes);
+        let mut nodes = crate::audit::run_ast_matcher(query, file.tree.root_node(), bytes);
         // Source order — determinism regardless of tree-sitter match order.
         nodes.sort_by_key(getdev_grammars::tree_sitter::Node::start_byte);
         for node in nodes {
@@ -173,22 +206,28 @@ fn function_query(lang: Lang) -> &'static str {
 /// dropped, and every other terminal (keyword / punctuation / operator) kept
 /// verbatim via its tree-sitter kind (an anonymous node's `kind()` IS its
 /// literal source text).
-fn collect_normalized_tokens(node: Node<'_>, out: &mut Vec<String>) {
+///
+/// Tokens are `&'static str` (both the `"ID"`/`"STR"`/`"NUM"` sentinels and
+/// tree-sitter's `Node::kind()` are `'static`) — this normalized walk runs over
+/// EVERY function-like node in the tree before the [`MIN_NORMALIZED_TOKENS`]
+/// floor filter, so allocating a `String` per token was a large, mostly-wasted
+/// allocation cost on a big tree; borrowing keeps the fast path allocation-free.
+fn collect_normalized_tokens(node: Node<'_>, out: &mut Vec<&'static str>) {
     match node.kind() {
         "identifier"
         | "property_identifier"
         | "shorthand_property_identifier"
         | "shorthand_property_identifier_pattern"
         | "type_identifier" => {
-            out.push("ID".to_owned());
+            out.push("ID");
             return;
         }
         "string" | "template_string" => {
-            out.push("STR".to_owned());
+            out.push("STR");
             return;
         }
         "number" | "integer" | "float" => {
-            out.push("NUM".to_owned());
+            out.push("NUM");
             return;
         }
         "comment" => return,
@@ -197,7 +236,7 @@ fn collect_normalized_tokens(node: Node<'_>, out: &mut Vec<String>) {
     let count = node.child_count();
     if count == 0 {
         // Terminal structural token — keyword / punctuation / operator.
-        out.push(node.kind().to_owned());
+        out.push(node.kind());
         return;
     }
     for i in 0..count {
@@ -209,7 +248,7 @@ fn collect_normalized_tokens(node: Node<'_>, out: &mut Vec<String>) {
 
 /// The k=[`SHINGLE_K`] shingle set: each shingle a truncated sha2 hash of a
 /// k-gram window (a non-cryptographic content sketch).
-fn shingle_set(tokens: &[String]) -> HashSet<u64> {
+fn shingle_set(tokens: &[&str]) -> HashSet<u64> {
     let mut set = HashSet::new();
     for window in tokens.windows(SHINGLE_K) {
         set.insert(shingle_hash(&window.join(" ")));

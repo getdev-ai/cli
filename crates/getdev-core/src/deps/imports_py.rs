@@ -85,6 +85,14 @@ pub fn collect_imports(root: &Path) -> Result<(Vec<RawImport>, Vec<ScanError>), 
     let mut results = Vec::new();
     let mut skipped = Vec::new();
 
+    // Compile the Python import query once, not once per file — the per-file
+    // recompile dominated `orphan-file`'s whole-project import scan inside
+    // review's `< 2 s` perf budget (docs/PLAN.md §3.5), and also slows `real`.
+    let query = match Query::new(&Lang::Python.language(), import_query(Lang::Python)) {
+        Ok(q) => q,
+        Err(err) => return Err(ScanError::Query(err)),
+    };
+
     for entry in project_walker(root).build().flatten() {
         if !entry.file_type().is_some_and(|t| t.is_file()) {
             continue;
@@ -96,7 +104,7 @@ pub fn collect_imports(root: &Path) -> Result<(Vec<RawImport>, Vec<ScanError>), 
         if lang != Lang::Python {
             continue;
         }
-        match imports_in_file(path, root) {
+        match imports_in_file(path, root, &query) {
             Ok(mut found) => results.append(&mut found),
             Err(err @ (ScanError::Grammar(_) | ScanError::Query(_))) => return Err(err),
             Err(err) => skipped.push(err),
@@ -106,7 +114,7 @@ pub fn collect_imports(root: &Path) -> Result<(Vec<RawImport>, Vec<ScanError>), 
     Ok((results, skipped))
 }
 
-fn imports_in_file(path: &Path, root: &Path) -> Result<Vec<RawImport>, ScanError> {
+fn imports_in_file(path: &Path, root: &Path, query: &Query) -> Result<Vec<RawImport>, ScanError> {
     let source = read_source_capped(path)?;
 
     let language = Lang::Python.language();
@@ -118,12 +126,11 @@ fn imports_in_file(path: &Path, root: &Path) -> Result<Vec<RawImport>, ScanError
             path: path.to_path_buf(),
         })?;
 
-    let query = Query::new(&language, import_query(Lang::Python))?;
     let module_idx = query.capture_index_for_name("module");
     let relative_idx = query.capture_index_for_name("relative");
 
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
+    let mut matches = cursor.matches(query, tree.root_node(), source.as_bytes());
     let mut results = Vec::new();
 
     while let Some(m) = matches.next() {

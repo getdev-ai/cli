@@ -81,6 +81,12 @@ fn import_query(lang: Lang) -> &'static str {
 pub fn collect_imports(root: &Path) -> Result<(Vec<RawImport>, Vec<ScanError>), ScanError> {
     let mut results = Vec::new();
     let mut skipped = Vec::new();
+    // Compile the import query once per language rather than once per file — on
+    // a large project this per-file recompile was a needless O(files) cost that
+    // dominated `orphan-file`'s whole-project import scan inside review's
+    // `< 2 s` perf budget (docs/PLAN.md §3.5). Also speeds up `real`'s
+    // dependency graph, which shares this collector.
+    let mut query_cache: Vec<(Lang, Query)> = Vec::new();
 
     for entry in project_walker(root).build().flatten() {
         if !entry.file_type().is_some_and(|t| t.is_file()) {
@@ -93,7 +99,16 @@ pub fn collect_imports(root: &Path) -> Result<(Vec<RawImport>, Vec<ScanError>), 
         if !matches!(lang, Lang::JavaScript | Lang::TypeScript | Lang::Tsx) {
             continue;
         }
-        match imports_in_file(path, lang, root) {
+        if !query_cache.iter().any(|(l, _)| *l == lang) {
+            match Query::new(&lang.language(), import_query(lang)) {
+                Ok(q) => query_cache.push((lang, q)),
+                Err(err) => return Err(ScanError::Query(err)),
+            }
+        }
+        let Some(query) = query_cache.iter().find(|(l, _)| *l == lang).map(|(_, q)| q) else {
+            continue;
+        };
+        match imports_in_file(path, lang, root, query) {
             Ok(mut found) => results.append(&mut found),
             Err(err @ (ScanError::Grammar(_) | ScanError::Query(_))) => return Err(err),
             Err(err) => skipped.push(err),
@@ -103,7 +118,12 @@ pub fn collect_imports(root: &Path) -> Result<(Vec<RawImport>, Vec<ScanError>), 
     Ok((results, skipped))
 }
 
-fn imports_in_file(path: &Path, lang: Lang, root: &Path) -> Result<Vec<RawImport>, ScanError> {
+fn imports_in_file(
+    path: &Path,
+    lang: Lang,
+    root: &Path,
+    query: &Query,
+) -> Result<Vec<RawImport>, ScanError> {
     let source = read_source_capped(path)?;
 
     let language = lang.language();
@@ -115,11 +135,10 @@ fn imports_in_file(path: &Path, lang: Lang, root: &Path) -> Result<Vec<RawImport
             path: path.to_path_buf(),
         })?;
 
-    let query = Query::new(&language, import_query(lang))?;
     let source_idx = query.capture_index_for_name("source");
 
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
+    let mut matches = cursor.matches(query, tree.root_node(), source.as_bytes());
     let mut results = Vec::new();
 
     while let Some(m) = matches.next() {
