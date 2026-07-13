@@ -194,6 +194,16 @@ enum Command {
         /// Snapshot id to restore (default: the most recent manual snapshot)
         id: Option<u32>,
     },
+    /// Interactive first-run setup: write `.getdev.toml` (detected stack +
+    /// defaults) and offer a pre-commit hook, an agent-context managed block,
+    /// and an auto-snap post-checkout hook. Only creates new files or upserts
+    /// managed blocks — never clobbers pre-existing content. `--yes` bypasses
+    /// every prompt with documented defaults (docs/SPEC-COMMANDS.md `init`).
+    Init {
+        /// Accept every offer's default (yes) without prompting — CI-safe
+        #[arg(long)]
+        yes: bool,
+    },
     /// Self-diagnostics: toolchain, git availability, grammar integrity
     Doctor,
     /// P0 de-risking spike: walk + parse + query a directory (dev-only)
@@ -486,6 +496,12 @@ fn run(cli: Cli) -> anyhow::Result<u8> {
             quiet,
             keep: cfg.snap.keep,
             id,
+        }),
+        Command::Init { yes } => commands::init::run(&commands::init::InitArgs {
+            path,
+            yes,
+            cfg: cfg.clone(),
+            quiet,
         }),
         Command::Doctor => {
             // Doctor is dispatched above (before config resolution) and
