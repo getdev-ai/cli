@@ -725,6 +725,7 @@ dependencies = [
  "jsonschema",
  "owo-colors",
  "pyproject-toml",
+ "rayon",
  "regex",
  "serde",
  "serde_json",

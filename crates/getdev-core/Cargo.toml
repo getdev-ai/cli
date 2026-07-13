@@ -37,6 +37,12 @@ yarn-lock-parser = "0.14"
 # (`cargo bench -p getdev-core`), exempt from the 04-01-style third-party
 # legitimacy checkpoint (04-07-PLAN.md Task 2 rationale).
 criterion = "0.5"
+# Dev-only: the `check_perf` gate (07-07) reproduces `getdev check`'s
+# parallel analyzer fan-out (which lives in `getdev-cli::commands::check`,
+# already a rayon consumer) to measure the warm/cold budget faithfully. rayon
+# is CLAUDE.md's settled concurrency model (workspace dep); never shipped in
+# getdev-core's own build — test-only here.
+rayon = { workspace = true }
 
 [[bench]]
 name = "audit"
