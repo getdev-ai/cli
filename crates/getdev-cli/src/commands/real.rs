@@ -447,10 +447,7 @@ fn find_venv_site_packages(venv_root: &Path) -> Option<std::path::PathBuf> {
 /// `real/unknown-model-string`. Reuses the same string-literal collection
 /// `env`/`audit` build on; the model call-site gating + family-prefix
 /// matching lives in `core::models`.
-fn run_models_group(
-    root: &Path,
-    findings: &mut Vec<Finding>,
-) -> anyhow::Result<Vec<ScanError>> {
+fn run_models_group(root: &Path, findings: &mut Vec<Finding>) -> anyhow::Result<Vec<ScanError>> {
     let matcher = ModelMatcher::embedded()?;
     let (assignments, skipped) = scan::collect_string_assignments(root)?;
     model_findings_from_assignments(&matcher, &assignments, root, findings);
