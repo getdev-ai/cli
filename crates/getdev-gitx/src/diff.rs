@@ -316,3 +316,208 @@ fn hunk_added_range(line: &str) -> Option<(u32, u32)> {
     }
     Some((start, start + count - 1))
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    fn nanos() -> u128 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    }
+
+    /// A fresh, empty temp directory (removed if a stale one exists).
+    fn tempdir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "getdev-gitx-diff-{tag}-{}-{}",
+            std::process::id(),
+            nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write(dir: &Path, rel: &str, content: &str) {
+        let path = dir.join(rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, content).unwrap();
+    }
+
+    /// Raw `git` in `dir` for test setup — deterministic identity + no signing,
+    /// so the harness never depends on the developer's global git config.
+    fn git(dir: &Path, args: &[&str]) -> std::process::Output {
+        Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args([
+                "-c",
+                "user.name=getdev-test",
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "init.defaultBranch=main",
+            ])
+            .args(args)
+            .output()
+            .unwrap()
+    }
+
+    /// A repo with one committed base file (`f.txt` = "a\nb\nc\n"). HEAD exists.
+    fn base_repo(tag: &str) -> PathBuf {
+        let dir = tempdir(tag);
+        assert!(git(&dir, &["init", "--quiet"]).status.success());
+        write(&dir, "f.txt", "a\nb\nc\n");
+        assert!(git(&dir, &["add", "f.txt"]).status.success());
+        assert!(git(&dir, &["commit", "-q", "-m", "base"]).status.success());
+        dir
+    }
+
+    fn find<'a>(files: &'a [ChangedFile], path: &str) -> Option<&'a ChangedFile> {
+        files.iter().find(|f| f.path == path)
+    }
+
+    // ---- pure hunk-math (no repo) --------------------------------------------
+
+    #[test]
+    fn hunk_math() {
+        // `+c,d` with d > 0 maps to [c, c+d-1].
+        assert_eq!(hunk_added_range("@@ -1,0 +2,3 @@"), Some((2, 4)));
+        // `+c` without `,d` is a single added line → [c, c].
+        assert_eq!(hunk_added_range("@@ -5 +5 @@"), Some((5, 5)));
+        // d == 0 is a pure-deletion hunk → no added range.
+        assert_eq!(hunk_added_range("@@ -10,4 +10,0 @@"), None);
+        // A trailing section heading after the second `@@` is ignored.
+        assert_eq!(hunk_added_range("@@ -2,0 +3 @@ fn context"), Some((3, 3)));
+    }
+
+    #[test]
+    fn malformed_header_is_skipped_not_panicked() {
+        // A truncated `@@ -` header parses to zero ranges, no panic.
+        assert_eq!(hunk_added_range("@@ -"), None);
+        assert_eq!(hunk_added_range("@@"), None);
+        assert_eq!(hunk_added_range("@@ +notanumber @@"), None);
+        let files = parse_added_ranges(b"diff --git a/x b/x\n@@ -\n@@ garbage\n");
+        assert_eq!(files.len(), 1);
+        assert!(files[0].added_ranges.is_empty());
+    }
+
+    #[test]
+    fn binary_and_mode_only_yield_empty_ranges() {
+        let diff = b"diff --git a/img.png b/img.png\n\
+                     new file mode 100644\n\
+                     index 0000000..abc1234\n\
+                     Binary files /dev/null and b/img.png differ\n\
+                     diff --git a/exe.sh b/exe.sh\n\
+                     old mode 100644\n\
+                     new mode 100755\n";
+        let files = parse_added_ranges(diff);
+        assert_eq!(files.len(), 2);
+        let png = find(&files, "img.png").unwrap();
+        assert_eq!(png.status, ChangeStatus::Added);
+        assert!(png.added_ranges.is_empty());
+        let sh = find(&files, "exe.sh").unwrap();
+        assert_eq!(sh.status, ChangeStatus::Modified);
+        assert!(sh.added_ranges.is_empty());
+    }
+
+    #[test]
+    fn deleted_file_has_no_added_ranges() {
+        let diff = b"diff --git a/gone.txt b/gone.txt\n\
+                     deleted file mode 100644\n\
+                     index abc1234..0000000\n\
+                     --- a/gone.txt\n\
+                     +++ /dev/null\n\
+                     @@ -1,3 +0,0 @@\n\
+                     -a\n-b\n-c\n";
+        let files = parse_added_ranges(diff);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].status, ChangeStatus::Deleted);
+        assert!(files[0].added_ranges.is_empty());
+    }
+
+    // ---- non-repo degrades to empty ------------------------------------------
+
+    #[test]
+    fn non_repo_is_empty_not_error() {
+        let dir = tempdir("norepo");
+        let files = changed_files(&dir, &DiffScope::WorkingTreeVsHead).unwrap();
+        assert!(files.is_empty());
+    }
+
+    // ---- repo-backed: working tree, staged (real index), untracked -----------
+
+    #[test]
+    fn working_tree_reports_appended_lines() {
+        let dir = base_repo("wt");
+        // Append two lines to the tracked file, do not stage.
+        write(&dir, "f.txt", "a\nb\nc\nd\ne\n");
+        let files = changed_files(&dir, &DiffScope::WorkingTreeVsHead).unwrap();
+        let f = find(&files, "f.txt").expect("f.txt in diff");
+        assert_eq!(f.status, ChangeStatus::Modified);
+        // The two appended lines (4, 5) are the added range.
+        assert_eq!(f.added_ranges, vec![(4, 5)]);
+    }
+
+    #[test]
+    fn staged_reads_the_real_index() {
+        let dir = base_repo("staged");
+        // Stage a change (proves the REAL index is read — a throwaway empty
+        // index would report nothing here; 06-RESEARCH § Pitfall 1).
+        write(&dir, "f.txt", "a\nb\nc\nSTAGED\n");
+        assert!(git(&dir, &["add", "f.txt"]).status.success());
+        let staged = changed_files(&dir, &DiffScope::Staged).unwrap();
+        let f = find(&staged, "f.txt").expect("staged change reported");
+        assert_eq!(f.status, ChangeStatus::Modified);
+        assert_eq!(f.added_ranges, vec![(4, 4)]);
+    }
+
+    #[test]
+    fn untracked_file_ranges_whole_file_but_not_when_staged() {
+        let dir = base_repo("untracked");
+        write(&dir, "new.txt", "x\ny\nz\n"); // 3 lines, untracked
+        // WorkingTreeVsHead: appears as a whole-file addition.
+        let wt = changed_files(&dir, &DiffScope::WorkingTreeVsHead).unwrap();
+        let n = find(&wt, "new.txt").expect("untracked file included");
+        assert_eq!(n.status, ChangeStatus::Added);
+        assert_eq!(n.added_ranges, vec![(1, 3)]);
+        // Staged: an untracked file is not staged → absent.
+        let staged = changed_files(&dir, &DiffScope::Staged).unwrap();
+        assert!(find(&staged, "new.txt").is_none());
+    }
+
+    #[test]
+    fn empty_untracked_file_ranges_one_one() {
+        let dir = base_repo("empty-untracked");
+        write(&dir, "empty.txt", "");
+        let wt = changed_files(&dir, &DiffScope::WorkingTreeVsHead).unwrap();
+        let e = find(&wt, "empty.txt").expect("empty untracked file included");
+        assert_eq!(e.added_ranges, vec![(1, 1)]);
+    }
+
+    #[test]
+    fn against_ref_diffs_working_tree_vs_ref() {
+        let dir = base_repo("against");
+        // Second commit so HEAD~1 is a distinct base.
+        write(&dir, "f.txt", "a\nb\nc\nsecond\n");
+        assert!(git(&dir, &["add", "f.txt"]).status.success());
+        assert!(git(&dir, &["commit", "-q", "-m", "second"]).status.success());
+        // Now dirty the working tree further.
+        write(&dir, "f.txt", "a\nb\nc\nsecond\nthird\n");
+        let files = changed_files(&dir, &DiffScope::Against("HEAD~1".to_owned())).unwrap();
+        let f = find(&files, "f.txt").expect("f.txt vs HEAD~1");
+        // Working tree vs HEAD~1 introduces both "second" (line 4) and
+        // "third" (line 5).
+        assert_eq!(f.added_ranges, vec![(4, 5)]);
+    }
+}
