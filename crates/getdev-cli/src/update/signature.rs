@@ -11,7 +11,7 @@
 //! public key. There is NO async `sigstore` crate and NO `tokio` — DEC-01 (no
 //! async runtime) is preserved literally. cosign's `ecdsa-sha2-256-nistp256`
 //! signer emits base64(ASN.1-DER ECDSA-P256) over `sha256(blob)`; verification
-//! is the exact mirror image (see [`verify_detached`]).
+//! is the exact mirror image (see `verify_detached`).
 //!
 //! 08-01 de-risked and *locked* the verify API; 08-04 wires it as gate 2 of the
 //! self-update engine (`update::run`). That engine is, in turn, only reached
@@ -126,7 +126,7 @@ pub enum UpdateError {
 ///
 /// Implements the exact chain a genuine `cosign sign-blob --key` output
 /// requires: base64-decode `sig_b64` → [`Signature::from_der`] →
-/// [`VerifyingKey::from_public_key_pem`] → verify the `SHA-256` prehash of
+/// `VerifyingKey::from_public_key_pem` → verify the `SHA-256` prehash of
 /// `manifest` (cosign signs the digest). Returns `Ok(())` only for a genuine
 /// signature; every failure is a typed [`UpdateError`], never a panic (no
 /// `unwrap`/`expect`), so an attacker-supplied blob can never crash the

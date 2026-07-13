@@ -14,9 +14,9 @@
 //! rule to introduced lines. `core::rules`/`core::audit` have no concept of
 //! "only match within these line ranges"; review adds it as an analyzer-level
 //! post-filter over the SAME per-file `added_ranges`, in two flavors:
-//! - [`is_introduced_declaration`] — CONTAINMENT (whole node span inside an
+//! - `is_introduced_declaration` — CONTAINMENT (whole node span inside an
 //!   added range), for declaration-level programmatic rules.
-//! - [`is_introduced_line`] — OVERLAP (a single line intersects an added
+//! - `is_introduced_line` — OVERLAP (a single line intersects an added
 //!   range), for line-level rules (`debug-leftover`, `todo-introduced`).
 //!
 //! ## Architecture note — review defines its OWN input struct
@@ -168,7 +168,7 @@ pub fn run(
 /// The `--all` scope over a shared parse-once [`ScanContext`]: every source
 /// file the context already walked + parsed is treated as fully introduced
 /// (`added_ranges = [(1, EOF)]`, Pattern 3), with NO independent whole-tree
-/// walk and NO re-parse — each [`ReviewFile`] reuses the cached
+/// walk and NO re-parse — each `ReviewFile` reuses the cached
 /// `(source, tree)` from its [`ScannedFile`]. This is the entry `check` (07-04)
 /// calls with its ONE shared context, and the entry `getdev review --all`
 /// calls with a freshly-built one — a single walk/parse code path either way.

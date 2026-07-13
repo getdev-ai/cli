@@ -4,7 +4,7 @@
 //! implements detect + plan; apply (`--write`) goes through `core::mutate`
 //! (P1 slice 2). Default is always dry-run.
 //!
-//! Raw secret values stay inside [`PlanEntry::value`] (crate-private, never
+//! Raw secret values stay inside `PlanEntry::value` (crate-private, never
 //! serialized); everything user-visible carries only masked previews.
 
 use std::collections::HashSet;

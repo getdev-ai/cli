@@ -19,7 +19,7 @@ use super::{discover_manifests, record_or_fail, DeclaredNamesResult, DepsError};
 /// lockfile and is a transitive dependency the project never asked for by
 /// name). A manifest that fails to *parse* is folded into the returned skip
 /// list rather than aborting the whole graph build (A10) — see
-/// [`super::record_or_fail`].
+/// `super::record_or_fail`.
 pub fn declared_npm(root: &Path) -> DeclaredNamesResult {
     let mut names = BTreeSet::new();
     let mut direct = BTreeSet::new();

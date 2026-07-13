@@ -338,7 +338,7 @@ pub fn load_embedded() -> Result<RulePack, RuleLoadError> {
 
 /// Load, validate, and compile the shipped `rules/review/*.yaml` pack — the
 /// `review` command's counterpart to [`load_embedded`], reading the SECOND
-/// embedded [`EMBEDDED_REVIEW_RULES`] `Dir` (06-RESEARCH.md Open Q2, LOCKED).
+/// embedded `EMBEDDED_REVIEW_RULES` `Dir` (06-RESEARCH.md Open Q2, LOCKED).
 /// Same fatal-on-any-error policy as [`load_embedded`].
 ///
 /// # Errors

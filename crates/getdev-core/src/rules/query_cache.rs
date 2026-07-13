@@ -60,7 +60,7 @@ impl QueryCache {
     /// Compile `query_src` for `lang` under `rule_id` and insert it into the
     /// cache if not already present (requesting the same key twice never
     /// recompiles). Rejects the query if it uses any predicate outside
-    /// [`AUTO_EVALUATED_PREDICATES`] — checked AFTER compiling (so the
+    /// `AUTO_EVALUATED_PREDICATES` — checked AFTER compiling (so the
     /// specific unsupported name can be reported) and BEFORE inserting into
     /// the cache, so an unrecognized predicate is never cached as if it
     /// were valid.

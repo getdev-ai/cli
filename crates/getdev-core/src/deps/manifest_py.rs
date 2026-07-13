@@ -21,7 +21,7 @@ const MAX_REQUIREMENTS_INCLUDE_DEPTH: usize = 3;
 /// (F5: `direct` — `poetry.lock`/`uv.lock`-only names are transitive
 /// dependencies the project never asked for by name). A manifest that fails
 /// to *parse* is folded into the returned skip list rather than aborting
-/// the whole graph build (A10) — see [`super::record_or_fail`].
+/// the whole graph build (A10) — see `super::record_or_fail`.
 pub fn declared_pypi(root: &Path) -> DeclaredNamesResult {
     let mut raw = Vec::new();
     let mut direct_raw = Vec::new();

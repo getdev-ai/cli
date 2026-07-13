@@ -10,7 +10,7 @@
 //! (never write) the REAL index: `git diff --staged` has nothing to diff against
 //! an empty throwaway index, and the default working-tree-vs-HEAD scope would
 //! misreport (06-RESEARCH § Pitfall 1). So this module has its own read-only
-//! command constructor [`git_command_diff`] that shares snap's determinism
+//! command constructor `git_command_diff` that shares snap's determinism
 //! discipline (blanked global/system config) but sets NO `GIT_INDEX_FILE`.
 //!
 //! Everything here is read-only and network-free: it invokes only `git diff`

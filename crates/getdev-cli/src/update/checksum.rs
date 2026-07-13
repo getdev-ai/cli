@@ -3,7 +3,7 @@
 //!
 //! The two gates run in strict order (see [`super::run`]): gate 1 here proves
 //! the archive bytes match the hash the manifest claims; gate 2
-//! ([`super::signature::verify_detached`]) proves the *manifest itself* was
+//! (`super::signature::verify_detached`) proves the *manifest itself* was
 //! signed by the embedded release key. Only when BOTH pass does the engine
 //! extract + swap. A failure in either is a typed [`UpdateError`] and the
 //! running binary is never touched (research Pattern 2 — "never partially

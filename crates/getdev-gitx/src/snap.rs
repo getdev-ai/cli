@@ -22,7 +22,7 @@ use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Where a snapshot ref lives. Ids are allocated from a single shared counter
-/// across both namespaces (see [`next_id`]) so a given id is never present in
+/// across both namespaces (see `next_id`) so a given id is never present in
 /// both at once, but each namespace's retention budget is independent (D-09).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Namespace {
@@ -782,7 +782,7 @@ pub fn diff(root: &Path, id: u32) -> Result<DiffSummary, GitxError> {
 }
 
 /// Manually enforce `keep` retention on `ns` — a thin wrapper over the SAME
-/// [`enforce_retention`] every `snapshot` runs, so manual `snap prune` and
+/// `enforce_retention` every `snapshot` runs, so manual `snap prune` and
 /// automatic end-of-snap retention are provably one code path (D-09). Deletes
 /// refs only via `update-ref -d`, never `git gc`/`prune`/`repack` (D-10), and
 /// is idempotent. Returns the deleted ids and the kept count.

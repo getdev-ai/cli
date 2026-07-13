@@ -667,14 +667,14 @@ pub(crate) fn string_assignments_from_tree(
 /// Collect every `name = "literal"` shape across a [`ScanContext`] WITHOUT a
 /// second walk or a second parse: for each already-parsed [`ScannedFile`] it
 /// reruns the string-assignment query against the cached `Tree` via
-/// [`string_assignments_from_tree`]. This is the single-pass replacement for
+/// `string_assignments_from_tree`. This is the single-pass replacement for
 /// [`collect_string_assignments`]'s walk that `check`'s env-detect + real
 /// model matcher consume (wired in 07-04); the standalone
 /// `collect_string_assignments(root)` stays for the standalone `env`/`real`
 /// commands.
 ///
 /// Returns a plain `Vec` (no `Result`): the only fallible step in
-/// [`string_assignments_from_tree`] is building the fixed built-in query, a
+/// `string_assignments_from_tree` is building the fixed built-in query, a
 /// programming bug already proven impossible for every supported language by
 /// the in-crate query tests — a per-file query failure here is folded away
 /// rather than aborting collection over an otherwise-valid context.
