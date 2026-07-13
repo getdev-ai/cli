@@ -614,6 +614,32 @@ pub(crate) fn string_assignments_from_tree(
     Ok(results)
 }
 
+/// Collect every `name = "literal"` shape across a [`ScanContext`] WITHOUT a
+/// second walk or a second parse: for each already-parsed [`ScannedFile`] it
+/// reruns the string-assignment query against the cached `Tree` via
+/// [`string_assignments_from_tree`]. This is the single-pass replacement for
+/// [`collect_string_assignments`]'s walk that `check`'s env-detect + real
+/// model matcher consume (wired in 07-04); the standalone
+/// `collect_string_assignments(root)` stays for the standalone `env`/`real`
+/// commands.
+///
+/// Returns a plain `Vec` (no `Result`): the only fallible step in
+/// [`string_assignments_from_tree`] is building the fixed built-in query, a
+/// programming bug already proven impossible for every supported language by
+/// the in-crate query tests — a per-file query failure here is folded away
+/// rather than aborting collection over an otherwise-valid context.
+pub fn string_assignments_from_context(ctx: &ScanContext) -> Vec<StringAssignment> {
+    let mut results = Vec::new();
+    for file in &ctx.files {
+        if let Ok(mut found) =
+            string_assignments_from_tree(&file.tree, &file.source, file.lang, &file.abs)
+        {
+            results.append(&mut found);
+        }
+    }
+    results
+}
+
 /// Strip quotes (and Python prefixes) from a string literal's source text.
 /// Returns None for strings we must not treat as plain literals (f-strings,
 /// byte strings, raw prefixes with interpolation semantics).
