@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use crate::findings::{Finding, Severity};
 use crate::mutate::{self, MutateError, PlannedWrite};
-use crate::scan::{self, Lang, ScanError};
+use crate::scan::{self, Lang, ScanContext, ScanError, StringAssignment};
 use crate::secrets::{PatternError, SecretMatch, SecretPatterns};
 
 #[derive(Debug, thiserror::Error)]
@@ -93,10 +93,39 @@ pub struct EnvPlan {
     pub env_file_exists: bool,
 }
 
-/// Detect hardcoded secrets under `root` and plan their extraction.
+/// Detect hardcoded secrets under `root` and plan their extraction. Walks +
+/// parses the project itself (the standalone `getdev env` entry). `check`
+/// (07-04) instead reuses its shared parse-once context via
+/// [`plan_from_context`] so there is no second walk.
 pub fn plan(root: &Path, options: &EnvOptions) -> Result<EnvPlan, EnvError> {
+    let (assignments, skipped) = scan::collect_string_assignments(root)?;
+    plan_from_assignments(root, options, assignments, skipped)
+}
+
+/// [`plan`] over a caller-provided parse-once [`ScanContext`] — the DETECT-mode
+/// entry `check` (07-04) uses so secret detection reuses check's single shared
+/// scan instead of walking + parsing the project a second time (CLAUDE.md
+/// rule 5 / Phase 7 Success Criterion 1). The string assignments come from the
+/// context's cached trees ([`scan::string_assignments_from_context`]); the
+/// oversized/unreadable SOURCE skips live in [`ScanContext::skipped`], surfaced
+/// by the context's owner, so the returned plan's `skipped` is empty (no
+/// double-count — the same ownership split 07-02/07-03 established).
+pub fn plan_from_context(ctx: &ScanContext, options: &EnvOptions) -> Result<EnvPlan, EnvError> {
+    let assignments = scan::string_assignments_from_context(ctx);
+    plan_from_assignments(&ctx.root, options, assignments, Vec::new())
+}
+
+/// Shared body of [`plan`]/[`plan_from_context`]: classify already-collected
+/// string assignments into extraction entries. Factored out so the walking and
+/// shared-context callers produce byte-identical plans from the same
+/// classification/dedupe/order logic (one code path, never two).
+fn plan_from_assignments(
+    root: &Path,
+    options: &EnvOptions,
+    mut assignments: Vec<StringAssignment>,
+    skipped: Vec<ScanError>,
+) -> Result<EnvPlan, EnvError> {
     let patterns = SecretPatterns::embedded()?;
-    let (mut assignments, skipped) = scan::collect_string_assignments(root)?;
 
     // WR-03/02-env-REVIEW.md: `dedupe_name` assigns the `_2` suffix in the
     // order it visits assignments, so which of two same-named secrets gets

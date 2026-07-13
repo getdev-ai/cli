@@ -106,6 +106,10 @@ fn parse_severity(raw: &str) -> Result<Severity, String> {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Umbrella scan: real + audit + env(detect) + review --all over one shared
+    /// parse pass, with a Ship Score banner. `check --json --fail-on high` is
+    /// the canonical CI line. Global flags only (docs/SPEC-COMMANDS.md `check`).
+    Check,
     /// Extract hardcoded secrets to .env (dry-run by default)
     Env {
         /// Target env file (default: `[env] env_file` in config, else ".env")
@@ -260,6 +264,22 @@ fn run(cli: Cli) -> anyhow::Result<u8> {
     let path = cli.global.path.clone();
 
     match cli.command {
+        // The umbrella command: real + audit + env(detect) + review --all over
+        // ONE shared ScanContext, a single-sourced Ship Score, and the standard
+        // `--fail-on` exit contract (docs/SPEC-COMMANDS.md `check`). Global
+        // flags only — no command-specific flags (CLAUDE.md rule 6). `--fix`
+        // maps to `env --write` via the existing global path, not this default
+        // aggregation run.
+        Command::Check => commands::check::run(&commands::check::CheckArgs {
+            path,
+            json,
+            no_color,
+            fail_on,
+            offline,
+            cfg: cfg.clone(),
+            quiet,
+            verbose,
+        }),
         // B5: global `--fix` behaves exactly like `--write` on `env` — its
         // findings are all `fixable: true`, and docs/SPEC-COMMANDS.md's
         // "--fix on check maps to this" implies the same for the bare

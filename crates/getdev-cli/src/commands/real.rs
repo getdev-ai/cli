@@ -12,14 +12,14 @@ use std::path::Path;
 
 use rayon::prelude::*;
 
-use getdev_core::apisurface::{self, ApiResult};
+use getdev_core::apisurface::{self, ApiResult, UsageSite};
 use getdev_core::config::Config;
 use getdev_core::deps::{self, DependencyGraph, Ecosystem as CoreEco};
 use getdev_core::findings::{Finding, FindingsReport, ProjectInfo, Severity};
 use getdev_core::models::ModelMatcher;
 use getdev_core::real::{self, ExistenceLite, PackageVerdictInput, RealScope, TyposquatLite};
 use getdev_core::report::{self, ColorMode};
-use getdev_core::scan;
+use getdev_core::scan::{self, ScanContext, ScanError, StringAssignment};
 use getdev_core::suppress;
 use getdev_registry::{
     Cache, Datasets, Ecosystem as RegEco, Existence, RegistryClient, RegistryError,
@@ -336,17 +336,47 @@ fn run_deps_group(
 
 /// `real/nonexistent-api` + `real/version-mismatch-api`. No network,
 /// no code execution — pure static introspection of files already on disk.
+/// Standalone entry: walks the project itself for usage sites. `check` (07-04)
+/// uses [`run_apis_group_with_context`] to reuse its shared parse-once context.
 fn run_apis_group(
     graph: &DependencyGraph,
     root: &Path,
     findings: &mut Vec<Finding>,
-) -> anyhow::Result<Vec<getdev_core::scan::ScanError>> {
+) -> anyhow::Result<Vec<ScanError>> {
     let (usages, skipped) = apisurface::collect_usages(root)?;
+    apis_findings_from_usages(graph, &usages, root, findings);
+    Ok(skipped)
+}
+
+/// [`run_apis_group`] over a caller-provided parse-once [`ScanContext`] — the
+/// path `check` uses so API-usage collection reuses check's single shared scan
+/// instead of walking the project a second time (CLAUDE.md rule 5). The
+/// context's own source skips live in `ctx.skipped`, surfaced by its owner, so
+/// this returns nothing extra.
+fn run_apis_group_with_context(
+    graph: &DependencyGraph,
+    ctx: &ScanContext,
+    root: &Path,
+    findings: &mut Vec<Finding>,
+) {
+    let usages = apisurface::collect_usages_with_context(ctx);
+    apis_findings_from_usages(graph, &usages, root, findings);
+}
+
+/// Shared tail of both apis entries: introspect *installed* packages
+/// (`node_modules`/`site-packages`) against the collected usage sites and turn
+/// the results into findings. Factored out so the walking and shared-context
+/// paths produce identical API findings (one code path, never two).
+fn apis_findings_from_usages(
+    graph: &DependencyGraph,
+    usages: &[UsageSite],
+    root: &Path,
+    findings: &mut Vec<Finding>,
+) {
     let node_modules = root.join("node_modules");
     let site_packages = resolve_site_packages(root);
-    let results: Vec<ApiResult> = apisurface::check(graph, &usages, &node_modules, &site_packages);
+    let results: Vec<ApiResult> = apisurface::check(graph, usages, &node_modules, &site_packages);
     findings.extend(real::api_findings(&results));
-    Ok(skipped)
 }
 
 /// A1: resolve the real installed Python `site-packages` directory instead
@@ -420,9 +450,35 @@ fn find_venv_site_packages(venv_root: &Path) -> Option<std::path::PathBuf> {
 fn run_models_group(
     root: &Path,
     findings: &mut Vec<Finding>,
-) -> anyhow::Result<Vec<getdev_core::scan::ScanError>> {
+) -> anyhow::Result<Vec<ScanError>> {
     let matcher = ModelMatcher::embedded()?;
     let (assignments, skipped) = scan::collect_string_assignments(root)?;
+    model_findings_from_assignments(&matcher, &assignments, root, findings);
+    Ok(skipped)
+}
+
+/// [`run_models_group`] over a caller-provided parse-once [`ScanContext`] — the
+/// path `check` uses so the model-string matcher reuses check's single shared
+/// scan (string literals from cached trees) instead of walking again.
+fn run_models_group_with_context(
+    ctx: &ScanContext,
+    root: &Path,
+    findings: &mut Vec<Finding>,
+) -> anyhow::Result<()> {
+    let matcher = ModelMatcher::embedded()?;
+    let assignments = scan::string_assignments_from_context(ctx);
+    model_findings_from_assignments(&matcher, &assignments, root, findings);
+    Ok(())
+}
+
+/// Shared body of both model entries: classify each string literal against the
+/// embedded model dataset and emit `real/unknown-model-string` findings.
+fn model_findings_from_assignments(
+    matcher: &ModelMatcher,
+    assignments: &[StringAssignment],
+    root: &Path,
+    findings: &mut Vec<Finding>,
+) {
     for assignment in assignments {
         if let Some(verdict) = matcher.classify_model(&assignment.value, &assignment.name) {
             let file = relative_display(&assignment.path, root);
@@ -433,7 +489,46 @@ fn run_models_group(
             ));
         }
     }
-    Ok(skipped)
+}
+
+/// The full `real` analysis over a caller-provided parse-once
+/// [`ScanContext`] — the aggregation entry `check` (07-04) consumes so
+/// `real`'s deps/registry + apis + model-string checks run over check's ONE
+/// shared scan (no second walk/parse; CLAUDE.md rule 5 / Phase 7 Success
+/// Criterion 1). The dependency `graph` is built by the caller via
+/// [`deps::build_graph_with_context`] over the same context. This is the SOLE
+/// network path check reuses — every registry call is confined to
+/// [`run_deps_group`], honoring `offline` (cache-only) exactly as standalone
+/// `real` does; check adds no new call site. Skips are NOT returned here: the
+/// context's source read/parse skips live in `ctx.skipped`, surfaced once by
+/// check (no double-count — the ownership split 07-02/07-03 established).
+pub(crate) fn collect_real_findings(
+    ctx: &ScanContext,
+    graph: &DependencyGraph,
+    root: &Path,
+    offline: bool,
+    typosquat_sensitivity: &str,
+    check_apis: bool,
+) -> anyhow::Result<Vec<Finding>> {
+    // Parse the typosquat sensitivity HERE (inside the sole registry-aware
+    // module) so `check` never has to name a `getdev_registry` type — the
+    // registry boundary stays confined to `real` (CLAUDE.md / ARCHITECTURE.md).
+    let sensitivity = Sensitivity::parse(typosquat_sensitivity);
+    let mut findings = Vec::new();
+    // deps + registry verdicts (the only network; cache-only under --offline).
+    run_deps_group(graph, offline, sensitivity, &mut findings)?;
+    // apis: gated by `[real].check_apis` exactly like standalone real's default
+    // scope (an installed-package introspection, no network, no execution).
+    if check_apis {
+        run_apis_group_with_context(graph, ctx, root, &mut findings);
+    }
+    // model strings (embedded dataset; --offline uses the embedded copy).
+    run_models_group_with_context(ctx, root, &mut findings)?;
+    // `unsupported-stack` is surfaced regardless of scope (matches real::run).
+    if let Some(hint) = &graph.unsupported_stack {
+        findings.push(real::unsupported_stack_finding(hint));
+    }
+    Ok(findings)
 }
 
 /// W4: distinguish a genuine infrastructure failure — which must surface as

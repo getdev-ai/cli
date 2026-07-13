@@ -1,5 +1,6 @@
 pub mod audit;
 pub mod back;
+pub mod check;
 pub mod doctor;
 pub mod env;
 pub mod real;
