@@ -3,7 +3,7 @@
 mod commands;
 mod update;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 use getdev_core::config::{self, Config};
@@ -161,6 +161,24 @@ enum Command {
         #[arg(long, conflicts_with_all = ["against", "staged"])]
         all: bool,
     },
+    /// Prepare & validate for deploy: detect the stack, run the three `ship/*`
+    /// validators, and print a per-target checklist. `--write` generates a
+    /// multi-stage Dockerfile + .dockerignore + SHIP.md via `core::mutate`;
+    /// `--run-build` is the ONLY opt-in that executes project code (off by
+    /// default). No flags beyond these + globals (docs/SPEC-COMMANDS.md `ship`).
+    Ship {
+        /// Generate Dockerfile + .dockerignore + SHIP.md (via core::mutate)
+        #[arg(long)]
+        write: bool,
+        /// Deployment target for the checklist (default: `[ship] target`, else
+        /// auto-detected/docker)
+        #[arg(long, value_enum, value_name = "TARGET")]
+        target: Option<ShipTarget>,
+        /// Run the project's build — the ONLY command that executes project
+        /// code, off by default (getdev never runs your code without this)
+        #[arg(long)]
+        run_build: bool,
+    },
     /// Working-tree checkpoints under `refs/getdev/` (git-hidden; never touches
     /// user branches/index/stash). `snap [-m <msg>] | list | diff <id> | prune`
     Snap {
@@ -185,6 +203,31 @@ enum Command {
         #[arg(default_value = ".")]
         dir: PathBuf,
     },
+}
+
+/// The `getdev ship --target` values (docs/SPEC-COMMANDS.md `ship`). A thin
+/// clap `ValueEnum` at the CLI boundary that maps onto
+/// [`getdev_core::ship::ShipTarget`] — `core::ship` owns the canonical enum;
+/// this only exists so clap can parse/validate the flag and render `--help`.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ShipTarget {
+    Vercel,
+    Railway,
+    Fly,
+    Docker,
+    Vps,
+}
+
+impl From<ShipTarget> for getdev_core::ship::ShipTarget {
+    fn from(target: ShipTarget) -> Self {
+        match target {
+            ShipTarget::Vercel => Self::Vercel,
+            ShipTarget::Railway => Self::Railway,
+            ShipTarget::Fly => Self::Fly,
+            ShipTarget::Docker => Self::Docker,
+            ShipTarget::Vps => Self::Vps,
+        }
+    }
 }
 
 /// The `getdev snap` sub-actions. Ids are typed `u32` so clap rejects
@@ -398,6 +441,25 @@ fn run(cli: Cli) -> anyhow::Result<u8> {
                 verbose,
             })
         }
+        Command::Ship {
+            write,
+            target,
+            run_build,
+        } => commands::ship::run(&commands::ship::ShipArgs {
+            path,
+            // Safe-by-default: ship generates files ONLY on the explicit
+            // `--write` (unlike `env`, the global `--fix` never triggers a
+            // deploy-scaffold mutation — critical constraint).
+            write,
+            target: target.map(Into::into),
+            run_build,
+            json,
+            no_color,
+            fail_on,
+            cfg: cfg.clone(),
+            quiet,
+            verbose,
+        }),
         Command::Snap { message, action } => {
             // Map the clap sub-action onto the command layer's clap-free mirror
             // so `commands/snap.rs` stays a plain args struct like every other

@@ -5,5 +5,6 @@ pub mod doctor;
 pub mod env;
 pub mod real;
 pub mod review;
+pub mod ship;
 pub mod snap;
 pub mod spike;
