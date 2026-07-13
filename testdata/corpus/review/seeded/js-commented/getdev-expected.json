@@ -1,0 +1,6 @@
+{
+  "seeded": [
+    { "id": "review/commented-code-block", "file": "src/pipeline.js" },
+    { "id": "review/debug-leftover", "file": "src/pipeline.js" }
+  ]
+}

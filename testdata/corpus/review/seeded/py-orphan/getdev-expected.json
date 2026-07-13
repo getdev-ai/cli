@@ -1,0 +1,5 @@
+{
+  "seeded": [
+    { "id": "review/orphan-file", "file": "lib/detached_module.py" }
+  ]
+}

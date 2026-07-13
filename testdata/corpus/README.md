@@ -220,3 +220,100 @@ exercised the full default scope against a `.js`-only fixture. Fixed in
 language (mirroring `imports_js.rs`'s existing `import_query` pattern),
 matching this plan's Rule 1 (auto-fix bugs) — see the plan SUMMARY for
 details.
+
+# review/ corpus — the two-state (base/after) agent-session corpus (06-06)
+
+`getdev review` analyzes a **diff**, not a static checkout, so it needs a
+fundamentally different corpus shape from the flat single-tree `seeded/`/
+`sentinels/` layout above (06-RESEARCH.md Assumption A6). The `real`/`audit`
+corpus can express "here is a project, scan it"; it cannot express "here is a
+project *before* and *after* an agent session — review only the delta." The
+`review/` corpus is that new shape, exercised by
+`crates/getdev-cli/tests/review_corpus.rs`.
+
+## Layout
+
+```
+testdata/corpus/review/
+├── seeded/<app>/
+│   ├── base/            complete initial project state (committed by the harness)
+│   ├── after/           ONLY the files an "agent session" changed or added
+│   └── getdev-expected.json   { "seeded": [ { id, file }, ... ] }
+└── sentinels/<app>/
+    ├── base/            clean initial state
+    └── after/           a LEGITIMATE change — must produce no warning+ finding
+```
+
+`base/` is a full tree; `after/` is a **partial overlay** — it carries only
+the files that a simulated agent session modified or introduced, so any file
+absent from `after/` is guaranteed unchanged (no accidental diff noise).
+
+## How the harness materializes it (review_corpus.rs)
+
+Per app, into a throwaway temp dir (never the checked-in corpus):
+
+1. copy `base/` in, `git init`, commit it under a hermetic `getdev` identity
+   with `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` blanked (no CI-host config
+   leaks, mirroring `getdev-gitx::snap`);
+2. copy `after/` on top of the working tree (overwriting/adding files);
+3. run `getdev review --json --path <tmp>` — the default working-tree-vs-HEAD
+   scope, so the diff *is* the `base → after` delta.
+
+Fully hermetic: review makes zero network calls by construction (imports no
+`getdev_registry` type — 06-05), and the harness only ever writes to a temp
+dir, never under `testdata/corpus/review/`.
+
+## `seeded/` — recall (the P5 exit criterion: ≥80% caught)
+
+Each seeded app's `after/` deliberately introduces agent debris as a diff over
+`base/`, catalogued in `getdev-expected.json` (matched by `id` + `file`, the
+same stable recall criterion `real`/`audit` use). The ten apps span JS/TS and
+Python and cover **each of the six `review/*` rule types at least twice**:
+
+| App | Lang | Seeded rule id(s) |
+|---|---|---|
+| `js-debug-todo/` | JS | `review/debug-leftover`, `review/todo-introduced` |
+| `py-debug-todo/` | Python | `review/debug-leftover`, `review/todo-introduced` |
+| `ts-deadcode/` | TypeScript | `review/dead-code-introduced` |
+| `py-deadcode/` | Python | `review/dead-code-introduced` |
+| `js-duplicate/` | JS | `review/duplicate-helper` |
+| `py-duplicate/` | Python | `review/duplicate-helper` |
+| `js-commented/` | JS | `review/commented-code-block`, `review/debug-leftover` |
+| `ts-commented/` | TypeScript | `review/commented-code-block` |
+| `js-orphan/` | JS | `review/orphan-file` |
+| `py-orphan/` | Python | `review/orphan-file` |
+
+Coverage: debug-leftover ×3, todo-introduced ×2, dead-code-introduced ×2,
+duplicate-helper ×2, commented-code-block ×2, orphan-file ×2.
+
+The gate asserts **≥80%** recall (not 100%): containment-scoping legitimately
+misses a declaration split across two hunks (06-RESEARCH.md Pattern 2's
+documented recall gap), so a hard 100% would be an over-tight gate. A seeded
+app also doubles as its own sentinel — the harness surfaces any warning+
+finding *outside* the catalogued `(id, file)` pairs, so recall cannot pass by
+drowning a real signal in extra false positives.
+
+`review/todo-introduced` is **info** severity (an intentional marker, not a
+defect) — like `real`'s info notes it is a recall target but is excluded from
+the false-positive budget below.
+
+## `sentinels/` — the false-positive budget (per-rule < 10%)
+
+Each sentinel app's `after/` is a realistic, LEGITIMATE change that must trip
+**no** warning+ (`low`/`medium`/`high`/`critical`) finding. They target the
+exact FP-guard classes locked in 06-03/06-04 (06-RESEARCH.md Pitfalls 4/5):
+
+| App | FP-guard class exercised |
+|---|---|
+| `js-string-registered/` | dead-code string-reference widening (a handler referenced only by a string literal, e.g. route-registration-by-name, must not be "dead") |
+| `next-app-route/` | framework-entry exemption for orphan + dead-code (a new App-Router `route.ts` is runtime-referenced, not import-referenced) |
+| `py-decorated-routes/` | decorator exemption for dead-code (a `@router.get(...)` handler is framework-registered) |
+| `js-prose-jsdoc/` | commented-code-block prose + JSDoc guard (prose `//` lines and a `/** */` block are documentation, not commented-out code) |
+| `js-sibling-helper/` | orphan sibling-import guard (a new helper file imported by a sibling is not an orphan) |
+
+The FP rate is measured **per rule id** (a rule's warning+ finding count
+across every sentinel after-state ÷ total source files scanned across the
+whole sentinel set), never as a diluted aggregate across rules, and must stay
+under 10% for every rule — the P5 budget (looser than `audit`/`real`'s 5% per
+the ROADMAP, reflecting review's heuristic detectors). Info-severity findings
+are excluded from the count, identical to the `real`/`audit` budget above.
