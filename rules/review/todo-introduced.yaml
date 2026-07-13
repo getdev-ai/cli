@@ -13,16 +13,16 @@ refs:
 matchers:
   - language: javascript
     query: |
-      (comment) @finding (#match? @finding "(?i)\\b(TODO|FIXME|HACK|XXX)\\b")
+      ((comment) @finding (#match? @finding "(?i)\\b(TODO|FIXME|HACK|XXX)\\b"))
   - language: typescript
     query: |
-      (comment) @finding (#match? @finding "(?i)\\b(TODO|FIXME|HACK|XXX)\\b")
+      ((comment) @finding (#match? @finding "(?i)\\b(TODO|FIXME|HACK|XXX)\\b"))
   - language: tsx
     query: |
-      (comment) @finding (#match? @finding "(?i)\\b(TODO|FIXME|HACK|XXX)\\b")
+      ((comment) @finding (#match? @finding "(?i)\\b(TODO|FIXME|HACK|XXX)\\b"))
   - language: python
     query: |
-      (comment) @finding (#match? @finding "(?i)\\b(TODO|FIXME|HACK|XXX)\\b")
+      ((comment) @finding (#match? @finding "(?i)\\b(TODO|FIXME|HACK|XXX)\\b"))
 fixtures:
   positive:
     - positive/todo_js.js
