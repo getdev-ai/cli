@@ -119,4 +119,87 @@ mod tests {
     fn real_cosign_vector_verifies_ok() {
         assert_eq!(verify_detached(MANIFEST, SIGNATURE, PUBKEY), Ok(()));
     }
+
+    // ---- Tamper resistance: verification must fail CLOSED for every vector,
+    //      always a typed `UpdateError`, never `Ok`, never a panic. 08-04
+    //      treats any `Err` as "abort before swap, leave the binary untouched"
+    //      (STRIDE T-08-01 Tampering / T-08-02 Spoofing / T-08-03 DoS). ----
+
+    /// A single flipped manifest byte must break verification — this is the
+    /// core anti-tampering property (a backdoored SHA256SUMS must be rejected).
+    #[test]
+    fn flipped_manifest_byte_is_mismatch() {
+        let mut tampered = MANIFEST.to_vec();
+        tampered[0] ^= 0x01; // flip one bit of the first byte
+        assert_eq!(
+            verify_detached(&tampered, SIGNATURE, PUBKEY),
+            Err(UpdateError::SignatureMismatch)
+        );
+    }
+
+    /// Non-base64 garbage in the signature slot decodes to nothing — malformed,
+    /// never a crash.
+    #[test]
+    fn garbage_base64_signature_is_malformed() {
+        assert_eq!(
+            verify_detached(MANIFEST, "!!! not base64 @@@", PUBKEY),
+            Err(UpdateError::SignatureMalformed)
+        );
+    }
+
+    /// Valid base64 that does not decode to an ASN.1-DER ECDSA signature
+    /// (here: a truncated prefix of the genuine signature) is malformed.
+    #[test]
+    fn valid_base64_but_not_der_is_malformed() {
+        // Re-encode just the first few bytes of the real signature: valid
+        // base64, but a truncated/garbage DER body.
+        let der = base64::engine::general_purpose::STANDARD
+            .decode(SIGNATURE.trim())
+            .unwrap();
+        let truncated = base64::engine::general_purpose::STANDARD.encode(&der[..4]);
+        assert_eq!(
+            verify_detached(MANIFEST, &truncated, PUBKEY),
+            Err(UpdateError::SignatureMalformed)
+        );
+    }
+
+    /// An empty signature is malformed, not a panic.
+    #[test]
+    fn empty_signature_is_malformed() {
+        assert_eq!(
+            verify_detached(MANIFEST, "", PUBKEY),
+            Err(UpdateError::SignatureMalformed)
+        );
+    }
+
+    /// The genuine signature checked against a DIFFERENT public key must be
+    /// rejected — only the single embedded key is trusted (spoofing/forgery
+    /// under another key fails closed). The wrong key is derived deterministically
+    /// in-test (a fixed non-zero scalar), no committed second key or RNG needed.
+    #[test]
+    fn signature_under_wrong_key_is_mismatch() {
+        use p256::ecdsa::SigningKey;
+        use p256::pkcs8::{EncodePublicKey, LineEnding};
+
+        let wrong_key = SigningKey::from_slice(&[7u8; 32]).unwrap();
+        let wrong_pem = wrong_key
+            .verifying_key()
+            .to_public_key_pem(LineEnding::LF)
+            .unwrap();
+        assert_eq!(
+            verify_detached(MANIFEST, SIGNATURE, &wrong_pem),
+            Err(UpdateError::SignatureMismatch)
+        );
+    }
+
+    /// A malformed PEM public key is rejected before any verification is
+    /// attempted — typed error, never a crash.
+    #[test]
+    fn malformed_pem_public_key_is_malformed() {
+        let bad_pem = "-----BEGIN PUBLIC KEY-----\nnot a real key\n-----END PUBLIC KEY-----\n";
+        assert_eq!(
+            verify_detached(MANIFEST, SIGNATURE, bad_pem),
+            Err(UpdateError::PublicKeyMalformed)
+        );
+    }
 }
