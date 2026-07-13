@@ -142,6 +142,21 @@ enum Command {
         #[arg(long, value_name = "DIR")]
         rules: Option<PathBuf>,
     },
+    /// Analyze a diff for agent-session artifacts (working tree vs `HEAD` by
+    /// default; offline, non-mutating). Rule prefix `review/`. Diff extraction
+    /// via getdev-gitx (docs/SPEC-COMMANDS.md `getdev review`).
+    Review {
+        /// Compare the working tree against `<ref>` (e.g. `main`, `HEAD~3`)
+        /// instead of `HEAD`
+        #[arg(long, value_name = "REF", conflicts_with_all = ["staged", "all"])]
+        against: Option<String>,
+        /// Review only the staged changes (index vs `HEAD`)
+        #[arg(long, conflicts_with_all = ["against", "all"])]
+        staged: bool,
+        /// Review the whole tree, not just the diff (no git required)
+        #[arg(long, conflicts_with_all = ["against", "staged"])]
+        all: bool,
+    },
     /// Working-tree checkpoints under `refs/getdev/` (git-hidden; never touches
     /// user branches/index/stash). `snap [-m <msg>] | list | diff <id> | prune`
     Snap {
@@ -316,6 +331,53 @@ fn run(cli: Cli) -> anyhow::Result<u8> {
                 verbose,
             })
         }
+        Command::Review {
+            against,
+            staged,
+            all,
+        } => {
+            // The CLI is the sole boundary that maps `getdev_gitx::diff` types
+            // onto `core::review`'s own input types — `core::review` may not
+            // depend on `getdev-gitx` (ARCHITECTURE.md; 06-02-SUMMARY). `--all`
+            // bypasses git entirely (the walker synthesizes whole-file ranges).
+            let scope = if all {
+                getdev_core::review::ReviewScope::All
+            } else {
+                let diff_scope = if staged {
+                    getdev_gitx::diff::DiffScope::Staged
+                } else if let Some(reference) = against {
+                    // Open Q1 LOCKED: working tree vs the given ref.
+                    getdev_gitx::diff::DiffScope::Against(reference)
+                } else if cfg.review.against != "HEAD" {
+                    // `[review] against` supplies the comparison ref when
+                    // `--against` is absent; the default ("HEAD") is the common
+                    // working-tree-vs-HEAD case below.
+                    getdev_gitx::diff::DiffScope::Against(cfg.review.against.clone())
+                } else {
+                    getdev_gitx::diff::DiffScope::WorkingTreeVsHead
+                };
+                // A `GitxError` (git absent/too old) surfaces as an anyhow error
+                // → exit 2 via `main`'s mapping. A non-repo yields zero changed
+                // files (never an error), so `getdev review` on a folder with no
+                // git prints a clean report and exits 0.
+                let changed = getdev_gitx::diff::changed_files(&path, &diff_scope)?;
+                let mapped = changed.into_iter().map(map_changed_file).collect();
+                getdev_core::review::ReviewScope::Diff(mapped)
+            };
+            commands::review::run(&commands::review::ReviewArgs {
+                path,
+                json,
+                no_color,
+                fail_on,
+                // Review has no `--severity` flag/config — report every
+                // `review/*` finding; suppression is config + `--fail-on` only.
+                severity_min: Severity::Info,
+                scope,
+                cfg: cfg.clone(),
+                quiet,
+                verbose,
+            })
+        }
         Command::Snap { message, action } => {
             // Map the clap sub-action onto the command layer's clap-free mirror
             // so `commands/snap.rs` stays a plain args struct like every other
@@ -353,5 +415,28 @@ fn run(cli: Cli) -> anyhow::Result<u8> {
             anyhow::bail!("internal: doctor should have been dispatched before config resolution")
         }
         Command::Spike { dir } => commands::spike::run(&dir).map(|()| 0),
+    }
+}
+
+/// Map a `getdev-gitx` changed file onto `core::review`'s own input type. This
+/// is the single boundary where the two mirror-image structs meet: `core::review`
+/// deliberately does NOT depend on `getdev-gitx` (ARCHITECTURE.md fixes the
+/// crate-dependency direction), so the CLI — which depends on both — performs
+/// the translation (06-02-SUMMARY key decision).
+fn map_changed_file(
+    file: getdev_gitx::diff::ChangedFile,
+) -> getdev_core::review::ReviewChangedFile {
+    use getdev_core::review::{ReviewChangeStatus, ReviewChangedFile};
+    use getdev_gitx::diff::ChangeStatus;
+
+    let status = match file.status {
+        ChangeStatus::Added => ReviewChangeStatus::Added,
+        ChangeStatus::Modified => ReviewChangeStatus::Modified,
+        ChangeStatus::Deleted => ReviewChangeStatus::Deleted,
+    };
+    ReviewChangedFile {
+        path: file.path,
+        status,
+        added_ranges: file.added_ranges,
     }
 }
