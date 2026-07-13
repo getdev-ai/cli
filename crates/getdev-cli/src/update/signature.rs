@@ -17,9 +17,9 @@
 //! self-update engine (`update::run`). That engine is, in turn, only reached
 //! from unit tests + the imminent 08-05 CLI command wiring, so from the *bin's*
 //! non-test perspective this surface (and the engine `UpdateError` variants it
-//! shares) is still `dead_code` until `main.rs` dispatches `getdev update`.
-//! The allow is intentional and removed in 08-05.
-#![allow(dead_code)]
+//! shares) was `dead_code` until `main.rs` dispatched `getdev update`. 08-05
+//! wired that command, so the allow is gone — the verify API and the shared
+//! `UpdateError` variants are now reached from the live engine.
 
 use base64::Engine;
 use p256::ecdsa::signature::hazmat::PrehashVerifier;
@@ -115,6 +115,11 @@ pub enum UpdateError {
     /// 08-08's 3-OS smoke). The verify-then-swap core is proven on Unix;
     /// Windows users reinstall via the installer/scoop until then. Fails
     /// closed — the gates still run, but the swap never happens partially.
+    ///
+    /// Constructed only under `#[cfg(windows)]` (`swap::apply_update`), so on a
+    /// unix build it is never built — the targeted allow keeps that
+    /// platform-conditional variant from tripping `dead_code`.
+    #[allow(dead_code)]
     #[error(
         "windows self-update archive handling is not yet available \
          — reinstall via the installer/scoop (tracked for 08-08)"

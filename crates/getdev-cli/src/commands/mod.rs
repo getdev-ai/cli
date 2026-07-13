@@ -9,3 +9,4 @@ pub mod review;
 pub mod ship;
 pub mod snap;
 pub mod spike;
+pub mod update;

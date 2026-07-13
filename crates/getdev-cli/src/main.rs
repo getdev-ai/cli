@@ -206,6 +206,13 @@ enum Command {
     },
     /// Self-diagnostics: toolchain, git availability, grammar integrity
     Doctor,
+    /// Self-update the binary from GitHub Releases: verify the release's
+    /// SHA-256 checksum + keyed-cosign signature, then atomically replace the
+    /// running binary (mutates the binary only, never project files). Channel /
+    /// pin / downgrade are `[update]` config — NO per-command flags, global
+    /// flags only (docs/SPEC-COMMANDS.md `update`, CLAUDE.md rule 6).
+    /// `--offline` makes it an explicit no-op.
+    Update,
     /// P0 de-risking spike: walk + parse + query a directory (dev-only)
     #[command(hide = true)]
     Spike {
@@ -512,6 +519,16 @@ fn run(cli: Cli) -> anyhow::Result<u8> {
             // rule 1). IN-01.
             anyhow::bail!("internal: doctor should have been dispatched before config resolution")
         }
+        // Self-update: global flags only. Offline is already resolved above
+        // (same path as doctor/real); `[update]` config carries channel/pin/
+        // downgrade so the command surface stays flag-free (CLAUDE.md rule 6).
+        Command::Update => commands::update::run(&commands::update::UpdateArgs {
+            offline,
+            json,
+            quiet,
+            no_color,
+            cfg: cfg.update.clone(),
+        }),
         Command::Spike { dir } => commands::spike::run(&dir).map(|()| 0),
     }
 }

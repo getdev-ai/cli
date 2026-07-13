@@ -12,9 +12,8 @@
 //! This module is pure/offline: it does no I/O and no network, so every path
 //! is unit-testable hermetically with in-memory bytes.
 //!
-//! Wired into the engine by 08-04; the engine is only reached from tests +
-//! 08-05's CLI command, so the surface is `dead_code` in the bin until then.
-#![allow(dead_code)]
+//! Wired into the engine by 08-04 and reached live from `getdev update` since
+//! 08-05, so the module-level `dead_code` allow is gone.
 
 use sha2::{Digest, Sha256};
 

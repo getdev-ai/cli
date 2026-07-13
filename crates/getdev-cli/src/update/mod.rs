@@ -11,9 +11,9 @@
 //! probe (`latest_release_version`) is live via `doctor`, but the new engine
 //! surface is only reached from unit tests + the imminent 08-05 CLI command
 //! wiring, so it is `dead_code`-allowed at the module level with intent until
-//! `main.rs` dispatches `getdev update` (the allow is removed in 08-05). This
-//! mirrors 08-01's same-reasoned allow on `signature.rs`.
-#![allow(dead_code)]
+//! `main.rs` dispatches `getdev update`. 08-05 wired that command, so the
+//! module-level `dead_code` allow is gone — every surface here is now reached
+//! from `commands::update::run` (the engine) or `doctor` (the probe).
 
 /// Detached keyed-cosign signature verification (pure-Rust p256) — the crypto
 /// gate 08-04's self-update engine runs after the SHA-256 checksum gate.
@@ -60,7 +60,13 @@ pub struct ReleaseAsset {
 #[derive(Debug, Clone, Deserialize)]
 pub struct FullReleaseResponse {
     pub tag_name: String,
+    /// Part of the GitHub Releases wire schema, deserialized for fidelity but
+    /// not read by the resolver: the stable channel already excludes
+    /// prereleases via `/releases/latest`, and the prerelease channel takes the
+    /// newest list entry regardless of this flag. Kept (rather than dropped) so
+    /// the struct documents the real payload — hence the targeted allow.
     #[serde(default)]
+    #[allow(dead_code)]
     pub prerelease: bool,
     #[serde(default)]
     pub assets: Vec<ReleaseAsset>,
