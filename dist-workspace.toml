@@ -58,3 +58,12 @@ github-attestations = true
 pr-run-mode = "upload"
 # Whether to install an updater program (getdev ships its own `getdev update`).
 install-updater = false
+# release.yml carries a hand-written `# --- getdev custom` block (keyed-cosign
+# signing, Syft SBOM, 25 MB size gate, Scoop bump, ordered cargo publish) that
+# cargo-dist does not manage. `allow-dirty = ["ci"]` tells dist to leave the CI
+# file alone — it will NOT regenerate/clobber the custom block, and `dist plan`
+# will not fail on the "out of date" check. Regenerate deliberately after a
+# cargo-dist upgrade with `dist generate --mode ci`, then re-apply the custom
+# block (see the delimiter comment in release.yml). This is the cargo-dist-
+# sanctioned mechanism for a hand-edited generated workflow (08-RESEARCH Pitfall 3).
+allow-dirty = ["ci"]

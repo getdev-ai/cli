@@ -382,3 +382,153 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+
+  # ===========================================================================
+  # --- getdev custom (NOT cargo-dist-managed) -------------------------------
+  #
+  # Everything below this line is hand-written and lives AFTER the generated
+  # sections so a future `dist generate --mode ci` never clobbers it
+  # (08-RESEARCH Pitfall 3). cargo-dist owns: build/checksum/attest/host and the
+  # native npm+homebrew publish jobs above. It does NOT own: the keyed-cosign
+  # self-update signature, the Syft SBOM, the 25 MB binary-size gate, the Scoop
+  # manifest bump, or the ordered crates.io publish — those are the jobs here.
+  # ===========================================================================
+
+  # Keyed cosign signature over SHA256SUMS + Syft SBOM + 25 MB binary-size gate.
+  # This job produces the EXACT artifact `getdev update` verifies in-process with
+  # its embedded p256 key (SHA256SUMS.sig — a cosign 2.x legacy detached
+  # base64(ASN.1-DER ECDSA-P256) signature; D-01). It only runs on a real tag
+  # push (publishing == 'true'), never on pull_request, so a PR can never reach
+  # COSIGN_PRIVATE_KEY (threat T-08-16). Secrets come from the `release`
+  # environment with required-reviewer protection (provisioned in 08-08).
+  getdev-sign-sbom-size:
+    name: getdev-sign-sbom-size (custom)
+    needs:
+      - plan
+      - host
+    if: ${{ needs.plan.outputs.publishing == 'true' && needs.host.result == 'success' }}
+    runs-on: "ubuntu-22.04"
+    # The `release` environment gates COSIGN_PRIVATE_KEY/COSIGN_PASSWORD behind a
+    # required reviewer (repo setting created in 08-08).
+    environment: release
+    permissions:
+      contents: write   # upload SHA256SUMS + .sig + SBOM to the release
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      # Pull every built artifact (release archives + per-artifact .sha256) that
+      # the build jobs staged, so we can size-gate, aggregate, sign, and SBOM them.
+      - name: Fetch built artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: artifacts-*
+          path: dist-artifacts/
+          merge-multiple: true
+      # 25 MB binary-size gate (REQ-single-binary / REQ-perf-budgets). Extract the
+      # getdev binary out of each release archive and fail the release if any
+      # exceeds the 25 MiB (26214400-byte) budget — enforced, not just documented.
+      - name: Binary-size gate (< 25 MB per target)
+        shell: bash
+        run: |
+          set -euo pipefail
+          MAX_BYTES=26214400   # 25 * 1024 * 1024
+          workdir="$(mktemp -d)"
+          fail=0
+          shopt -s nullglob
+          for archive in dist-artifacts/getdev-*.tar.xz dist-artifacts/getdev-*.zip; do
+            rm -rf "${workdir:?}/x" && mkdir -p "$workdir/x"
+            case "$archive" in
+              *.tar.xz) tar -xf "$archive" -C "$workdir/x" ;;
+              *.zip)    unzip -qo "$archive" -d "$workdir/x" ;;
+            esac
+            # the binary is `getdev` (unix) or `getdev.exe` (windows), anywhere in the tree
+            while IFS= read -r -d '' bin; do
+              size=$(stat -c%s "$bin")
+              printf '  %-52s %10d bytes\n' "$(basename "$archive")" "$size"
+              if [ "$size" -ge "$MAX_BYTES" ]; then
+                echo "::error::$(basename "$archive"): binary is ${size} bytes (>= ${MAX_BYTES}); exceeds the 25 MB single-binary budget"
+                fail=1
+              fi
+            done < <(find "$workdir/x" -type f \( -name getdev -o -name getdev.exe \) -print0)
+          done
+          if [ "$fail" -ne 0 ]; then
+            echo "binary-size gate failed — see errors above"
+            exit 1
+          fi
+          echo "binary-size gate passed (all targets < 25 MB)"
+      # Aggregate the per-target checksums into ONE coreutils-format SHA256SUMS
+      # manifest, keyed by the release-artifact BASENAME — the exact basenames
+      # `getdev update`'s checksum gate matches against (update/checksum.rs). We
+      # recompute from the archives so the manifest is self-consistent with what
+      # is actually uploaded (equivalent to, but more robust than, concatenating
+      # the individual .sha256 files whose filename fields may carry path prefixes).
+      - name: Aggregate SHA256SUMS manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          (
+            cd dist-artifacts
+            shopt -s nullglob
+            files=( getdev-*.tar.xz getdev-*.zip )
+            if [ ${#files[@]} -eq 0 ]; then
+              echo "no release archives found to checksum" >&2
+              exit 1
+            fi
+            sha256sum "${files[@]}" > SHA256SUMS
+          )
+          echo "SHA256SUMS:"
+          cat dist-artifacts/SHA256SUMS
+      # Pin cosign to 2.x: 3.x defaults to the new Sigstore bundle format (+ Rekor
+      # round-trip), which the embedded pure-Rust verifier (verify_detached) CANNOT
+      # read. 2.4.3 emits the legacy base64(DER) detached signature the test vector
+      # in testdata/update/signature/ was produced with. DO NOT bump without
+      # re-proving compatibility against signature.rs.
+      - name: Install cosign (pinned 2.x — legacy detached signature)
+        uses: sigstore/cosign-installer@v3.7.0
+        with:
+          cosign-release: 'v2.4.3'
+      # KEYED sign-blob over SHA256SUMS → SHA256SUMS.sig. --tlog-upload=false keeps
+      # it fully offline (no Rekor), matching testdata/update/signature/README.md.
+      # The key is the private half whose public half is embedded in the binary.
+      - name: Keyed cosign sign SHA256SUMS
+        working-directory: dist-artifacts
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          cosign sign-blob \
+            --key env://COSIGN_PRIVATE_KEY \
+            --tlog-upload=false \
+            --yes \
+            --output-signature SHA256SUMS.sig \
+            SHA256SUMS
+          echo "SHA256SUMS.sig (base64 DER ECDSA-P256):"
+          cat SHA256SUMS.sig
+      # Syft SBOM (SPDX-JSON) over the built artifacts. anchore/sbom-action wraps
+      # the Syft Go binary (Anchore). Syft is NOT a Rust crate — there is no such
+      # crate on crates.io; referencing one would be a hallucinated dependency (D-03).
+      - name: Generate SBOM (Syft → SPDX-JSON)
+        uses: anchore/sbom-action@v0
+        with:
+          path: dist-artifacts/
+          format: spdx-json
+          output-file: dist-artifacts/getdev-sbom.spdx.json
+          upload-artifact: false
+      # Name the SBOM with the version and upload SHA256SUMS + .sig + SBOM to the
+      # release. --clobber is safe (these three assets are produced only here).
+      - name: Upload signature, manifest, and SBOM to the release
+        working-directory: dist-artifacts
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          cp getdev-sbom.spdx.json "getdev-${version}.sbom.spdx.json"
+          gh release upload "$TAG" \
+            SHA256SUMS \
+            SHA256SUMS.sig \
+            "getdev-${version}.sbom.spdx.json" \
+            --clobber
