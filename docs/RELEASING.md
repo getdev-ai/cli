@@ -101,6 +101,42 @@ getdev uses cosign in **two distinct ways**, and they must not be confused:
   for humans; it is NOT what self-update consumes. Migrating self-update to keyless cosign
   (Fulcio/Rekor) is the **v0.2** direction (D-01), not wired in v0.1.
 
+### Self-update verification (keyed cosign) — what `getdev update` checks
+
+When a user runs `getdev update`, the client verifies the downloaded release
+**in-process**, in this order, and aborts (leaving the running binary untouched)
+on any failure:
+
+1. **SHA-256 checksum gate.** The downloaded archive's SHA-256 must match its
+   line in the `SHA256SUMS` manifest (`update::checksum`).
+2. **Keyed-cosign signature gate.** `SHA256SUMS.sig` — a base64 ASN.1-DER
+   ECDSA-P256 detached signature over `sha256(SHA256SUMS)` — is verified with
+   pure-Rust `p256` against `EMBEDDED_COSIGN_PUBKEY`, the public half embedded in
+   the binary (`crates/getdev-cli/src/update/signature.rs`). No `cosign` binary,
+   no network, no Rekor.
+
+Only after both gates pass is the binary atomically self-replaced. Because the
+trust root is embedded, verification is a pure local computation — it adds no
+network destination and keeps `--offline` a true no-op.
+
+**Signing-key refresh / rotation checklist (do this BEFORE changing the signing
+key).** The embedded public key and the CI `COSIGN_PRIVATE_KEY` are one pair; a
+mismatch makes **every** self-update fail closed (Pitfall 2 — trust-root
+staleness). So on any key change:
+
+- [ ] Generate the new pair with `cosign generate-key-pair` (pin cosign 2.x — 3.x
+      emits the new bundle format the embedded verifier cannot read).
+- [ ] Paste the new `cosign.pub` verbatim into the single `EMBEDDED_COSIGN_PUBKEY`
+      PASTE-HERE location in `signature.rs` **in the same release** that updates
+      `COSIGN_PRIVATE_KEY`/`COSIGN_PASSWORD` — never one without the other.
+- [ ] Confirm the embedded key matches: the `embedded_pubkey_is_the_placeholder_or_parses`
+      test enforces the pasted PEM parses; a green CI run signs a fresh
+      `SHA256SUMS` whose `.sig` the new embedded key can verify (the launch
+      human-verify checkpoint exercises this end-to-end from a prior-version
+      binary).
+- [ ] Keep the old public key documented until every supported prior version has
+      been superseded, so a downgrade path can still be reasoned about.
+
 ### After the workflow completes
 
 1. Run the smoke checklist (below) against the **draft** release artifacts.

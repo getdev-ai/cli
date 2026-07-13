@@ -263,6 +263,5 @@ partially-applied multi-file change, or a secret briefly written world-readable.
 - [RELEASING.md](./RELEASING.md) — release signing, SBOM, cosign.
 - [SECURITY.md](../SECURITY.md) — how to report a vulnerability.
 
-> **Follow-up (out of this change's file set):** update ARCHITECTURE.md's
-> "Threat model (summary)" stub to link here. Deferred to keep 08-03's file set
-> disjoint from parallel Wave-1 plans; see 08-03-SUMMARY.md.
+ARCHITECTURE.md's "Threat model (summary)" section back-links here (resolved at
+launch, 08-08), so the summary and this full document are cross-linked both ways.

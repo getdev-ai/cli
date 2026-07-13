@@ -123,7 +123,12 @@ Only **`getdev-registry`** and **`getdev-cli::update`** may touch the network. P
 
 ## Threat model (summary)
 
-Documented threats and mitigations (full doc: TBD — plan calls for a threat-model doc in `/docs`):
+This is the summary; the **full threat model, with every promise tied to a named,
+enforced mitigation (STRIDE), lives in [THREAT-MODEL.md](./THREAT-MODEL.md)** —
+including the self-update supply chain (T4) and the network/privacy boundary (T5).
+
 - Malicious repo inputs (parser bombs, unbounded or special files) → per-file caps that bound the **read itself** (`take(cap+1)`, not just a `stat` pre-check that a growing file or a FIFO/`/proc`/device can defeat) and **reject non-regular files**; plus time limits per file. Applies to both scanned sources (`core::scan`) and the attacker-controllable `.getdev.toml` (`core::config`).
 - Cache poisoning → registry responses validated.
 - Hostile rule packs → `--rules` packs are declarative-only, no code execution.
+- Self-update supply chain → keyed-cosign signature + SHA-256 checksum verified in-process before an atomic swap; downgrade-refused; `--offline` no-op (see THREAT-MODEL.md T4).
+- Network / privacy → only npm/PyPI/GitHub-Releases egress, mechanically enforced by `deny.toml` bans + `network_egress.rs` (see THREAT-MODEL.md T5).

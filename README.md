@@ -30,11 +30,24 @@ what you run *after* the agent:
 
 ## The privacy promise
 
-- **No telemetry. No analytics. No code upload. Ever.**
-- The only network calls getdev makes: the npm registry, PyPI, and GitHub Releases
-  (self-update). Each is documented and verifiable in source. `--offline` disables all of them.
-- getdev never executes your project's code unless you explicitly opt in (`ship --run-build`).
+- **No telemetry. No analytics. No code upload. Ever.** There are zero LLM code
+  paths and no API key is required — the core is deterministic (same input → same
+  output).
+- The only network destinations getdev can reach are the npm registry, PyPI, and
+  GitHub Releases (self-update) — and this is **mechanically enforced, not just
+  asserted**. Two CI gates fail the build on any regression: a `cargo-deny`
+  `[bans]` rule if a second HTTP client, a second async runtime, or any LLM SDK
+  enters the dependency tree, and a source-symbol egress test (`network_egress.rs`)
+  if a network call appears outside the two sanctioned locations. `--offline`
+  disables all network access.
+- `getdev update` verifies a keyed-cosign signature over the release checksums
+  against a public key embedded in the binary — no network trust root, no Rekor.
+- getdev never executes your project's code unless you explicitly opt in
+  (`ship --run-build`).
 - Detected secret values are never printed — masked previews only (`sk-…f3a9`).
+
+The full threat model — every promise above tied to a named, enforced mitigation
+— is in [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md).
 
 ## Install (target channels for v0.1)
 
@@ -87,6 +100,7 @@ Full instructions (prerequisites, tests, lints, compile-time tips): [docs/BUILDI
 - [docs/BUILDING.md](docs/BUILDING.md) — build from source, test, lint
 - [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md) — install channels and how they're published
 - [docs/RELEASING.md](docs/RELEASING.md) — release process, gates, signing, SBOM
+- [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md) — threats and enforced mitigations (privacy, self-update)
 - [docs/CI.md](docs/CI.md) — GitHub Actions setup
 - [CONTRIBUTING.md](CONTRIBUTING.md) — how to contribute (rules need zero Rust!)
 - [SECURITY.md](SECURITY.md) — vulnerability disclosure
