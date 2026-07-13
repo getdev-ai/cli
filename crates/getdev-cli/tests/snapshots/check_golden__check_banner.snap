@@ -1,0 +1,30 @@
+---
+source: crates/getdev-cli/tests/check_golden.rs
+expression: stdout
+---
+┌─ getdev check ───────────────────────────────┐
+│  Ship Score: 20/100                          │
+│  3 critical · 0 high · 1 medium · 1 low      │
+└──────────────────────────────────────────────┘
+CRITICAL   real/nonexistent-package     package.json
+  Package 'requests-auth-helper' does not exist on npm
+  → remove the dependency or replace it with a real package providing the needed functionality
+CRITICAL   audit/hardcoded-secret       payments.js:1
+  stripe secret assigned to 'stripeKey' (sk_live_…OP01)
+  → Move this value to an environment variable and load it via process.env/os.environ at runtime; run `getdev env --write` to extract it automatically. Never commit a live secret to source control.
+
+CRITICAL   env/hardcoded-secret         payments.js:1
+  stripe secret assigned to 'stripeKey' (sk_live_…OP01)
+  → extract to STRIPE_SECRET_KEY in .env
+MEDIUM     review/debug-leftover        payments.js:2
+  Debug statement left in code
+  → Remove the debug statement before merging.
+LOW        review/orphan-file           payments.js
+  Introduced file 'payments.js' is not imported by any project file (confidence: medium)
+  → import/use the file, delete it if it is dead, or ignore if it is an entry point
+
+top 3 things to fix first:
+  1. real/nonexistent-package package.json — Package 'requests-auth-helper' does not exist on npm
+  2. audit/hardcoded-secret payments.js:1 — stripe secret assigned to 'stripeKey' (sk_live_…OP01)
+  3. env/hardcoded-secret payments.js:1 — stripe secret assigned to 'stripeKey' (sk_live_…OP01)
+1 finding(s) fixable — run: getdev env --write
