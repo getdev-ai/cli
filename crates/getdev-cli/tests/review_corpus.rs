@@ -85,7 +85,8 @@ fn git(dir: &Path, args: &[&str]) -> std::process::Output {
 /// Recursively copy every file under `src` into `dst` (creating parents),
 /// overwriting existing files — the overlay semantics `after/` needs.
 fn copy_tree(src: &Path, dst: &Path) {
-    for entry in std::fs::read_dir(src).unwrap_or_else(|err| panic!("read {}: {err}", src.display()))
+    for entry in
+        std::fs::read_dir(src).unwrap_or_else(|err| panic!("read {}: {err}", src.display()))
     {
         let entry = entry.expect("dir entry");
         let from = entry.path();
@@ -97,9 +98,8 @@ fn copy_tree(src: &Path, dst: &Path) {
             if let Some(parent) = to.parent() {
                 std::fs::create_dir_all(parent).expect("create parent");
             }
-            std::fs::copy(&from, &to).unwrap_or_else(|err| {
-                panic!("copy {} -> {}: {err}", from.display(), to.display())
-            });
+            std::fs::copy(&from, &to)
+                .unwrap_or_else(|err| panic!("copy {} -> {}: {err}", from.display(), to.display()));
         }
     }
 }
@@ -192,11 +192,7 @@ fn review_findings(report: &Value) -> Vec<&Value> {
         .as_array()
         .expect("findings is an array")
         .iter()
-        .filter(|f| {
-            f["id"]
-                .as_str()
-                .is_some_and(|id| id.starts_with("review/"))
-        })
+        .filter(|f| f["id"].as_str().is_some_and(|id| id.starts_with("review/")))
         .collect()
 }
 
