@@ -13,11 +13,12 @@
 //! signer emits base64(ASN.1-DER ECDSA-P256) over `sha256(blob)`; verification
 //! is the exact mirror image (see [`verify_detached`]).
 //!
-//! This plan (08-01) de-risks and *locks* the verify API; the first caller is
-//! 08-04's self-update engine. Until that lands, `verify_detached`/
-//! `UpdateError`/`EMBEDDED_COSIGN_PUBKEY` are exercised only by this module's
-//! own tests, so the not-yet-wired public surface is `dead_code`-allowed here
-//! with intent (removed when 08-04 wires the swap gate).
+//! 08-01 de-risked and *locked* the verify API; 08-04 wires it as gate 2 of the
+//! self-update engine (`update::run`). That engine is, in turn, only reached
+//! from unit tests + the imminent 08-05 CLI command wiring, so from the *bin's*
+//! non-test perspective this surface (and the engine `UpdateError` variants it
+//! shares) is still `dead_code` until `main.rs` dispatches `getdev update`.
+//! The allow is intentional and removed in 08-05.
 #![allow(dead_code)]
 
 use base64::Engine;
@@ -41,10 +42,16 @@ PLACEHOLDER-REPLACED-WITH-THE-REAL-RELEASE-PUBLIC-KEY-IN-08-08==
 -----END PUBLIC KEY-----
 ";
 
-/// Why a signature verification failed. Every variant is a *closed* failure —
-/// 08-04 aborts the swap on any of them and leaves the running binary
-/// untouched. Deliberately coarse: the caller only needs "verified" vs. "not
-/// verified (why)"; it must never leak enough detail to help forge a signature.
+/// The shared error type for the whole `getdev update` engine (08-04). Every
+/// variant is a *closed* failure — the self-update orchestrator aborts on any
+/// of them and leaves the running binary untouched (never a partial swap).
+///
+/// The signature variants are deliberately coarse: the caller only needs
+/// "verified" vs. "not verified (why)"; they must never leak enough detail to
+/// help forge a signature. The engine variants carry a human-readable message
+/// (rather than the underlying `io`/`reqwest` error) so the whole enum stays
+/// `PartialEq`/`Eq` — the hermetic tests assert exact `Err(..)` values, and an
+/// error message is never proof of anything about a release.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum UpdateError {
     /// The base64/DER signature blob could not be decoded into an ECDSA-P256
@@ -61,6 +68,58 @@ pub enum UpdateError {
     /// or an otherwise invalid signature. Fails closed.
     #[error("signature does not verify against the manifest under this key")]
     SignatureMismatch,
+
+    /// The release for the running platform's target triple had no matching
+    /// archive asset. Abort — never guess or install a wrong-arch binary.
+    #[error("no release asset found for this platform ({target})")]
+    AssetNotFound { target: String },
+
+    /// The `SHA256SUMS` manifest had no line for the resolved archive — the
+    /// manifest and the asset list disagree; refuse rather than skip gate 1.
+    #[error("checksum manifest has no entry for {asset}")]
+    ManifestEntryMissing { asset: String },
+
+    /// Gate 1 failed: the downloaded archive's SHA-256 does not match the
+    /// manifest. Fails closed — never swap a mismatched archive.
+    #[error("archive checksum mismatch (expected {expected}, got {actual})")]
+    ChecksumMismatch { expected: String, actual: String },
+
+    /// A resolved release version could not be parsed as semver.
+    #[error("release version {version} is not valid semver")]
+    VersionUnparseable { version: String },
+
+    /// The resolved target version is OLDER than the running binary and
+    /// `[update] allow_downgrade` is not set — a refused downgrade (T-08-11).
+    #[error(
+        "refusing to downgrade from {current} to {target} \
+         — set [update] allow_downgrade = true to override"
+    )]
+    DowngradeRefused { current: String, target: String },
+
+    /// A network/transport failure talking to GitHub Releases. Message only
+    /// (io/reqwest errors aren't `PartialEq`); never proof about a release.
+    #[error("release request failed: {0}")]
+    Download(String),
+
+    /// Extracting the verified archive (or locating the binary inside it)
+    /// failed AFTER both gates passed — the running binary is still untouched.
+    #[error("failed to extract the verified update archive: {0}")]
+    Extract(String),
+
+    /// The atomic self-replace of the running binary failed. `self-replace`
+    /// maps the platform specifics; the original binary is left in place.
+    #[error("atomic binary swap failed: {0}")]
+    Swap(String),
+
+    /// Windows `.zip` self-update extraction is not yet wired (deferred to
+    /// 08-08's 3-OS smoke). The verify-then-swap core is proven on Unix;
+    /// Windows users reinstall via the installer/scoop until then. Fails
+    /// closed — the gates still run, but the swap never happens partially.
+    #[error(
+        "windows self-update archive handling is not yet available \
+         — reinstall via the installer/scoop (tracked for 08-08)"
+    )]
+    WindowsArchiveUnsupported,
 }
 
 /// Verify a detached keyed-cosign signature over a manifest.

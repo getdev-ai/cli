@@ -42,6 +42,8 @@ owo-colors = { workspace = true }
 p256 = { version = "0.14.0", features = ["ecdsa", "pem"] }
 rayon = { workspace = true }
 reqwest = { workspace = true }
+self-replace = "1.5"
+semver = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 # SHA-256 prehash of the manifest that cosign signs (workspace pin, 0.10).
@@ -55,3 +57,7 @@ thiserror = { workspace = true }
 assert_cmd = "2.2.2"
 insta = { version = "1.48.0", features = ["json"] }
 serde_json = { workspace = true }
+
+[target."cfg(unix)".dependencies]
+lzma-rs = "0.3"
+tar = "0.4"

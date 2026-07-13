@@ -67,6 +67,11 @@ auto_snap_before_fix = true       # engine auto-snaps before any mutation
 target = "auto"                   # "auto" | "vercel" | "railway" | "fly" | "docker" | "vps"
 run_build = false                 # ship never executes project code unless opted in
 
+[update]                          # `getdev update` self-update policy (no per-command flags)
+channel = "stable"                # "stable" (latest non-prerelease) | "prerelease"
+# pin = "0.1.2"                   # pin to an exact version; omitted = track the channel
+allow_downgrade = false           # refuse installing an older version (downgrade attack) unless true
+
 [ignore]
 rules = []                        # e.g. ["audit/debug-mode-enabled"]
 paths = []                        # e.g. ["vendor/", "dist/", "migrations/"]

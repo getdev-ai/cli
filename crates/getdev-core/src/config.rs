@@ -121,6 +121,7 @@ pub struct Config {
     pub env: EnvConfig,
     pub snap: SnapConfig,
     pub ship: ShipConfig,
+    pub update: UpdateConfig,
     pub ignore: IgnoreConfig,
     #[serde(rename = "suppress")]
     pub suppressions: Vec<Suppression>,
@@ -254,6 +255,39 @@ impl Default for ShipConfig {
     }
 }
 
+/// `[update]` — the `getdev update` self-update policy. Per SPEC-COMMANDS
+/// (`getdev update`: "no per-command flags"), the channel, an exact-version
+/// pin, and the downgrade escape-hatch are CONFIG rather than CLI flags, so
+/// the command surface stays contractual (CLAUDE.md rule 6). This section is
+/// most useful in the GLOBAL config (`~/.getdev/config.toml`), but — like
+/// every other section — it also resolves from the project file under the
+/// standard precedence chain.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct UpdateConfig {
+    /// `"stable"` resolves to the latest NON-prerelease release; `"prerelease"`
+    /// also considers prereleases. Any other value is treated as `stable` by
+    /// the engine (fail-safe: never silently opt into prereleases).
+    pub channel: String,
+    /// Pin to an exact release version (e.g. `"0.1.2"`); `None` tracks the
+    /// channel's latest. A pin makes `getdev update` idempotent/reproducible.
+    pub pin: Option<String>,
+    /// Allow installing a version OLDER than the running binary. Off by
+    /// default — serving an old-but-validly-signed release is a downgrade
+    /// attack (T-08-11), so the engine refuses it unless this is explicitly set.
+    pub allow_downgrade: bool,
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self {
+            channel: "stable".into(),
+            pin: None,
+            allow_downgrade: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct IgnoreConfig {
@@ -291,6 +325,7 @@ struct RawConfig {
     env: RawEnvConfig,
     snap: RawSnapConfig,
     ship: RawShipConfig,
+    update: RawUpdateConfig,
     ignore: RawIgnoreConfig,
     #[serde(rename = "suppress")]
     suppressions: Option<Vec<Suppression>>,
@@ -348,6 +383,14 @@ struct RawSnapConfig {
 struct RawShipConfig {
     target: Option<String>,
     run_build: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct RawUpdateConfig {
+    channel: Option<String>,
+    pin: Option<String>,
+    allow_downgrade: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -515,6 +558,23 @@ impl Config {
                     default.ship.run_build,
                 ),
             },
+            update: UpdateConfig {
+                channel: resolve_field(
+                    project.update.channel,
+                    global.update.channel,
+                    default.update.channel,
+                ),
+                // `pin` is genuinely optional (its default is absence, not a
+                // value), so it can't route through `resolve_field` — the
+                // presence chain IS `project.or(global)`, falling through to
+                // the `None` default when neither layer pins.
+                pin: project.update.pin.or(global.update.pin),
+                allow_downgrade: resolve_field(
+                    project.update.allow_downgrade,
+                    global.update.allow_downgrade,
+                    default.update.allow_downgrade,
+                ),
+            },
             ignore: IgnoreConfig {
                 rules: resolve_field(
                     project.ignore.rules,
@@ -628,6 +688,10 @@ auto_snap_before_fix = true
 target = "auto"
 run_build = false
 
+[update]
+channel = "stable"
+allow_downgrade = false
+
 [ignore]
 rules = ["audit/debug-mode-enabled"]
 paths = ["vendor/", "dist/"]
@@ -658,6 +722,61 @@ reason = "test fixture key, not a real secret"
         assert_eq!(config.audit.severity_min, Severity::Low);
         assert_eq!(config.env.env_file, ".env");
         assert!(!config.ship.run_build);
+    }
+
+    #[test]
+    fn update_section_parses_with_defaults() {
+        // The full-surface example above pins channel/allow_downgrade; the
+        // defaults (no `[update]` block at all) must still be stable/no-pin/
+        // no-downgrade — the fail-safe posture the engine relies on.
+        let defaulted = Config::parse("", Path::new(".getdev.toml")).unwrap();
+        assert_eq!(defaulted.update.channel, "stable");
+        assert_eq!(defaulted.update.pin, None);
+        assert!(!defaulted.update.allow_downgrade);
+
+        let pinned = Config::parse(
+            "[update]\nchannel = \"prerelease\"\npin = \"0.1.2\"\nallow_downgrade = true\n",
+            Path::new(".getdev.toml"),
+        )
+        .unwrap();
+        assert_eq!(pinned.update.channel, "prerelease");
+        assert_eq!(pinned.update.pin.as_deref(), Some("0.1.2"));
+        assert!(pinned.update.allow_downgrade);
+    }
+
+    #[test]
+    fn update_unknown_key_is_a_hard_error() {
+        assert!(Config::parse(
+            "[update]\nchanel = \"stable\"\n", // typo: chanel
+            Path::new(".getdev.toml")
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn update_project_pin_overrides_global_pin() {
+        let dir = tmp_dir("update-pin-precedence");
+        std::fs::write(
+            dir.join(GLOBAL_CONFIG_FILE),
+            "[update]\npin = \"0.1.0\"\nallow_downgrade = true\n",
+        )
+        .unwrap();
+        let global = RawConfig::load_global_at(&dir).unwrap();
+        // Project sets only channel; it must NOT wipe the global pin/downgrade
+        // (presence-based precedence: absent project keys fall through).
+        let project =
+            RawConfig::parse("[update]\nchannel = \"prerelease\"\n", Path::new(".getdev.toml"))
+                .unwrap();
+        let merged = Config::merge(project, global);
+        assert_eq!(merged.update.channel, "prerelease");
+        assert_eq!(merged.update.pin.as_deref(), Some("0.1.0"));
+        assert!(merged.update.allow_downgrade);
+
+        // A project pin, when present, wins over the global pin.
+        let project_pins =
+            RawConfig::parse("[update]\npin = \"0.2.0\"\n", Path::new(".getdev.toml")).unwrap();
+        let merged2 = Config::merge(project_pins, RawConfig::load_global_at(&dir).unwrap());
+        assert_eq!(merged2.update.pin.as_deref(), Some("0.2.0"));
     }
 
     #[test]
