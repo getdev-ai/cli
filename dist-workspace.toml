@@ -1,7 +1,17 @@
-# cargo-dist config — release pipeline (see docs/RELEASING.md)
-# P0 spike scope: prove cross-compilation of the grammar FFI to the three
-# primary platforms from one CI run. aarch64-linux + npm/homebrew installers
-# are added when the real v0.1 release pipeline is wired up.
+# cargo-dist config — the v0.1 release pipeline (see docs/RELEASING.md, docs/DISTRIBUTION.md).
+#
+# This is the FULL v0.1 release configuration: every launch channel's artifacts
+# (install.sh/install.ps1, npm, Homebrew, GitHub Releases, cargo-binstall) is
+# built and published from one tag. The two channels cargo-dist does NOT manage
+# — the manually-maintained Scoop manifest (DEC-14) and the ordered crates.io
+# publish (grammars → core/registry/gitx → getdev) — are wired as clearly-
+# delimited CUSTOM steps in .github/workflows/release.yml, AFTER the generated
+# sections, so a future `dist generate` never clobbers them (08-RESEARCH Pitfall 3).
+#
+# Keyed-cosign signing of SHA256SUMS (the artifact `getdev update` verifies with
+# its embedded p256 key, D-01) is also a custom release.yml step — cargo-dist's
+# `github-attestations` produces SLSA provenance (a separate, secretless layer),
+# NOT the keyed detached signature the self-update path consumes.
 
 [workspace]
 members = ["cargo:."]
@@ -12,13 +22,39 @@ members = ["cargo:."]
 cargo-dist-version = "0.32.0"
 # CI backends to support
 ci = "github"
-# The installers to generate for each app
-installers = ["shell", "powershell"]
-# Target platforms to build apps for (Rust target-triple syntax)
-targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+# The installers to generate for each app.
+# shell/powershell -> install.sh / install.ps1 (getdev.ai)
+# npm              -> the `getdev` npm package (npx getdev) — critical channel
+# homebrew         -> the formula pushed to the tap below
+installers = ["shell", "powershell", "npm", "homebrew"]
+# Target platforms to build apps for (Rust target-triple syntax).
+# The five v0.1 "release"-status targets from docs/DISTRIBUTION.md § Support matrix.
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+]
+# Best-effort sixth target (Windows arm64) — "best-effort" in the support matrix,
+# kept commented so a hard build failure on it never blocks a release. A maintainer
+# may uncomment it (and accept it as gating) once the toolchain is proven in CI.
+# targets += ["aarch64-pc-windows-msvc"]
+# The homebrew tap the generated formula is pushed to (HOMEBREW_TAP_TOKEN).
+tap = "getdev-ai/homebrew-tap"
+# The npm package name (so `npx getdev` resolves the wrapper).
+npm-package = "getdev"
+# Publish jobs to run in CI: push the Homebrew formula + publish the npm package
+# (cargo-dist-native — do NOT hand-roll these; Scoop + crates.io are the custom steps).
+publish-jobs = ["homebrew", "npm"]
 # Path that installers should place binaries in
 install-path = "~/.getdev/bin"
+# Checksum algorithm for the per-artifact .sha256 files (aggregated into SHA256SUMS).
+checksum = "sha256"
+# SLSA provenance via GitHub artifact attestations (id-token/attestations perms).
+# This is the provenance layer — NOT the keyed-cosign self-update signature (D-01).
+github-attestations = true
 # Which actions to run on pull requests
 pr-run-mode = "upload"
-# Whether to install an updater program
+# Whether to install an updater program (getdev ships its own `getdev update`).
 install-updater = false
