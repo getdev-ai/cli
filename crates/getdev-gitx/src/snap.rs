@@ -120,12 +120,12 @@ pub struct PruneOutcome {
 }
 
 #[cfg(unix)]
-fn null_device() -> &'static str {
+pub(crate) fn null_device() -> &'static str {
     "/dev/null"
 }
 
 #[cfg(not(unix))]
-fn null_device() -> &'static str {
+pub(crate) fn null_device() -> &'static str {
     "NUL"
 }
 
@@ -213,7 +213,7 @@ fn git_command_readonly(root: &Path) -> Command {
 
 /// Run a built command, returning its stdout on success or a
 /// [`GitxError::Command`] carrying the captured stderr on failure.
-fn capture(cmd: &mut Command, op: &'static str) -> Result<Vec<u8>, GitxError> {
+pub(crate) fn capture(cmd: &mut Command, op: &'static str) -> Result<Vec<u8>, GitxError> {
     let out = cmd.output()?;
     if out.status.success() {
         Ok(out.stdout)
@@ -272,6 +272,25 @@ fn ensure_repo(root: &Path) -> Result<(), GitxError> {
         capture(git_command_readonly(root).args(["init", "--quiet"]), "init")?;
     }
     Ok(())
+}
+
+/// Ensure `root` is usable for READ-ONLY diff extraction: git present and at
+/// least version 2.32 (the same GIT_CONFIG_GLOBAL/SYSTEM floor `ensure_repo`
+/// enforces). Unlike [`ensure_repo`], this NEVER runs `git init` — a non-repo
+/// has no HEAD to diff against, so `diff::changed_files` treats "not a repo" as
+/// "nothing to diff" rather than materializing one. Returns `Ok(true)` when
+/// `root` is inside a repository, `Ok(false)` when git is present and new enough
+/// but `root` is not a repo, and `GitAbsent`/`GitTooOld` when the toolchain
+/// itself is unusable. The version gate lives HERE, at the point of use, exactly
+/// as in `ensure_repo` (CLAUDE.md hard rule 6 — not widened into `doctor`).
+pub(crate) fn require_repo(root: &Path) -> Result<bool, GitxError> {
+    let (major, minor) = git_version()?;
+    if major < 2 || (major == 2 && minor < 32) {
+        return Err(GitxError::GitTooOld {
+            found: format!("{major}.{minor}"),
+        });
+    }
+    Ok(is_repo(root))
 }
 
 /// The next snapshot id, allocated from a SHARED monotonic counter across both
