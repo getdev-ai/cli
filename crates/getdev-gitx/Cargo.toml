@@ -16,5 +16,15 @@ workspace = true
 thiserror = { workspace = true }
 
 [dev-dependencies]
+# Dev-only benchmark harness: the `snap` perf budget (docs/PLAN.md §3.5,
+# `snap < 1s`) needs a criterion bench that measures `snapshot` where the
+# operation lives (a getdev-core bench cannot call it without a forbidden
+# getdev-core → getdev-gitx edge). Never shipped in the binary; mirrors the
+# getdev-core bench precedent (04-07). See benches/snap.rs.
+criterion = "0.5"
 proptest = { workspace = true }
 sha2 = { workspace = true }
+
+[[bench]]
+name = "snap"
+harness = false

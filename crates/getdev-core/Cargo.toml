@@ -51,3 +51,7 @@ harness = false
 [[bench]]
 name = "review"
 harness = false
+
+[[bench]]
+name = "check"
+harness = false
