@@ -21,6 +21,11 @@ dist = true
 
 [dependencies]
 anyhow = { workspace = true }
+# Self-update signature verification (getdev-cli::update::signature only) —
+# keyed cosign vector decoded/verified with pure-Rust RustCrypto, NO async
+# sigstore/tokio (DEC-01 preserved literally; locked decision D-01). base64
+# decodes the `.sig`, p256 verifies the detached ECDSA-P256 signature.
+base64 = "0.22.1"
 clap = { workspace = true }
 # Interactive prompts for `getdev init`'s offer-steps (Confirm only). Default
 # features (editor/password/zeroize/tempfile) are unused here, so trim them —
@@ -30,11 +35,21 @@ getdev-core = { workspace = true }
 getdev-gitx = { workspace = true }
 getdev-grammars = { workspace = true }
 getdev-registry = { workspace = true }
+hex = "0.4.3"
 owo-colors = { workspace = true }
+# `ecdsa` + `signature` (the types named in D-01) arrive transitively via the
+# `ecdsa` feature; `pem` gives us `from_public_key_pem` for the SPKI-PEM key.
+p256 = { version = "0.14.0", features = ["ecdsa", "pem"] }
 rayon = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# SHA-256 prehash of the manifest that cosign signs (workspace pin, 0.10).
+sha2 = { workspace = true }
+# Typed `UpdateError` the 08-04 self-update engine matches on (any `Err` =>
+# abort before swap). thiserror for the typed variants; anyhow stays at the
+# `main.rs`/command boundary.
+thiserror = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = "2.2.2"

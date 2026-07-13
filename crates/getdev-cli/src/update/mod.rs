@@ -6,6 +6,10 @@
 //! deliberately small: it is the seed of Phase 8's full self-update module,
 //! not that module itself.
 
+/// Detached keyed-cosign signature verification (pure-Rust p256) — the crypto
+/// gate 08-04's self-update engine runs after the SHA-256 checksum gate.
+pub mod signature;
+
 use std::time::Duration;
 
 use serde::Deserialize;
