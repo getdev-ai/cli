@@ -40,10 +40,12 @@ tree-sitter-javascript = "0.23"
 tree-sitter-typescript = "0.23"
 tree-sitter-python = "0.23"
 
-getdev-core = { path = "crates/getdev-core" }
-getdev-grammars = { path = "crates/getdev-grammars" }
-getdev-registry = { path = "crates/getdev-registry" }
-getdev-gitx = { path = "crates/getdev-gitx" }
+# `version` is required alongside `path` for crates.io publishing: cargo strips
+# the `path` and keeps the version requirement in the published manifest.
+getdev-core = { path = "crates/getdev-core", version = "0.1.0" }
+getdev-grammars = { path = "crates/getdev-grammars", version = "0.1.0" }
+getdev-registry = { path = "crates/getdev-registry", version = "0.1.0" }
+getdev-gitx = { path = "crates/getdev-gitx", version = "0.1.0" }
 
 # unsafe is forbidden via these shared lints; getdev-grammars is the sole
 # exception and simply does not opt into `[lints] workspace = true`
