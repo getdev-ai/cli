@@ -14,7 +14,7 @@ use super::RuleLoadError;
 
 /// The JSON Schema every rule YAML (embedded and `--rules`-supplied)
 /// validates against. Normative shape: docs/SPEC-RULES.md.
-const SCHEMA_JSON: &str = include_str!("../../../../rules/audit/schema.json");
+const SCHEMA_JSON: &str = include_str!("../../rules/audit/schema.json");
 
 /// Compile the embedded schema exactly once per process. A malformed
 /// embedded schema (a getdev release bug, not user-controlled content) is

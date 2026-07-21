@@ -11,7 +11,7 @@
 
 use serde::Deserialize;
 
-const EMBEDDED_MODELS: &str = include_str!("../../../rules/models.json");
+const EMBEDDED_MODELS: &str = include_str!("../rules/models.json");
 
 #[derive(Debug, thiserror::Error)]
 pub enum ModelsError {

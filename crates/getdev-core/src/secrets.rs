@@ -9,7 +9,7 @@ use serde::Deserialize;
 
 use crate::findings::{Confidence, Severity};
 
-const EMBEDDED_PATTERNS: &str = include_str!("../../../rules/env/secrets.yaml");
+const EMBEDDED_PATTERNS: &str = include_str!("../rules/env/secrets.yaml");
 
 /// Minimum length + entropy (bits/char) for the generic fallback, which also
 /// requires a secret-suggesting identifier name.

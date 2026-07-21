@@ -16,9 +16,8 @@ use crate::scan::{Lang, ScanContext, ScannedFile};
 
 use super::{relative_display, DepsError, RawImport};
 
-const EMBEDDED_PYTHON_STDLIB: &str = include_str!("../../../../rules/real/python-stdlib.json");
-const EMBEDDED_PY_IMPORT_ALIASES: &str =
-    include_str!("../../../../rules/real/py-import-aliases.json");
+const EMBEDDED_PYTHON_STDLIB: &str = include_str!("../../rules/real/python-stdlib.json");
+const EMBEDDED_PY_IMPORT_ALIASES: &str = include_str!("../../rules/real/py-import-aliases.json");
 
 #[derive(Debug, Deserialize)]
 struct ModuleListFile {

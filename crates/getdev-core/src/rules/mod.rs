@@ -34,7 +34,7 @@ use crate::scan::Lang;
 /// The shipped `rules/audit/*.yaml` pack, embedded at compile time.
 /// `schema.json` (and anything else that isn't `.yaml`) is skipped by
 /// [`load_embedded`], not by this embedding itself.
-static EMBEDDED_RULES: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/../../rules/audit");
+static EMBEDDED_RULES: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/rules/audit");
 
 /// The shipped `rules/review/*.yaml` pack, embedded at compile time — a
 /// SECOND `Dir`, independent of [`EMBEDDED_RULES`] (06-RESEARCH.md Open Q2,
@@ -42,7 +42,7 @@ static EMBEDDED_RULES: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/../../ru
 /// silently compiles `review/*` queries it never runs (and vice versa), and
 /// each command's pack stays independently testable. Loaded via
 /// [`load_embedded_review`].
-static EMBEDDED_REVIEW_RULES: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/../../rules/review");
+static EMBEDDED_REVIEW_RULES: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/rules/review");
 
 /// Every way a rule pack load can fail. Always carries `origin` (the
 /// source file/description this error came from) so a multi-rule pack load

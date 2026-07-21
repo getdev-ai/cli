@@ -24,8 +24,8 @@ use serde::Deserialize;
 
 use crate::client::Ecosystem;
 
-const NPM_DATASET_JSON: &str = include_str!("../../../rules/real/npm-top-10k.json");
-const PYPI_DATASET_JSON: &str = include_str!("../../../rules/real/pypi-top-5k.json");
+const NPM_DATASET_JSON: &str = include_str!("../data/npm-top-10k.json");
+const PYPI_DATASET_JSON: &str = include_str!("../data/pypi-top-5k.json");
 
 /// Near-name reason fires when the Damerau-Levenshtein distance to the
 /// nearest top-N package is in `1..=NEAR_NAME_MAX_DISTANCE`.

@@ -19,7 +19,7 @@ use crate::scan::{Lang, ScanContext, ScannedFile};
 
 use super::{relative_display, DepsError, RawImport};
 
-const EMBEDDED_NODE_BUILTINS: &str = include_str!("../../../../rules/real/node-builtins.json");
+const EMBEDDED_NODE_BUILTINS: &str = include_str!("../../rules/real/node-builtins.json");
 
 #[derive(Debug, Deserialize)]
 struct ModuleListFile {
