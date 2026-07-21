@@ -26,6 +26,93 @@ Related: [DISTRIBUTION.md](DISTRIBUTION.md) (channels), [CI.md](CI.md) (workflow
    install → `init` → `check` → `env --write` → `snap`/`back`.
 6. Artifacts signed, checksummed, SBOM attached; **only then** repoint getdev.ai installers.
 
+## v0.1.0 launch runbook (one-time, ship-when-green)
+
+The single ordered path from a green release commit to a live, announced v0.1.0.
+**There is no launch date — this ships when every gate below is green, not on a
+calendar** (ship-when-green). Each stage maps to a Phase 9 plan; the irreversible /
+outward-facing / secret / repo-settings steps are human-gated (the executor prepares
+and stops, the founder performs). Flow: **pre-cut readiness → cut → pipeline → verify
+→ go-live**.
+
+### Stage 0 — Pre-cut readiness gate (confirm ALL before tagging)
+
+Every row must be green on the **exact release commit** before anyone runs `git tag`.
+This is the last gate that is fully reversible; once the tag is pushed (Stage 1) the
+release is live. Do not tag on a red or unconfirmed row.
+
+| Blocking check | How it's confirmed |
+|---|---|
+| Full CI matrix green on the release commit | `ci.yml` green on the release commit SHA — the `fmt`, `clippy` (`-D warnings`), and `test` (ubuntu/macos/windows) jobs all pass |
+| Benchmarks within budget | `ci.yml` `bench` job green — release-strict perf gates: `check` warm < 3 s / cold < 15 s, `audit`/`review` < 2 s, `snap` < 1 s; binary < 25 MB |
+| Coverage ≥ 80 % (library crates) | `ci.yml` `coverage` job green (measured 91.82 % on `getdev-core`/`getdev-registry`/`getdev-gitx`) |
+| `cargo-deny` green | `ci.yml` `deny` job green — `[bans]` proves no second HTTP client, no second async runtime, no LLM SDK entered the tree |
+| Determinism / egress guard green | `ci.yml` `determinism` job green — `network_egress` source-symbol scan confines network to npm/PyPI/GitHub Releases |
+| `docker-build-gate` green | `ci.yml` `docker-build-gate` job green across all four `ship` presets |
+| `docs` gate green | `ci.yml` `docs` job green (`cargo doc -D warnings`) |
+| Corpus seeded-defect recall 100 % | the `real`/`env` seeded-recall corpus gate (release-gate item 3 above) — 100 % recall, per-rule FP thresholds met |
+| `getdev check` self-run clean | run the release binary's `getdev check` on this repo — no unexpected critical/high findings (or each documented) |
+| Dogfood re-run green | re-run the autonomous dogfood smoke (`.planning/DOGFOOD-REPORT.md`) on the release commit — all 11 commands PASS, fix→re-check loop intact |
+| Branch-protection required checks configured | GitHub → main requires `fmt`, `clippy`, `test`×3, `docker-build-gate`×4, `coverage`, `deny`, `determinism`, `docs`, `bench`; linear history; no force-push; `v*` tag protection (LAUNCH-CHECKLIST step 4) |
+
+### Stage 1 — Cut the release (09-02, human-gated, IRREVERSIBLE once tagged)
+
+Human-owned; the executor prepares each step and stops at a checkpoint. In order:
+
+1. **Trust provisioning** (LAUNCH-CHECKLIST steps 1–5): `cosign generate-key-pair`
+   (private half stays offline); set the six repo secrets
+   (`COSIGN_PRIVATE_KEY`/`COSIGN_PASSWORD`/`CARGO_REGISTRY_TOKEN`/`NPM_TOKEN`/
+   `HOMEBREW_TAP_TOKEN`/`SCOOP_BUCKET_TOKEN`, each minimally scoped); create the
+   required-reviewer `release` environment; configure branch protection (Stage 0's last
+   row); create `getdev-ai/homebrew-tap` + `getdev-ai/scoop-bucket`.
+2. **Embed the real public key** — paste `cosign.pub` into the single marked
+   `EMBEDDED_COSIGN_PUBKEY` location in `crates/getdev-cli/src/update/signature.rs`; the
+   `embedded_pubkey_is_the_placeholder_or_parses` test enforces it parses; `cargo test -p
+   getdev update` stays green.
+3. **Release commit** — set `workspace.package.version = "0.1.0"`, `cargo update -w`, flip
+   all five crates' `publish = false → true`, generate the changelog (see the Release
+   procedure below). **Re-confirm the Stage 0 gate is green on this commit.**
+4. **Tag** (the point of no return): `git tag v0.1.0 && git push origin main v0.1.0` —
+   triggers `.github/workflows/release.yml`.
+
+### Stage 2 — Pipeline (`release.yml`, automated)
+
+The tag drives the build/sign/publish pipeline (build matrix → per-artifact checksums →
+size gate → SLSA attestation → **draft** GitHub Release → aggregate `SHA256SUMS` →
+keyed cosign `SHA256SUMS.sig` → Syft SBOM → npm/Homebrew/Scoop/crates.io). The full
+step graph is under [Release procedure](#release-procedure) below. The Release stays
+**draft** until Stage 4.
+
+### Stage 3 — Verify (09-03, automated + human smoke)
+
+1. **Automated** — `bash scripts/launch-verify.sh v0.1.0` (from 09-01): confirms the
+   signed Release + `SHA256SUMS` + `.sig` + SBOM exist, checksums match, the keyed
+   cosign signature verifies against the published public key, and every channel
+   (npm/crates/brew/scoop + the frozen getdev.ai install URLs) resolves v0.1.0. It
+   **fails closed** — any FAIL stops go-live. Record the PASS/FAIL table in
+   `.planning/phases/09-launch-golive/09-LAUNCH-LOG.md`.
+2. **Human 3-OS smoke** — the "first five minutes" (install → `init` → `check` →
+   `env --write` → `snap`/`back`) on macOS / Linux / Windows against the **draft**
+   artifacts (the macOS leg is pre-covered by `.planning/DOGFOOD-REPORT.md`), plus
+   `getdev update` self-updating from a prior published version (checksum + signature).
+   Any failure blocks go-live.
+
+### Stage 4 — Go-live + announce (09-03, human-gated, OUTWARD-FACING)
+
+Only after Stage 3 is fully green:
+
+1. **Confirm the one web precondition** — getdev.ai serves `install.sh` + `install.ps1`
+   resolving the v0.1.0 GitHub-release artifacts. This is the CLI's own landing/installer
+   hosting; the getdev-gallery marketplace is a **separate product and does not gate this
+   launch**.
+2. **Undraft** the GitHub Release.
+3. **Merge** the README install/status copy → "v0.1.0 released" (staged in 09-01,
+   `.planning/phases/09-launch-golive/09-ANNOUNCE-DRAFTS.md`).
+4. **Announce** — publish the Show HN + social drafts.
+5. **Open first-24h monitoring** — issues, FP reports.
+
+If Stage 3/4 uncovers a bad release, follow [Yanking a bad release](#yanking-a-bad-release).
+
 ## Release procedure
 
 ```bash
