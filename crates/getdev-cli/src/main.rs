@@ -507,6 +507,8 @@ fn run(cli: Cli) -> anyhow::Result<u8> {
             yes,
             cfg: cfg.clone(),
             quiet,
+            no_color,
+            json,
         }),
         Command::Doctor => {
             // Doctor is dispatched above (before config resolution) and

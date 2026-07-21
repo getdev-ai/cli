@@ -158,17 +158,34 @@ CRITICAL  audit/hardcoded-secret     src/payments.ts:12
 
 **Synopsis:** `getdev init [--yes] [global flags]`
 
-**What it does:** Interactive project setup (`--yes` accepts defaults):
+**What it does:** Interactive project setup (`--yes` accepts defaults). Leads with a one-time decorative welcome banner (the getdev wordmark + a promise tagline — no call-to-action per the standing no-CTA/no-telemetry rule), then:
 1. Write `.getdev.toml` (detected stack, defaults — see `docs/SPEC-CONFIG.md`).
 2. Offer pre-commit hook → `getdev check --quiet --fail-on critical`.
 3. Offer agent-context block: append getdev usage guidance to `CLAUDE.md` / `AGENTS.md` / `.cursorrules` if present (marked managed block) — so the user's agent learns to run `getdev snap` before big changes and `getdev check` after.
 4. Offer auto-snap hook (post-checkout / pre-agent via documented pattern).
 
+**Welcome banner:** shown once at the top of output. Suppressed under `--quiet` and `--json`; rendered plain (no ANSI) under `--no-color`, `NO_COLOR`, or a non-tty stdout. It is the only place getdev prints decorative art and it never links out or prompts an action.
+
 **Flags:** `--yes`.
 
-**Mutates:** yes — creates new files / appends managed blocks (this is its purpose; each step is offered interactively unless `--yes`). **Network:** none.
+**Mutates:** yes — creates new files / appends managed blocks (this is its purpose; each step is offered interactively unless `--yes`). The welcome banner is stdout-only, never a file write. **Network:** none.
 
-**Golden example:** TBD.
+**Golden example (plain, `--no-color`):**
+
+```
+               __      __
+   ____ ____  / /_____/ /__ _   __
+  / __ `/ _ \/ __/ __  / _ \ | / /
+ / /_/ /  __/ /_/ /_/ /  __/ |/ /
+ \__, /\___/\__/\__,_/\___/|___/
+/____/
+  verify · secure · ship AI-generated code
+  v0.1.0 · local-first · nothing leaves your machine
+
+.getdev.toml — written (detected stack: node)
+…
+getdev is set up — run `getdev check` to see your Ship Score
+```
 
 ---
 

@@ -161,6 +161,45 @@ fn render_score_banner(out: &mut String, summary: &Summary, score: u8) {
     let _ = writeln!(out, "└{}┘", "─".repeat(BANNER_INNER_WIDTH));
 }
 
+/// The getdev wordmark (figlet "slant"), shown once by `getdev init` as a
+/// first-run welcome. A plain raw literal — the `render_welcome_banner` caller
+/// decides whether it is colorized. Kept ASCII-only so it renders identically
+/// in any terminal encoding.
+const WELCOME_WORDMARK: &str = r"               __      __
+   ____ ____  / /_____/ /__ _   __
+  / __ `/ _ \/ __/ __  / _ \ | / /
+ / /_/ /  __/ /_/ /_/ /  __/ |/ /
+ \__, /\___/\__/\__,_/\___/|___/
+/____/";
+
+/// The one-time first-run welcome banner for `getdev init`: the slant wordmark
+/// plus a two-line tagline that only restates the product promise (NO
+/// call-to-action — CLAUDE.md standing rules; no telemetry/CTA/account-gating).
+/// `color` gates ANSI only: `Off` returns the exact same shape as plain UTF-8,
+/// so `--no-color`/`NO_COLOR`/a piped stdout yield a clean monochrome banner.
+/// The caller decides *whether* to show it (init suppresses under `--quiet` and
+/// `--json`); this decides only *how* it looks. `version` is the CLI's
+/// `CARGO_PKG_VERSION`, threaded in because `getdev-core` has no version of its
+/// own to print.
+pub fn render_welcome_banner(version: &str, color: ColorMode) -> String {
+    let promise = "  verify · secure · ship AI-generated code";
+    let footer = format!("  v{version} · local-first · nothing leaves your machine");
+    let mut out = String::new();
+    match color {
+        ColorMode::On => {
+            let _ = writeln!(out, "{}", WELCOME_WORDMARK.cyan().bold());
+            let _ = writeln!(out, "{}", promise.dimmed());
+            let _ = writeln!(out, "{}", footer.dimmed());
+        }
+        ColorMode::Off => {
+            let _ = writeln!(out, "{WELCOME_WORDMARK}");
+            let _ = writeln!(out, "{promise}");
+            let _ = writeln!(out, "{footer}");
+        }
+    }
+    out
+}
+
 /// "top 3 things to fix first" (docs/SPEC-COMMANDS.md `check`): the three
 /// highest-severity findings. `findings` is already sorted worst-first by
 /// [`FindingsReport::new`], so the slice head IS that ordering — deterministic
@@ -470,5 +509,27 @@ mod tests {
         assert!(out.contains("Ship Score: 100/100"));
         assert!(out.contains("0 critical · 0 high · 0 medium · 0 low"));
         assert!(!out.contains("no findings"));
+    }
+
+    /// The first-run welcome banner: plain mode carries the wordmark, the
+    /// product-promise tagline, and the version, with zero ANSI bytes; colored
+    /// mode wraps the same content in escape sequences. Neither mode emits a
+    /// call-to-action (CLAUDE.md standing rules).
+    #[test]
+    fn welcome_banner_plain_is_ansi_free_colored_is_not() {
+        let plain = render_welcome_banner("0.1.0", ColorMode::Off);
+        assert!(plain.contains("verify · secure · ship AI-generated code"));
+        assert!(plain.contains("v0.1.0 · local-first · nothing leaves your machine"));
+        // slant wordmark signature fragment
+        assert!(plain.contains("____"));
+        // plain mode is escape-free (safe to pipe)
+        assert!(!plain.contains('\u{1b}'));
+        // no CTA creeps in
+        let lower = plain.to_lowercase();
+        assert!(!lower.contains("star") && !lower.contains("sign up") && !lower.contains("http"));
+
+        let colored = render_welcome_banner("0.1.0", ColorMode::On);
+        assert!(colored.contains('\u{1b}'));
+        assert!(colored.contains("nothing leaves your machine"));
     }
 }

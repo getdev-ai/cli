@@ -55,11 +55,34 @@ pub struct InitArgs {
     /// Resolved config — supplies the `[snap]` knobs backing the auto-snap hook
     /// that fires before a multi-file mutation.
     pub cfg: Config,
-    /// Suppress the per-step status chatter (global flag).
+    /// Suppress the per-step status chatter AND the welcome banner (global flag).
     pub quiet: bool,
+    /// Disable ANSI colors in the welcome banner (global flag; `NO_COLOR` and a
+    /// non-tty stdout are honored too, via `ColorMode::resolve`).
+    pub no_color: bool,
+    /// Machine-readable mode: suppress the decorative welcome banner entirely
+    /// (global flag). `init` has no JSON payload of its own — this only gates
+    /// the banner so a scripted `getdev init --json` stays free of art.
+    pub json: bool,
 }
 
 pub fn run(args: &InitArgs) -> anyhow::Result<u8> {
+    // First-run welcome (decorative only): shown once at the very top of
+    // `getdev init`, before the interactive offers. Suppressed under `--quiet`
+    // and `--json`; rendered plain (no ANSI) under `--no-color`/`NO_COLOR`/a
+    // non-tty stdout. It carries NO call-to-action — the tagline restates the
+    // product promise only (CLAUDE.md standing rules: no telemetry/CTA).
+    if !args.quiet && !args.json {
+        use std::io::IsTerminal as _;
+        let color =
+            getdev_core::report::ColorMode::resolve(args.no_color, std::io::stdout().is_terminal());
+        print!(
+            "{}",
+            getdev_core::report::render_welcome_banner(env!("CARGO_PKG_VERSION"), color)
+        );
+        println!();
+    }
+
     // Parse-once stack detection, reusing ship::detect_stack over a shared
     // ScanContext-fed dependency graph (07-05) — no forked detector.
     let ctx = ScanContext::build(&args.path)?;
