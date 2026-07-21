@@ -1,7 +1,7 @@
 [package]
 name = "getdev-grammars"
 description = "tree-sitter grammars for getdev, re-exported behind one crate boundary"
-publish = false
+publish = true
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

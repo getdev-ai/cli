@@ -3,7 +3,7 @@
 # the directory is crates/getdev-cli per workspace layout
 name = "getdev"
 description = "verify, secure, and ship AI-generated code — one binary, runs locally, nothing leaves your machine"
-publish = false
+publish = true
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,8 +14,7 @@ homepage.workspace = true
 [lints]
 workspace = true
 
-# publish = false keeps pre-release code off crates.io, but the binary must
-# still be distributable by cargo-dist
+# the binary is distributed by cargo-dist as well as via `cargo install getdev`
 [package.metadata.dist]
 dist = true
 
