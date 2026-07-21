@@ -131,7 +131,8 @@ record() { # name  status(PASS|FAIL|SKIP)  detail
 }
 
 # Bounded, read-only GET helpers (timeouts so a stalled host never hangs the run).
-CURL="curl -fsSL --connect-timeout 10 --max-time 120"
+# crates.io (and some CDNs) hard-reject requests without a User-Agent (403).
+CURL="curl -fsSL -A getdev-launch-verify --connect-timeout 10 --max-time 120"
 # GET a URL to a file; echoes the HTTP status. Read-only, follows redirects.
 http_get() { # url  outfile
   $CURL -o "$2" -w '%{http_code}' "$1" 2>/dev/null
@@ -294,22 +295,16 @@ else
 fi
 
 # ---- 7. channel-brew ----------------------------------------------------------
-if need brew; then
-  binfo="$(brew info --json=v2 getdev-ai/tap/getdev 2>/dev/null || true)"
-  if printf '%s' "$binfo" | grep -q "\"$SEMVER\""; then
-    record "channel-brew" "PASS" "tap formula reports $SEMVER"
-  else
-    record "channel-brew" "FAIL" "tap formula not at $SEMVER"
-  fi
+# The tap repo file is the source of truth; a local `brew info` only works once
+# the machine has tapped getdev-ai/tap, so it is a bonus signal, not the check.
+bf="$WORKDIR/getdev.rb"
+s="$(http_get "https://raw.githubusercontent.com/getdev-ai/homebrew-tap/HEAD/Formula/getdev.rb" "$bf")"
+if [ "$s" = "200" ] && grep -q "$SEMVER" "$bf" 2>/dev/null; then
+  record "channel-brew" "PASS" "tap formula file reports $SEMVER"
+elif need brew && brew info --json=v2 getdev-ai/tap/getdev 2>/dev/null | grep -q "\"$SEMVER\""; then
+  record "channel-brew" "PASS" "tap formula reports $SEMVER (local brew)"
 else
-  # No brew — read the formula file straight from the tap repo.
-  bf="$WORKDIR/getdev.rb"
-  s="$(http_get "https://raw.githubusercontent.com/getdev-ai/homebrew-tap/HEAD/Formula/getdev.rb" "$bf")"
-  if [ "$s" = "200" ] && grep -q "$SEMVER" "$bf" 2>/dev/null; then
-    record "channel-brew" "PASS" "tap formula file reports $SEMVER"
-  else
-    record "channel-brew" "FAIL" "tap formula@$SEMVER not found (HTTP $s)"
-  fi
+  record "channel-brew" "FAIL" "tap formula@$SEMVER not found (HTTP $s)"
 fi
 
 # ---- 8. channel-scoop ---------------------------------------------------------
