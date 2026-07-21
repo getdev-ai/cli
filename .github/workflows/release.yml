@@ -382,8 +382,11 @@ jobs:
           node-version: '20.x'
           registry-url: 'https://registry.npmjs.org'
       # node 20 bundles npm 10.x, which predates trusted publishing — upgrade
-      # to the release line that supports the OIDC exchange.
-      - run: npm install -g npm@latest
+      # to the 11.x line (>= 11.5.1 has the OIDC exchange). PINNED to the major:
+      # `npm@latest` bit us when npm 12 raised its node floor above this job's
+      # node 20 (EBADENGINE, v0.1.1 clean-proof failure). npm 11 supports
+      # node ^20.17.0.
+      - run: npm install -g npm@11
       - run: |
           for release in $(echo "$PLAN" | jq --compact-output '.releases[] | select([.artifacts[] | endswith("-npm-package.tar.gz")] | any)'); do
             pkg=$(echo "$release" | jq '.artifacts[] | select(endswith("-npm-package.tar.gz"))' --raw-output)
