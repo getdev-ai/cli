@@ -3,12 +3,13 @@
 > **Verify, secure, and ship AI-generated code. One binary, runs locally, nothing leaves your machine.**
 
 [![CI](https://github.com/getdev-ai/cli/actions/workflows/ci.yml/badge.svg)](https://github.com/getdev-ai/cli/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/getdev.svg)](https://crates.io/crates/getdev)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-> **Status: pre-v0.1, under active construction.** The `env` command (hardcoded-secret
-> extraction) works today; `real` (package/API hallucination detection) is landing now;
-> the rest of the toolbelt is being built phase by phase — see [docs/ROADMAP.md](docs/ROADMAP.md).
-> Install channels below describe the v0.1 release target, not every command that works today.
+> **v0.1.0 — released.** The full toolbelt (`check`, `real`, `audit`, `review`, `env`,
+> `snap`/`back`, `ship`, `init`, `update`) ships as one static binary for macOS, Linux, and
+> Windows. Install below; see [docs/ROADMAP.md](docs/ROADMAP.md) for what's next and the
+> v0.1.x polish backlog for known issues we're tracking.
 
 This repo (`getdev-ai/cli`) is the CLI tool; [getdev.ai](https://getdev.ai) is the
 project's home — landing, docs, and install scripts. The product, binary, and package
@@ -49,7 +50,7 @@ what you run *after* the agent:
 The full threat model — every promise above tied to a named, enforced mitigation
 — is in [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md).
 
-## Install (target channels for v0.1)
+## Install
 
 The seven channels below all resolve to the same static binary. Frozen install URLs
 (getdev.ai) — the scripts detect OS/arch and download the checksum-verified release.
