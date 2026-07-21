@@ -302,7 +302,9 @@ const COLD_DEBUG_BUDGET: Duration = Duration::from_secs(60);
 /// the strict docs/PLAN.md §3.5 numbers.
 fn ci_scaled(budget: Duration) -> Duration {
     if std::env::var_os("CI").is_some() {
-        budget * 3
+        // Dev-profile runs need more headroom than release: Windows runners in
+        // particular run unoptimized tree-sitter/regex paths ~5x slower.
+        budget * if cfg!(debug_assertions) { 5 } else { 3 }
     } else {
         budget
     }
