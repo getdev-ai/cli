@@ -55,7 +55,8 @@ use sha2::{Digest, Sha256};
 /// const), and the placeholder sentinel keeps the parse test green pre-launch.
 pub const EMBEDDED_COSIGN_PUBKEY: &str = "\
 -----BEGIN PUBLIC KEY-----
-PLACEHOLDER-REPLACED-WITH-THE-REAL-RELEASE-PUBLIC-KEY-AT-LAUNCH==
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEoRjVSHOMJn1dRjuQAckCC4dVekOm
+LmXQyLTGeD2f56P04CHttkwNKsq+FVwAHELHLzdwpcZBX5Od+tp8SZ1nUQ==
 -----END PUBLIC KEY-----
 ";
 
