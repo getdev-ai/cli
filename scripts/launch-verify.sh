@@ -61,7 +61,8 @@ CHECKS (all must PASS; any FAIL exits non-zero)
   6. channel-crates     crates.io reports the released version for the getdev crate
   7. channel-brew       the Homebrew formula (getdev-ai/tap/getdev) reports the released version
   8. channel-scoop      the scoop-bucket getdev manifest reports the released version
-  9. channel-install    $INSTALL_SH_URL and $INSTALL_PS1_URL return HTTP 200
+  9. channel-install    $INSTALL_SH_URL and $INSTALL_PS1_URL serve a real installer
+                        script for this tag (not an HTML landing page)
 
 NOTES
   Read-only. No secrets are read or required. Network destinations are exhaustively
@@ -317,12 +318,34 @@ else
 fi
 
 # ---- 9. channel-install (frozen getdev.ai URLs) -------------------------------
-sh_s="$(http_status "$INSTALL_SH_URL")"
-ps_s="$(http_status "$INSTALL_PS1_URL")"
-if [ "$sh_s" = "200" ] && [ "$ps_s" = "200" ]; then
-  record "channel-install" "PASS" "install.sh + install.ps1 return 200"
+# A 200 alone is NOT sufficient: an SPA landing page returns 200 (text/html) for
+# every path, which would silently pass while `curl … | sh` actually pipes HTML
+# into a shell. Fetch each body and prove it is a real installer script that
+# resolves THIS version's release artifacts, and that it is not an HTML page.
+shf="$WORKDIR/install.sh"; psf="$WORKDIR/install.ps1"
+sh_s="$(http_get "$INSTALL_SH_URL" "$shf")"
+ps_s="$(http_get "$INSTALL_PS1_URL" "$psf")"
+# looks like a real POSIX installer: shebang + points at this tag's release download
+sh_ok=0
+if [ "$sh_s" = "200" ] && [ -s "$shf" ] \
+   && head -1 "$shf" | grep -q '^#!' \
+   && ! grep -qi '<!DOCTYPE html\|<html' "$shf" \
+   && grep -q "releases/download/$TAG" "$shf"; then
+  sh_ok=1
+fi
+# looks like a real PowerShell installer: not HTML + references this tag's release
+ps_ok=0
+if [ "$ps_s" = "200" ] && [ -s "$psf" ] \
+   && ! grep -qi '<!DOCTYPE html\|<html' "$psf" \
+   && grep -q "releases/download/$TAG" "$psf"; then
+  ps_ok=1
+fi
+if [ "$sh_ok" = 1 ] && [ "$ps_ok" = 1 ]; then
+  record "channel-install" "PASS" "install.sh + install.ps1 serve a $TAG installer script"
 else
-  record "channel-install" "FAIL" "install.sh=$sh_s install.ps1=$ps_s (want 200)"
+  det="install.sh=$sh_s"; [ "$sh_ok" = 1 ] || det="$det(not-a-$TAG-script)"
+  det="$det install.ps1=$ps_s"; [ "$ps_ok" = 1 ] || det="$det(not-a-$TAG-script)"
+  record "channel-install" "FAIL" "$det — getdev.ai must serve the real installer, not an HTML page"
 fi
 
 # ---- print the table ----------------------------------------------------------
