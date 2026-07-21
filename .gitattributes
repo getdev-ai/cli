@@ -1,0 +1,5 @@
+# The keyed-cosign signature vectors are byte-exact: SHA256SUMS is hashed and
+# its detached signature verified over the raw bytes. Any EOL conversion on a
+# Windows checkout (core.autocrlf) silently breaks verification, so these files
+# must never be treated as text.
+testdata/update/signature/** -text
