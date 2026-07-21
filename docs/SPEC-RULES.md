@@ -1,6 +1,6 @@
 # SPEC-RULES.md — Rule YAML Format
 
-Normative specification of the declarative rule format used by all rule packs (`rules/audit/`, `rules/real/`, `rules/review/`, `rules/ship/`).
+Normative specification of the declarative rule format used by all rule packs (`crates/getdev-core/rules/audit/`, `crates/getdev-core/rules/real/`, `crates/getdev-core/rules/review/`, `crates/getdev-core/rules/ship/`).
 
 > **Source:** distilled from the project master plan (internal) Appendix B, §2.3, §3.2, §9.2, §10; this doc is normative for rule file structure, fixture requirements, and the declarative-only constraint.
 
@@ -55,7 +55,7 @@ fixtures:
 | `refs` | yes | list | Documentation links — per-rule page at `https://getdev.ai/rules/<id>` (generated from this YAML) |
 | `frameworks` | no | list | Optional project-level framework gate, parallel to `languages`: `express` \| `nextjs` \| `fastapi` \| `flask`. The rule only activates at all if the project's static, declared-dependency-based framework detection reports at least one listed framework present — never a hardcoded `if is_express` branch in an analyzer (CLAUDE.md rule 7) |
 | `path_glob` | no | list | Optional list of glob patterns (`globset` syntax) restricting which file paths the rule's matchers run against — for path-convention-scoped rules (e.g. Next.js API routes: `pages/api/**`, `app/api/**/route.ts`) where the tree-sitter query alone cannot see the file's path |
-| `matchers` | yes | list | Each entry is **exactly one** of three matcher kinds (`oneOf`, enforced by `rules/audit/schema.json`): **AST** — `language` (`javascript` \| `typescript` \| `tsx` \| `python`) + tree-sitter `query`; **text-regex** — `file_glob` (glob, `globset` syntax) + `text_pattern` (whole-file regex evaluated over capped file bytes, no tree-sitter grammar — for config files with no supported grammar, e.g. Firebase `.rules`/`database.rules.json`); **secret** — `secret: true` (wraps `core::secrets`'s existing provider-regex + Shannon-entropy classifier; used only by `audit/hardcoded-secret`). A matcher entry that mixes fields from more than one kind (e.g. both `query` and `text_pattern` present) is a schema violation, rejected at load time |
+| `matchers` | yes | list | Each entry is **exactly one** of three matcher kinds (`oneOf`, enforced by `crates/getdev-core/rules/audit/schema.json`): **AST** — `language` (`javascript` \| `typescript` \| `tsx` \| `python`) + tree-sitter `query`; **text-regex** — `file_glob` (glob, `globset` syntax) + `text_pattern` (whole-file regex evaluated over capped file bytes, no tree-sitter grammar — for config files with no supported grammar, e.g. Firebase `.rules`/`database.rules.json`); **secret** — `secret: true` (wraps `core::secrets`'s existing provider-regex + Shannon-entropy classifier; used only by `audit/hardcoded-secret`). A matcher entry that mixes fields from more than one kind (e.g. both `query` and `text_pattern` present) is a schema violation, rejected at load time |
 | `fixtures.positive` | yes | list | ≥ 3 files that MUST trigger the rule |
 | `fixtures.negative` | yes | list | ≥ 3 files that MUST NOT trigger the rule |
 
@@ -86,7 +86,7 @@ Every rule ships with a measured FP rate on the sentinel corpus (10 real OSS rep
 
 ## Adding a rule (checklist)
 
-1. Write the YAML in the correct pack directory (`rules/<command>/<name>.yaml`).
+1. Write the YAML in the correct pack directory (`crates/getdev-core/rules/<command>/<name>.yaml`).
 2. Add ≥ 3 positive + ≥ 3 negative fixtures under `testdata/fixtures/`.
 3. Register the rule in the fixture test suite.
 4. Run the sentinel corpus; record the FP rate (> 5 % → demote per policy).

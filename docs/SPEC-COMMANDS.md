@@ -54,7 +54,7 @@ CRITICAL  audit/hardcoded-secret     src/payments.ts:12
 - Dependency graph from manifests (`package.json`, `requirements.txt`, `pyproject.toml`, lockfiles) **plus** actual imports found by AST walk (agents often import without declaring).
 - Registry lookups: npm registry API + PyPI JSON API; responses cached in `~/.getdev/cache/registry/` (SQLite; TTL 7 days existence, 24 h metadata).
 - API-surface verification introspects *installed* packages (`node_modules` type definitions/exports; Python `site-packages` via AST — no code execution). Confidence-tiered: exact miss = high severity; dynamic/`__getattr__`-style packages downgraded to `info` with a note.
-- Model-string dataset ships in the binary (`rules/models.json`), refreshed each release; `--offline` uses the embedded copy.
+- Model-string dataset ships in the binary (`crates/getdev-core/rules/models.json`), refreshed each release; `--offline` uses the embedded copy.
 
 **Flags:** `--deps-only`, `--apis-only`, `--models-only`.
 
@@ -68,7 +68,7 @@ CRITICAL  audit/hardcoded-secret     src/payments.ts:12
 
 **Synopsis:** `getdev audit [--severity <min>] [--ignore <rule-id>] [--rules <dir>] [global flags]`
 
-**What it does:** Security scan tuned to AI-generated failure patterns. Pure static analysis: tree-sitter AST + declarative YAML rules (`rules/audit/*.yaml`, format in `docs/SPEC-RULES.md`). Rule ID prefix: **`audit/`**. v0.1 rule pack categories: Secrets (`hardcoded-secret`; `secret-in-git-history` DEFERRED to Phase 5, needs gitx diff extraction that lands there — not shipped in the v0.1 audit pack — note: `env-file-committed` is implemented under `env/`, not `audit/`, see `getdev env` below; sanctioned F1), Injection (`sql-string-concat`, `eval-user-input`, `exec-user-input`, `shell-interpolation`), Web config (`cors-wildcard`, `debug-mode-enabled`, `cookie-insecure`, `missing-auth-middleware` — framework-aware: Express, FastAPI, Flask, Next.js API routes), Client/server (`client-only-validation` heuristic `medium` max, `api-key-in-client-bundle`), Platform (`supabase-permissive-rls`, `firebase-open-rules`).
+**What it does:** Security scan tuned to AI-generated failure patterns. Pure static analysis: tree-sitter AST + declarative YAML rules (`crates/getdev-core/rules/audit/*.yaml`, format in `docs/SPEC-RULES.md`). Rule ID prefix: **`audit/`**. v0.1 rule pack categories: Secrets (`hardcoded-secret`; `secret-in-git-history` DEFERRED to Phase 5, needs gitx diff extraction that lands there — not shipped in the v0.1 audit pack — note: `env-file-committed` is implemented under `env/`, not `audit/`, see `getdev env` below; sanctioned F1), Injection (`sql-string-concat`, `eval-user-input`, `exec-user-input`, `shell-interpolation`), Web config (`cors-wildcard`, `debug-mode-enabled`, `cookie-insecure`, `missing-auth-middleware` — framework-aware: Express, FastAPI, Flask, Next.js API routes), Client/server (`client-only-validation` heuristic `medium` max, `api-key-in-client-bundle`), Platform (`supabase-permissive-rls`, `firebase-open-rules`).
 
 **Flags:** `--severity <min>`, `--ignore <rule-id>` (also configurable), `--rules <dir>` (custom rule packs — declarative-only, never executable).
 

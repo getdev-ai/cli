@@ -75,7 +75,7 @@ These scopes are contractual. Text is carried over essentially verbatim from the
 - Dependency graph from manifest (`package.json`, `requirements.txt`, `pyproject.toml`, lockfiles) **plus** actual imports found by AST walk (agents often import without declaring).
 - Registry client: npm registry API + PyPI JSON API. All responses cached in `~/.getdev/cache/registry/` (SQLite, TTL 7 days for existence, 24 h for metadata).
 - API-surface verification: introspect *installed* packages — parse `node_modules/<pkg>` type definitions / exports, and Python `site-packages` via AST of the installed source (no code execution). Confidence-tiered: exact miss = high severity; dynamic/`__getattr__`-style packages = downgraded to `info` with a note (see §9.2 false-positive policy).
-- Model-string dataset ships in the binary (`rules/models.json`), refreshed each release; `--offline` uses embedded copy.
+- Model-string dataset ships in the binary (`crates/getdev-core/rules/models.json`), refreshed each release; `--offline` uses embedded copy.
 
 **Flags:** `--deps-only`, `--apis-only`, `--models-only`.
 
@@ -91,7 +91,7 @@ These scopes are contractual. Text is carried over essentially verbatim from the
 | Client/server | `client-only-validation` (form handlers with no matching server check — heuristic, `medium` max), `api-key-in-client-bundle` |
 | Platform | `supabase-permissive-rls` (detect `service_role` key in client code), `firebase-open-rules` (if rules file present) |
 
-**Mechanics:** pure static analysis — tree-sitter AST + declarative rule files (`rules/audit/*.yaml`). Rules are data, not code → community-contributable. Each rule carries: pattern, severity, message, remediation text, references, test fixtures. See `docs/SPEC-RULES.md`.
+**Mechanics:** pure static analysis — tree-sitter AST + declarative rule files (`crates/getdev-core/rules/audit/*.yaml`). Rules are data, not code → community-contributable. Each rule carries: pattern, severity, message, remediation text, references, test fixtures. See `docs/SPEC-RULES.md`.
 
 **Flags:** `--severity <min>`, `--ignore <rule-id>` (also configurable), `--rules <dir>` (custom rule packs).
 
