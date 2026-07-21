@@ -51,22 +51,35 @@ The full threat model — every promise above tied to a named, enforced mitigati
 
 ## Install (target channels for v0.1)
 
+The seven channels below all resolve to the same static binary. Frozen install URLs
+(getdev.ai) — the scripts detect OS/arch and download the checksum-verified release.
+
 ```bash
-# macOS / Linux
+# 1 · Install script — macOS / Linux
 curl -fsSL https://getdev.ai/install.sh | sh
 
-# Homebrew
+# 2 · Install script — Windows (PowerShell)
+irm https://getdev.ai/install.ps1 | iex
+
+# 3 · npm (no Rust toolchain — downloads the native binary)
+npx getdev                 # or: npm install -g getdev
+
+# 4 · Homebrew (macOS / Linux)
 brew install getdev-ai/tap/getdev
 
-# npm (no Rust required — downloads the native binary)
-npx getdev check          # or: npm install -g getdev
+# 5 · Scoop (Windows)
+scoop bucket add getdev https://github.com/getdev-ai/scoop-bucket
+scoop install getdev
 
-# Windows
-powershell -c "irm https://getdev.ai/install.ps1 | iex"   # or: scoop install getdev
+# 6 · crates.io (Rust users)
+cargo install getdev       # or: cargo binstall getdev  (prebuilt, no compile)
 
-# Rust users
-cargo install getdev      # or: cargo binstall getdev
+# 7 · GitHub Releases — download the static binary for your platform
+#     https://github.com/getdev-ai/cli/releases
 ```
+
+Already installed? `getdev update` self-updates from GitHub Releases (checksum + cosign
+signature verified against a key embedded in the binary).
 
 See [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md) for the full channel matrix and how each
 channel is published.
