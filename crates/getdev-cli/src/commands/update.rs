@@ -3,7 +3,7 @@
 //! This module owns only presentation + the `anyhow` boundary: it calls
 //! [`crate::update::run`] (the verified, atomic, offline-respecting engine) and
 //! renders its [`UpdateOutcome`] as a concise human line (default) or a small
-//! JSON object (`--json`). The engine's typed [`crate::update::UpdateError`] is
+//! JSON object (`--json`). The engine's typed [`crate::update::signature::UpdateError`] is
 //! surfaced through `?` into an `anyhow::Error` here (exit 2 via `main`), so no
 //! `unwrap`/`expect` and no engine-internal error type leaks past the CLI.
 //!
