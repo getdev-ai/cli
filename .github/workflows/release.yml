@@ -538,6 +538,29 @@ jobs:
             SHA256SUMS
           echo "SHA256SUMS.sig (base64 DER ECDSA-P256):"
           cat SHA256SUMS.sig
+      # Derive the PUBLIC half from the actual signing key and require it to be
+      # byte-identical to EMBEDDED_COSIGN_PUBKEY in update/signature.rs. This
+      # kills two failure modes at once: (a) a paste error in the embedded key
+      # would silently break every self-update — caught here before anything
+      # publishes; (b) launch-verify.sh's default pubkey source is the release's
+      # cosign.pub asset, which this step produces for upload below.
+      - name: Derive cosign.pub and verify it matches the embedded key
+        working-directory: dist-artifacts
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          cosign public-key --key env://COSIGN_PRIVATE_KEY --outfile cosign.pub
+          # Extract the embedded PEM from the source const — FIRST block only
+          # (the test module contains a second, deliberately-malformed inline PEM).
+          awk '/-----BEGIN PUBLIC KEY-----/{f=1} f{print} /-----END PUBLIC KEY-----/{if(f) exit}' \
+            ../crates/getdev-cli/src/update/signature.rs > embedded.pub
+          if ! diff -u embedded.pub cosign.pub; then
+            echo "::error::EMBEDDED_COSIGN_PUBKEY in update/signature.rs does not match the public half of COSIGN_PRIVATE_KEY — every self-update would fail closed. Refusing to release."
+            exit 1
+          fi
+          echo "embedded public key matches the signing key"
       # Syft SBOM (SPDX-JSON) over the built artifacts. anchore/sbom-action wraps
       # the Syft Go binary (Anchore). Syft is NOT a Rust crate — there is no such
       # crate on crates.io; referencing one would be a hallucinated dependency (D-03).
@@ -559,6 +582,7 @@ jobs:
           gh release upload "$TAG" \
             SHA256SUMS \
             SHA256SUMS.sig \
+            cosign.pub \
             "getdev-${version}.sbom.spdx.json" \
             --clobber
 

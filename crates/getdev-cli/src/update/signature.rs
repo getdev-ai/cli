@@ -41,18 +41,15 @@ use sha2::{Digest, Sha256};
 /// `COSIGN_PRIVATE_KEY` GitHub secret the release workflow signs `SHA256SUMS`
 /// with (docs/RELEASING.md). A mismatch makes every self-update fail closed.
 ///
-/// **To embed the real key at launch (one step):** generate the pair with
-/// `cosign generate-key-pair`, then replace the ENTIRE string literal below
-/// with the verbatim contents of `cosign.pub` (the full
-/// `-----BEGIN PUBLIC KEY----- … -----END PUBLIC KEY-----` block). Change
-/// nothing else. The `embedded_pubkey_is_the_placeholder_or_parses` test then
-/// flips from a no-op to enforcing that the pasted PEM parses as an SPKI
-/// ECDSA-P256 key, so a malformed paste fails CI instead of shipping an
-/// updater that can never verify a genuine release.
-///
-/// Until then this is a documented PLACEHOLDER: nothing verifies against it yet
-/// (the 08-01 tests use the committed test vector's `cosign.pub`, never this
-/// const), and the placeholder sentinel keeps the parse test green pre-launch.
+/// This is the REAL v0.1.0 release key (embedded at launch, 2026-07-21): the
+/// `embedded_pubkey_is_the_placeholder_or_parses` test enforces that it parses
+/// as an SPKI ECDSA-P256 key, and the release workflow's
+/// "Derive cosign.pub and verify it matches the embedded key" step fails any
+/// release whose `COSIGN_PRIVATE_KEY` secret does not pair with this exact PEM
+/// — so a key rotation must update BOTH the secret and this const together.
+/// The 08-01 unit tests still use the committed test vector's `cosign.pub`,
+/// never this const; the pairing proof for this const is the release-pipeline
+/// check plus `scripts/launch-verify.sh`'s end-to-end cosign-verify.
 pub const EMBEDDED_COSIGN_PUBKEY: &str = "\
 -----BEGIN PUBLIC KEY-----
 MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEoRjVSHOMJn1dRjuQAckCC4dVekOm
