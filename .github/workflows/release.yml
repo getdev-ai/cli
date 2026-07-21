@@ -349,12 +349,23 @@ jobs:
       - plan
       - host
     runs-on: "ubuntu-22.04"
-    # GHA-002: NPM_TOKEN sits behind the required-reviewer `release` environment
-    # gate. GHA-001: third-party actions below are pinned to a full commit SHA.
-    # NOTE — cargo-dist-GENERATED job: `dist generate --mode ci` regenerates it
-    # and DROPS this `environment:` line and the SHA pins; re-apply GHA-001/002
-    # after any deliberate dist regeneration (docs/RELEASING.md).
+    # npm Trusted Publishing (OIDC): the npm package's trusted publisher is
+    # bound to getdev-ai/cli + release.yml + the `release` environment — no
+    # NPM_TOKEN secret involved. `id-token: write` mints the OIDC token the
+    # npm CLI (>= 11.5.1) exchanges at publish time; provenance comes free.
+    # GHA-002: the publish still sits behind the required-reviewer `release`
+    # environment gate. GHA-001: third-party actions pinned to a full commit
+    # SHA. NOTE — cargo-dist-GENERATED job: `dist generate --mode ci`
+    # regenerates it and DROPS the `environment:`/`permissions:` lines and the
+    # SHA pins; re-apply GHA-001/002 + OIDC after any deliberate dist
+    # regeneration (docs/RELEASING.md).
     environment: release
+    permissions:
+      id-token: write
+      contents: read
+      # an explicit permissions block zeroes everything unlisted, and
+      # download-artifact reads artifacts through the Actions API.
+      actions: read
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       PLAN: ${{ needs.plan.outputs.val }}
@@ -370,13 +381,14 @@ jobs:
         with:
           node-version: '20.x'
           registry-url: 'https://registry.npmjs.org'
+      # node 20 bundles npm 10.x, which predates trusted publishing — upgrade
+      # to the release line that supports the OIDC exchange.
+      - run: npm install -g npm@latest
       - run: |
           for release in $(echo "$PLAN" | jq --compact-output '.releases[] | select([.artifacts[] | endswith("-npm-package.tar.gz")] | any)'); do
             pkg=$(echo "$release" | jq '.artifacts[] | select(endswith("-npm-package.tar.gz"))' --raw-output)
             npm publish --access public "./npm/${pkg}"
           done
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   announce:
     needs:
