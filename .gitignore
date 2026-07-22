@@ -38,3 +38,6 @@ getdev-claude-code-docs-guide.md
 /pdf/
 /planning/
 /.planning/
+
+# Playwright MCP scratch snapshots
+.playwright-mcp/
