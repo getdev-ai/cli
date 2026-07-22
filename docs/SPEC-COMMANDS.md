@@ -25,7 +25,13 @@ Cross-cutting contracts:
 
 **Mutates:** no (except via `--fix` → env apply path). **Network:** registry (via `real`); cache-only with `--offline`.
 
-**Golden example (normative — from plan Appendix A):**
+**Golden example (normative — v0.1.3 grouped renderer):**
+
+Findings render grouped by FILE (worst file first, per-file severity tally in
+the header), each row as `position · severity glyph+word · message · rule-id`,
+with the actionable next step on a `→` continuation line. Severity glyphs
+(`✖` critical, `▲` high, `●` medium, `○` low, `·` info) are content, not
+color — identical under `--no-color`/`NO_COLOR`/piped output.
 
 ```
 $ getdev check
@@ -33,14 +39,20 @@ $ getdev check
 │  Ship Score: 43/100                          │
 │  2 critical · 3 high · 5 medium · 4 low      │
 └──────────────────────────────────────────────┘
-CRITICAL  real/nonexistent-package   requirements.txt:4
-  'requests-auth-helper' does not exist on PyPI
-  → did you mean 'requests-oauthlib'?
-CRITICAL  audit/hardcoded-secret     src/payments.ts:12
-  Stripe live secret key assigned to 'stripeKey' (sk_live_…9f2a)
-  → run: getdev env --write
+requirements.txt — 1 finding · 1 critical
+         4 ✖ critical 'requests-auth-helper' does not exist on PyPI  real/nonexistent-package
+           → did you mean 'requests-oauthlib'?
+
+src/payments.ts — 1 finding · 1 critical
+      12:3 ✖ critical Stripe live secret key assigned to 'stripeKey' (sk_live_…9f2a)  env/hardcoded-secret
+           → extract to STRIPE_SECRET_KEY in .env
 ...
 ```
+
+A hardcoded secret is counted ONCE in the aggregate: `audit/hardcoded-secret`
+and `env/hardcoded-secret` are the same underlying detection, and `check`
+keeps env's fixable finding, dropping audit's twin at the same file:line
+(standalone `audit`/`env` runs are unaffected).
 
 ---
 

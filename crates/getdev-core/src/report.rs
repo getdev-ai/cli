@@ -1,6 +1,7 @@
 //! Renderers. Every renderer consumes the same [`FindingsReport`]; analyzers
 //! never print — all user-facing output flows through this module.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use owo_colors::OwoColorize;
@@ -74,8 +75,9 @@ pub fn render_ship_score_weights() -> String {
     out
 }
 
-/// Human terminal output: findings grouped by severity (worst first), each
-/// with location, message, and the most actionable next step.
+/// Human terminal output: findings grouped by FILE (worst file first, per-file
+/// severity tally in the header), each row as position · severity · message ·
+/// rule-id with the most actionable next step on a `→` continuation line.
 pub fn render_terminal(report: &FindingsReport, color: ColorMode) -> String {
     let mut out = String::new();
 
@@ -96,15 +98,28 @@ pub fn render_terminal(report: &FindingsReport, color: ColorMode) -> String {
         return out;
     }
 
-    for severity in Severity::ALL_DESC {
-        let group: Vec<&Finding> = report
-            .findings
-            .iter()
-            .filter(|f| f.severity == severity)
-            .collect();
-        if group.is_empty() {
-            continue;
+    // Findings are globally sorted worst-first (severity → file → line, …) by
+    // [`FindingsReport::new`]; group them by FILE for reading. A file's first
+    // appearance in that order fixes the group order — worst file first, path
+    // as the tiebreak — and each group inherits severity-then-line order.
+    // Deterministic: pure re-arrangement of an already-deterministic order.
+    let mut file_order: Vec<&str> = Vec::new();
+    let mut groups: BTreeMap<&str, Vec<&Finding>> = BTreeMap::new();
+    for finding in &report.findings {
+        if !groups.contains_key(finding.file.as_str()) {
+            file_order.push(finding.file.as_str());
         }
+        groups
+            .entry(finding.file.as_str())
+            .or_default()
+            .push(finding);
+    }
+    for (i, file) in file_order.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let group = &groups[file];
+        render_file_header(&mut out, file, group, color);
         for finding in group {
             render_finding(&mut out, finding, color);
         }
@@ -230,51 +245,121 @@ fn render_top_three(out: &mut String, findings: &[Finding]) {
     }
 }
 
-fn render_finding(out: &mut String, finding: &Finding, color: ColorMode) {
-    let location = match finding.line {
-        Some(line) => format!("{}:{line}", finding.file),
-        None => finding.file.clone(),
+/// `{path} — {n} finding(s) · {severity tallies}` group header. The path is
+/// the anchor a reader scans for, so it carries the emphasis; the tally is
+/// context and stays dim.
+fn render_file_header(out: &mut String, file: &str, group: &[&Finding], color: ColorMode) {
+    let mut counts: BTreeMap<Severity, usize> = BTreeMap::new();
+    for finding in group {
+        *counts.entry(finding.severity).or_default() += 1;
+    }
+    let tally = Severity::ALL_DESC
+        .iter()
+        .filter_map(|sev| {
+            counts
+                .get(sev)
+                .map(|n| format!("{n} {}", sev.as_str().to_lowercase()))
+        })
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let plural = if group.len() == 1 {
+        "finding"
+    } else {
+        "findings"
     };
+    let meta = format!("— {} {plural} · {tally}", group.len());
+    match color {
+        ColorMode::On => {
+            let _ = writeln!(out, "{} {}", file.bold(), meta.dimmed());
+        }
+        ColorMode::Off => {
+            let _ = writeln!(out, "{file} {meta}");
+        }
+    }
+}
 
-    // `severity_label` returns the label already padded to the column width
-    // (and colorized after padding) — do NOT re-apply a `:<10` here: under
-    // color the string carries ANSI escape bytes, and format-spec padding
-    // counts those bytes, so the columns would drift by the escape length
-    // (IN-03).
-    let label = severity_label(finding.severity, color);
-    let _ = writeln!(out, "{label} {:<28} {location}", finding.id);
-
+/// One finding row plus its remediation continuation line:
+///
+/// ```text
+///   12:3  ✖ critical  stripe secret assigned to 'stripeKey' (sk_live_…9f2a)  env/hardcoded-secret
+///         → extract to STRIPE_SECRET_KEY in .env
+/// ```
+///
+/// Position (`line:column`, right-aligned) leads so rows in one file scan
+/// like a compiler's output; the rule id trails dimmed — present for grep
+/// and `[ignore] rules`, out of the reading line.
+fn render_finding(out: &mut String, finding: &Finding, color: ColorMode) {
+    let position = match (finding.line, finding.column) {
+        (Some(line), Some(column)) => format!("{line}:{column}"),
+        (Some(line), None) => line.to_string(),
+        _ => "—".to_owned(),
+    };
     let mut message = finding.message.clone();
     if finding.confidence < Confidence::High {
         let _ = write!(message, " (confidence: {})", finding.confidence);
     }
-    let _ = writeln!(out, "  {message}");
 
-    if let Some(suggestion) = &finding.suggestion {
-        let _ = writeln!(out, "  → {suggestion}");
-    } else if let Some(remediation) = &finding.remediation {
-        let _ = writeln!(out, "  → {remediation}");
+    // IN-03: pad plain text FIRST, colorize the padded string after — ANSI
+    // escape bytes inside a format-spec width would drift every colored row.
+    let position_padded = format!("{position:>POSITION_WIDTH$}");
+    let severity_padded = format!(
+        "{} {:<SEVERITY_WIDTH$}",
+        severity_glyph(finding.severity),
+        finding.severity.as_str().to_lowercase()
+    );
+    match color {
+        ColorMode::On => {
+            let _ = writeln!(
+                out,
+                "  {} {} {}  {}",
+                position_padded.dimmed(),
+                colorize_severity(&severity_padded, finding.severity),
+                message,
+                finding.id.dimmed()
+            );
+        }
+        ColorMode::Off => {
+            let _ = writeln!(
+                out,
+                "  {position_padded} {severity_padded} {message}  {}",
+                finding.id
+            );
+        }
+    }
+
+    let fix = finding.suggestion.as_ref().or(finding.remediation.as_ref());
+    if let Some(fix) = fix {
+        let arrow = format!("  {:>POSITION_WIDTH$} → {fix}", "");
+        match color {
+            ColorMode::On => {
+                let _ = writeln!(out, "{}", arrow.dimmed());
+            }
+            ColorMode::Off => {
+                let _ = writeln!(out, "{arrow}");
+            }
+        }
     }
 }
 
-/// Column width the severity label is padded to. Must fit the widest label
-/// (`CRITICAL`, 8) plus breathing room.
-const SEVERITY_LABEL_WIDTH: usize = 10;
+/// Right-aligned width of the `line:column` position column — fits
+/// `9999:999` without wobble on realistic files.
+const POSITION_WIDTH: usize = 8;
+/// Width the lowercase severity word is padded to (`critical`, 8).
+const SEVERITY_WIDTH: usize = 8;
 
-fn severity_label(severity: Severity, color: ColorMode) -> String {
-    // IN-03: pad the PLAIN text to the column width FIRST, then colorize the
-    // padded string. Colorizing first (and padding the result) would make the
-    // caller's width spec count the ANSI escape bytes and misalign every
-    // colored row. With this order the visible width is always
-    // `SEVERITY_LABEL_WIDTH` whether color is on or off.
-    let text = format!(
-        "{:<width$}",
-        severity.as_str().to_uppercase(),
-        width = SEVERITY_LABEL_WIDTH
-    );
-    if color == ColorMode::Off {
-        return text;
+/// One glyph per severity — content, not decoration: identical with color
+/// on or off, so a piped/`NO_COLOR` run keeps the same visual hierarchy.
+fn severity_glyph(severity: Severity) -> &'static str {
+    match severity {
+        Severity::Critical => "✖",
+        Severity::High => "▲",
+        Severity::Medium => "●",
+        Severity::Low => "○",
+        Severity::Info => "·",
     }
+}
+
+fn colorize_severity(text: &str, severity: Severity) -> String {
     match severity {
         Severity::Critical => text.red().bold().to_string(),
         Severity::High => text.red().to_string(),
@@ -341,11 +426,16 @@ mod tests {
             ]),
             ColorMode::Off,
         );
-        let critical_pos = out.find("CRITICAL").unwrap();
-        let low_pos = out.find("LOW").unwrap();
+        let critical_pos = out.find("✖ critical").unwrap();
+        let low_pos = out.find("○ low").unwrap();
         assert!(critical_pos < low_pos);
-        assert!(out.contains("requirements.txt:4"));
+        // one file group header carrying the per-file tally...
+        assert!(out.contains("requirements.txt — 2 findings · 1 critical · 1 low"));
+        // ...and the line number in the position column of each row
+        assert!(out.contains("       4 "));
         assert!(out.contains("→ did you mean 'requests-oauthlib'?"));
+        // the rule id trails the row for grep/[ignore] use
+        assert!(out.contains("real/nonexistent-package"));
         assert!(out.contains("2 finding(s)"));
         // no ANSI escapes when color is off
         assert!(!out.contains('\u{1b}'));
@@ -380,11 +470,11 @@ mod tests {
         out
     }
 
-    /// IN-03 regression: under color the severity label carries ANSI escape
-    /// bytes, but its VISIBLE width must stay fixed so the `id`/location
-    /// columns line up. Render two findings whose labels differ in length
-    /// (`CRITICAL` vs `LOW`) with color ON, strip the escapes, and assert the
-    /// id column starts at the same visible offset on both rows.
+    /// IN-03 regression: under color the severity chip carries ANSI escape
+    /// bytes, but its VISIBLE width must stay fixed so the message column
+    /// lines up. Render two findings whose severity words differ in length
+    /// (`critical` vs `low`) with color ON, strip the escapes, and assert the
+    /// message starts at the same visible offset on both rows.
     #[test]
     fn colored_labels_keep_columns_aligned() {
         let out = render_terminal(
@@ -400,22 +490,27 @@ mod tests {
             "expected ANSI escapes with color on"
         );
 
-        let id_col = |needle: &str| -> usize {
+        let message_col = |needle: &str| -> usize {
             let line = out
                 .lines()
                 .map(strip_ansi)
                 .find(|l| l.contains(needle))
                 .unwrap_or_else(|| panic!("no {needle} row in:\n{out}"));
-            line.find("real/nonexistent-package")
-                .unwrap_or_else(|| panic!("id must be present on the row: {line}"))
+            line.find("Package 'requests-auth-helper'")
+                .unwrap_or_else(|| panic!("message must be present on the row: {line}"))
         };
         assert_eq!(
-            id_col("CRITICAL"),
-            id_col("LOW"),
-            "the id column must start at the same visible offset regardless of label length"
+            message_col("✖ critical"),
+            message_col("○ low"),
+            "the message column must start at the same visible offset regardless of severity word length"
         );
-        // and the visible offset is exactly the padded label width + 1 space
-        assert_eq!(id_col("CRITICAL"), SEVERITY_LABEL_WIDTH + 1);
+        // and the offset is exactly: 2 indent + position column + 1 space +
+        // glyph (1 char = 3 UTF-8 bytes; `find` returns BYTE offsets) +
+        // 1 space + padded severity word + 1 space
+        assert_eq!(
+            message_col("✖ critical"),
+            2 + POSITION_WIDTH + 1 + (3 + 1) + SEVERITY_WIDTH + 1
+        );
     }
 
     #[test]

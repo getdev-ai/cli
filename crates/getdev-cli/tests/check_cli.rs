@@ -223,8 +223,10 @@ fn offline_no_network() {
 fn score_reflects_severity_weights() {
     let dir = tmp_dir("score");
     let cache_dir = dir.join("cache");
-    // A single hardcoded secret → audit/hardcoded-secret + env/hardcoded-secret
-    // (two criticals) and nothing else — a small, known-ish tally.
+    // A single hardcoded secret → exactly ONE critical in the aggregate:
+    // audit/hardcoded-secret and env/hardcoded-secret are the same underlying
+    // detection, and check dedupes audit's twin in favor of env's fixable
+    // finding (one secret must never dent the Ship Score twice).
     std::fs::write(
         dir.join("app.js"),
         "const stripeKey = \"sk_live_ABCDEFGHIJKLMNOP01\";\n",
@@ -242,10 +244,20 @@ fn score_reflects_severity_weights() {
         score, expected,
         "score must equal the versioned weight formula; summary={summary}"
     );
-    // the secret really did produce at least the two criticals we expect.
+    // the secret is counted ONCE, and the survivor is env's fixable finding.
+    assert_eq!(
+        count("critical"),
+        1,
+        "one hardcoded secret must yield exactly one critical after the audit/env dedupe, got {summary}"
+    );
+    let ids = finding_ids(&report);
     assert!(
-        count("critical") >= 2,
-        "one hardcoded secret should yield audit/ + env/ criticals, got {summary}"
+        ids.iter().any(|id| id == "env/hardcoded-secret"),
+        "the kept finding is env's fixable one, got {ids:?}"
+    );
+    assert!(
+        !ids.iter().any(|id| id == "audit/hardcoded-secret"),
+        "audit's twin of the same secret must be deduped, got {ids:?}"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
