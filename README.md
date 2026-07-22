@@ -31,6 +31,41 @@ what you run *after* the agent:
 | `getdev snap` / `back` | One-command checkpoints and restore (git hidden underneath) |
 | `getdev ship` | Pre-flight: Dockerfile generation, env validation, deploy checklist |
 
+## getdev in your agent's loop
+
+getdev is the **deterministic guardrail loop** for autonomous coding agents — Claude Code, Cursor,
+Cline, Aider, Windsurf, or your own harness. An agent writes code faster than you can review it;
+getdev is the check that makes that speed safe. Because it's deterministic and **runs entirely on
+your machine**, the agent can call it on *every* iteration without leaking code or making the loop
+nondeterministic.
+
+```
+agent proposes a change
+  → getdev snap            reversible checkpoint (the transaction begins)
+  → apply
+  → getdev check           one Ship Score + ranked, fixable findings
+       score high enough → keep / commit
+       findings          → hand them back to the agent → it fixes → re-check
+       broke something   → getdev back   one-second rollback, the agent retries
+```
+
+Wire it in once and every agent working on the repo self-verifies:
+
+```bash
+getdev init --yes   # writes .getdev.toml + a getdev block into CLAUDE.md / AGENTS.md / .cursorrules
+```
+
+- **Gate the loop on a result** — `getdev check --json --fail-on high` exits non-zero, so an agent
+  or CI can loop until it's clean.
+- **`snap` / `back` are the safety net** — an autonomous agent can experiment freely when every step
+  is one command away from a byte-identical rollback.
+- **No code upload, no telemetry, no LLM in the core** — precisely why it's safe to run on every edit.
+
+Ready-to-use per-agent setup — a **Claude Code skill**, Cursor / Cline / Aider / Windsurf / Continue
+rules, and the canonical **`AGENTS.md`** block — is in **[integrations/](integrations/)**. The
+forward plan for first-class agentic support (`getdev fix`, `--format=agent`, `getdev guard`, an MCP
+server) is the [Agentic / auto-mode workflow](docs/ROADMAP.md) theme in the roadmap.
+
 ## The privacy promise
 
 - **No telemetry. No analytics. No code upload. Ever.** There are zero LLM code
