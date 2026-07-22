@@ -137,6 +137,19 @@ fn list(args: &SnapArgs) -> anyhow::Result<u8> {
             row.message
         );
     }
+    // B-04: make the manual-only scope explicit. Auto-snaps (the pre-fix /
+    // pre-restore safety net) are deliberately not listed (D-06) — they exist,
+    // are addressable by id, and are what `getdev back` restores from. Without
+    // this line a user who just ran `back` or `env --write` wonders where the
+    // auto-snap went. Suppressed under --quiet; dimmed when color is on.
+    if !args.quiet {
+        let note =
+            "  manual snapshots only · auto-snaps (pre-fix/pre-restore) are used by `getdev back`";
+        match color {
+            ColorMode::On => println!("{}", note.dimmed()),
+            ColorMode::Off => println!("{note}"),
+        }
+    }
     Ok(0)
 }
 

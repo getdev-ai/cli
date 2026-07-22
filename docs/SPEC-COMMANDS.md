@@ -137,7 +137,7 @@ keeps env's fixable finding, dropping audit's twin at the same file:line
 |---|---|
 | `snap` | Snapshot entire working tree (incl. untracked, excl. `.gitignore`d) → commit object under `refs/getdev/snaps/<n>` |
 | `snap -m "msg"` | Labeled snapshot |
-| `snap list` | Table: id, age, message, files changed |
+| `snap list` | Table: id, age, message, files changed — **manual snapshots only** (`refs/getdev/snaps/`). Auto-snaps (the pre-fix/pre-restore safety net under `refs/getdev/auto/`, D-06) are not listed; they are addressable by id and are what `back` restores from. |
 | `back` | Restore most recent snapshot (auto-snaps current state first — restore is always reversible) |
 | `back <id>` | Restore specific snapshot |
 | `snap diff <id>` | Summary of changes since snapshot |

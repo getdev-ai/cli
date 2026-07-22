@@ -258,7 +258,9 @@ impl From<ShipTarget> for getdev_core::ship::ShipTarget {
 /// (CLAUDE.md hard rule 6).
 #[derive(Subcommand)]
 enum SnapAction {
-    /// List snapshots (id, age, message, files changed)
+    /// List manual snapshots (id, age, message, files changed). Auto-snaps
+    /// (the pre-fix/pre-restore safety net) are not listed — they are what
+    /// `getdev back` restores from.
     List,
     /// Summarize the changes since snapshot `<id>`
     Diff {
