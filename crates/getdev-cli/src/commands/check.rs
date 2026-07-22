@@ -58,19 +58,38 @@ pub struct CheckArgs {
     pub verbose: u8,
 }
 
-pub fn run(args: &CheckArgs) -> anyhow::Result<u8> {
-    // Interactive-only "processing" spinner on stderr (auto-suppressed under
-    // --json / -o / --quiet / non-TTY). stdout stays byte-clean — the spinner
-    // is torn down before any report renders below.
-    let show_progress = !args.json && !args.quiet && args.output.is_none();
-    let progress =
-        crate::progress::Progress::start(show_progress, args.no_color, "scanning project…");
+/// The fully-aggregated, filtered, scored result of check's collection
+/// pipeline — everything `run()`'s render tail consumes beyond the wire report.
+/// Extracted so `fix`/`guard` (Phase 14) reuse check's ONE aggregation pipeline
+/// instead of hand-copying it and drifting from its findings/score semantics
+/// (research/SUMMARY.md Anti-Pattern 1: "a second aggregation pipeline").
+pub(crate) struct Collected {
+    /// The scored, deduped, config-suppressed report — `score` is `Some(_)` and
+    /// `skipped` is populated inside [`collect`].
+    pub report: FindingsReport,
+    /// Config-suppressed findings, needed only for the `-v` "suppressed by
+    /// config" section. `run()` derives its `skipped: Vec<String>` view from
+    /// `report.skipped`, so that view is not carried here.
+    pub suppressed: Vec<suppress::SuppressedFinding>,
+}
 
+/// Walk + parse the project EXACTLY once, fan the shared context into all four
+/// analyzer legs over rayon, dedupe cross-command secrets, apply config
+/// suppression, and score — returning the full [`FindingsReport`] with NO
+/// render tail. Callable from `(path, cfg, offline, progress)` with no
+/// `CheckArgs` and no CLI output path, so `fix`/`guard` reuse check's exact
+/// aggregation instead of re-implementing it (CORE-01 SC2).
+pub(crate) fn collect(
+    path: &Path,
+    cfg: &Config,
+    offline: bool,
+    progress: &crate::progress::Progress,
+) -> anyhow::Result<Collected> {
     // ONE shared parse-once context: walk + parse the project EXACTLY once,
     // then hand it to every analyzer below (there is a single walk/parse code
     // path — CLAUDE.md rule 5 / Phase 7 Success Criterion 1). `ctx.skipped`
     // carries the oversized/unreadable SOURCE skips, surfaced once at the end.
-    let ctx = ScanContext::build(&args.path)?;
+    let ctx = ScanContext::build(path)?;
     progress.phase("resolving dependencies…");
 
     let mut skip_errors: Vec<getdev_core::scan::ScanError> = Vec::new();
@@ -83,9 +102,9 @@ pub fn run(args: &CheckArgs) -> anyhow::Result<u8> {
     // detection) read this one graph, and `audit` also needs the detected
     // frameworks + the embedded pack — so these are computed ONCE up front,
     // before the parallel fan-out.
-    let (graph, manifest_skipped) = deps::build_graph_with_context(&ctx, &args.path)?;
+    let (graph, manifest_skipped) = deps::build_graph_with_context(&ctx, path)?;
     skip_errors.extend(manifest_skipped);
-    let detected = frameworks::detect(&graph, &args.path);
+    let detected = frameworks::detect(&graph, path);
     let pack = rules::load_embedded()?;
 
     // check reports every finding it aggregates; the Ship Score already weights
@@ -123,10 +142,10 @@ pub fn run(args: &CheckArgs) -> anyhow::Result<u8> {
         let findings = real::collect_real_findings(
             &ctx,
             &graph,
-            &args.path,
-            args.offline,
-            &args.cfg.real.typosquat_sensitivity,
-            args.cfg.real.check_apis,
+            path,
+            offline,
+            &cfg.real.typosquat_sensitivity,
+            cfg.real.check_apis,
         )?;
         Ok((findings, Vec::new()))
     };
@@ -182,20 +201,18 @@ pub fn run(args: &CheckArgs) -> anyhow::Result<u8> {
     // check has no `--ignore`/`--severity` flags (global flags only, CLAUDE.md
     // rule 6); `[ignore]`/`[[suppress]]` from config flow through the SAME
     // `suppress::filter_findings` path every other command uses.
-    let filter_outcome = suppress::filter_findings(findings, &args.cfg);
+    let filter_outcome = suppress::filter_findings(findings, cfg);
     let findings = filter_outcome.kept;
-
-    let skipped: Vec<String> = skip_errors.iter().map(ToString::to_string).collect();
 
     let mut report = FindingsReport::new(
         env!("CARGO_PKG_VERSION"),
         ProjectInfo {
-            path: display_path(&args.path),
+            path: display_path(path),
             // B-02: populate the detected stack (reusing ship::detect_stack over
             // the SAME dependency graph the analyzer legs used — no second walk)
             // so `check --json` reports `project.stack` like `ship` does,
             // instead of an empty list. `Unknown` → `[]` (undetected).
-            stack: ship::detect_stack(&graph, &args.path)
+            stack: ship::detect_stack(&graph, path)
                 .identifiers()
                 .iter()
                 .map(|id| (*id).to_owned())
@@ -214,6 +231,30 @@ pub fn run(args: &CheckArgs) -> anyhow::Result<u8> {
     // The ONE net-new report field check populates — `check` is the only
     // command that ever sets a Ship Score (every other leaves it `None`).
     report.score = Some(report::ship_score(&report.summary));
+
+    Ok(Collected {
+        report,
+        suppressed: filter_outcome.suppressed,
+    })
+}
+
+pub fn run(args: &CheckArgs) -> anyhow::Result<u8> {
+    // Interactive-only "processing" spinner on stderr (auto-suppressed under
+    // --json / -o / --quiet / non-TTY). stdout stays byte-clean — the spinner
+    // is torn down before any report renders below.
+    let show_progress = !args.json && !args.quiet && args.output.is_none();
+    let progress =
+        crate::progress::Progress::start(show_progress, args.no_color, "scanning project…");
+
+    // The ENTIRE aggregation (parse-once → fan-out → dedupe → suppress → score)
+    // lives in `collect()`; `run()` re-implements none of it (CORE-01 SC2) — it
+    // is now `collect()` + render + exit.
+    let Collected { report, suppressed } = collect(&args.path, &args.cfg, args.offline, &progress)?;
+
+    // Derive the `-v` skipped-files view from the report. Each `SkippedEntry`'s
+    // `reason` equals the original `ScanError::to_string()`, so this vector is
+    // byte-identical to the pre-refactor local.
+    let skipped: Vec<String> = report.skipped.iter().map(|s| s.reason.clone()).collect();
 
     // Erase the spinner line before anything renders to stdout.
     progress.finish();
@@ -244,13 +285,10 @@ pub fn run(args: &CheckArgs) -> anyhow::Result<u8> {
                 );
             }
         }
-        if !filter_outcome.suppressed.is_empty() {
+        if !suppressed.is_empty() {
             if args.verbose > 0 {
-                println!(
-                    "{} finding(s) suppressed by config:",
-                    filter_outcome.suppressed.len()
-                );
-                for s in &filter_outcome.suppressed {
+                println!("{} finding(s) suppressed by config:", suppressed.len());
+                for s in &suppressed {
                     println!(
                         "  - {} {} — {}",
                         s.finding.id,
@@ -261,7 +299,7 @@ pub fn run(args: &CheckArgs) -> anyhow::Result<u8> {
             } else if !args.quiet {
                 println!(
                     "{} finding(s) suppressed by config (-v for details)",
-                    filter_outcome.suppressed.len()
+                    suppressed.len()
                 );
             }
         }
@@ -351,5 +389,76 @@ mod tests {
                 ("audit/hardcoded-secret", "other.js"),
             ]
         );
+    }
+
+    fn scratch_project(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "getdev-cli-collect-ut-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    // SC2: `collect()` is callable straight off the CLI output path — no
+    // `assert_cmd`, no `run()`, no stdout, no network. Proves it returns the
+    // fully-aggregated, deduped, scored report that `fix`/`guard` will reuse.
+    #[test]
+    fn collect_returns_a_scored_deduped_report_without_the_cli() {
+        let dir = scratch_project("scored");
+        // A hardcoded live secret yields the env/audit twin (exercising the
+        // cross-command secret dedupe inside collect); the debug leftover adds a
+        // review/* finding. No package.json → the `real` leg stays cache-only
+        // and, being offline, never touches the network.
+        std::fs::write(
+            dir.join("app.js"),
+            "const stripeKey = \"sk_live_ABCDEFGHIJKLMNOP01\";\n\
+             console.log(\"debug\", stripeKey);\n",
+        )
+        .unwrap();
+
+        // offline=true → `real` is cache-only; a disabled Progress = no spinner.
+        let collected = collect(
+            &dir,
+            &Config::default(),
+            true,
+            &crate::progress::Progress::start(false, true, ""),
+        )
+        .unwrap();
+        let report = &collected.report;
+
+        // check is the only command that scores; a critical secret drags it
+        // below a clean 100.
+        let score = report.score.unwrap();
+        assert!(
+            score < 100,
+            "a critical secret must drop the score, got {score}"
+        );
+        assert!(report.summary.total() > 0, "expected findings, got none");
+
+        // The seeded secret surfaced, and the cross-command dedupe ran INSIDE
+        // collect: env keeps its finding, audit's twin at the same site is gone.
+        let ids: Vec<&str> = report.findings.iter().map(|f| f.id.as_str()).collect();
+        assert!(
+            ids.contains(&"env/hardcoded-secret"),
+            "the seeded secret must surface as env/hardcoded-secret, got {ids:?}"
+        );
+        assert!(
+            !ids.contains(&"audit/hardcoded-secret"),
+            "audit's twin at the single secret site must be deduped, got {ids:?}"
+        );
+
+        // A single readable source file → no skips recorded.
+        assert!(
+            report.skipped.is_empty(),
+            "a readable project must record no skips, got {:?}",
+            report.skipped
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
