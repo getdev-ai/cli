@@ -4,11 +4,13 @@
 
 [![CI](https://github.com/getdev-ai/cli/actions/workflows/ci.yml/badge.svg)](https://github.com/getdev-ai/cli/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/getdev.svg)](https://crates.io/crates/getdev)
+[![GitHub release](https://img.shields.io/github/v/release/getdev-ai/cli?sort=semver)](https://github.com/getdev-ai/cli/releases/latest)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-> **v0.1.0 — released.** The full toolbelt (`check`, `real`, `audit`, `review`, `env`,
-> `snap`/`back`, `ship`, `init`, `update`) ships as one static binary for macOS, Linux, and
-> Windows. Install below; see [docs/ROADMAP.md](docs/ROADMAP.md) for what's next and the
+> **Released and stable.** The full toolbelt (`check`, `real`, `audit`, `review`, `env`,
+> `snap`/`back`, `ship`, `init`, `update`, `doctor`) ships as one static binary for macOS,
+> Linux, and Windows — installable through every channel below. The badges above track the
+> current published version; see [docs/ROADMAP.md](docs/ROADMAP.md) for what's next and the
 > v0.1.x polish backlog for known issues we're tracking.
 
 This repo (`getdev-ai/cli`) is the CLI tool; [getdev.ai](https://getdev.ai) is the
