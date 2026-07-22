@@ -1,0 +1,40 @@
+# Build + deploy the getdev.ai landing site (site/) to Cloudflare Pages.
+#
+# Runs only on pushes that touch site/**. The deploy step is guarded on the
+# CLOUDFLARE_API_TOKEN secret (Account › Cloudflare Pages › Edit) — until that
+# secret is set the job builds and no-ops the deploy, so it never fails red.
+name: deploy-site
+
+on:
+  push:
+    branches: [main]
+    paths: ['site/**', '.github/workflows/deploy-site.yml']
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    defaults:
+      run:
+        working-directory: site
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - name: Deploy to Cloudflare Pages
+        if: ${{ env.CLOUDFLARE_API_TOKEN != '' }}
+        run: npx wrangler pages deploy out --project-name getdev-cli-site --branch main
+      - name: Note when unconfigured
+        if: ${{ env.CLOUDFLARE_API_TOKEN == '' }}
+        run: echo "CLOUDFLARE_API_TOKEN not set — built only, skipped deploy. Add the secret to enable auto-deploy."

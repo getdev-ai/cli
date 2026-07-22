@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="getdev.ai">
+  <!-- Dark-theme tile: gd-bg slate-900, subtle gd-border ring, brand-mark >_ in Stripe purple.
+       Master for all favicon/logo raster sizes. Colors from apps/web/app/globals.css tokens. -->
+  <rect width="512" height="512" rx="115" fill="#0f172a" />
+  <rect x="6" y="6" width="500" height="500" rx="109" fill="none" stroke="#334155" stroke-width="8" />
+  <g transform="translate(64 64) scale(16)" fill="none" stroke="#635bff" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="4 17 10 11 4 5" />
+    <line x1="12" y1="19" x2="20" y2="19" />
+  </g>
+</svg>

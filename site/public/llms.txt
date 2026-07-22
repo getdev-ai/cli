@@ -1,0 +1,59 @@
+# getdev
+
+> getdev is a free, open-source (Apache-2.0) command-line toolbelt that verifies, secures, and prepares AI-generated code. One command — `getdev check` — returns a deterministic Ship Score (0–100) with ranked, explainable findings across hallucinated packages, hardcoded secrets, AI-pattern security holes, and agent debris. One static binary, runs locally, no telemetry, no code upload, no API key. Languages: JavaScript/TypeScript and Python.
+
+getdev is designed to run inside an AI coding workflow: it is the verification step an agent runs on its own output. Output is machine-readable (`--json`), deterministic (same input → same output, no LLM calls in the core), and exit-code driven. The repository is https://github.com/getdev-ai/cli and the product/binary/package name everywhere is `getdev`.
+
+## Install
+
+- macOS / Linux: `curl -fsSL https://getdev.ai/install.sh | sh`
+- Windows (PowerShell): `irm https://getdev.ai/install.ps1 | iex`
+- npm: `npm install -g getdev` (or `npx getdev`)
+- Homebrew: `brew install getdev-ai/tap/getdev`
+- Scoop: `scoop bucket add getdev https://github.com/getdev-ai/scoop-bucket && scoop install getdev`
+- Cargo: `cargo install getdev` (or `cargo binstall getdev`)
+- GitHub Releases: https://github.com/getdev-ai/cli/releases
+
+## Commands
+
+- `getdev check` — run everything, get one Ship Score 0–100
+- `getdev check --json --fail-on high` — machine-readable findings report; exit non-zero at or above the threshold
+- `getdev real` — verify that packages, APIs, and model strings actually exist (anti-slopsquatting)
+- `getdev audit` — security scan tuned to AI-generated failure patterns
+- `getdev review` — diff analysis: dead code, duplicate helpers, debug leftovers, orphan files
+- `getdev env --write` — extract hardcoded secrets to .env, rewrite references, patch .gitignore (values masked, never printed)
+- `getdev snap` / `getdev back` — one-command checkpoints and one-second restore (hidden in git; your branches/history/stash are untouched)
+- `getdev ship` — pre-flight: Dockerfile generation, env validation, deploy checklist (never runs your code unless `--run-build`)
+- `getdev init` — first-run setup: writes .getdev.toml, offers a pre-commit hook, and upserts an agent-context block into CLAUDE.md / AGENTS.md / .cursorrules
+- `getdev update` — signed self-update from GitHub Releases (SHA-256 checksum + cosign verified, atomic swap)
+- `getdev doctor` — self-diagnostics: version, cache, registry reachability, config validity
+
+## Using getdev in an AI agent loop
+
+1. Generate or edit code.
+2. Run `getdev check --json --fail-on high`.
+3. Parse findings from the JSON report; fix every finding at or above the threshold.
+4. Re-run until the exit code is 0.
+
+Exit codes: `0` clean · `1` findings at or above `--fail-on` · `2` execution error · `3` config error. Gate the loop on the exit code, not on scraping stdout.
+
+JSON output: `--json` emits a findings report with a stable `schema_version`, a numeric `score` (0–100), and a `findings` array (each with a `rule_id`, `severity`, location, and remediation). Add `-o <file>` to write the report to a file while stdout prints only the path — convenient for scripted/agent runs.
+
+Suggested one-liner for an AGENTS.md / system prompt: "After editing code, run `getdev check --json --fail-on high`, fix every finding at or above the threshold, then re-run until it exits 0. Extract secrets with `getdev env --write`; checkpoint risky edits with `getdev snap` / `getdev back`."
+
+## Principles
+
+- Local-first and private: no telemetry, no analytics, no code upload. Only network destinations are the npm registry, PyPI, and GitHub Releases (self-update); `--offline` disables all network access. Enforced in CI, not just asserted.
+- Deterministic core: no LLM calls, no API key; same input → same output.
+- Safe by default: no file mutation without `--write`/`--fix`; every mutation is atomic (write → reparse-verify → roll back) with an automatic checkpoint first.
+- Never runs your code: pure static analysis (tree-sitter ASTs), unless you opt in with `ship --run-build`.
+- Rules are data: detection rules are YAML with test fixtures — contributing a rule needs zero Rust.
+
+## Links
+
+- Repository: https://github.com/getdev-ai/cli
+- Releases: https://github.com/getdev-ai/cli/releases
+- Contributing: https://github.com/getdev-ai/cli/blob/main/CONTRIBUTING.md
+- Security policy: https://github.com/getdev-ai/cli/blob/main/SECURITY.md
+- Threat model: https://github.com/getdev-ai/cli/blob/main/docs/THREAT-MODEL.md
+- License: Apache-2.0

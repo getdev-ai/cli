@@ -1,0 +1,84 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* gd-* design tokens — ported from the getdev gallery (getdev-ai/getdev ·
+ * apps/web/app/globals.css) so the CLI landing shares the family palette.
+ * The site is dark-only (data-theme="dark" set on <html> in layout.tsx),
+ * but both token sets are kept for parity with the source of truth. */
+
+:root,
+[data-theme='light'] {
+  --gd-bg: #f8fafc;
+  --gd-surface: #ffffff;
+  --gd-surface-2: #f1f5f9;
+
+  --gd-border: #e2e8f0;
+  --gd-border-2: #cbd5e1;
+  --gd-border-light: #f1f5f9;
+
+  --gd-text-1: #0f172a;
+  --gd-text-2: #64748b;
+  --gd-text-3: #94a3b8;
+
+  --gd-accent: #635bff;
+  --gd-accent-hover: #4d44e3;
+  --gd-accent-soft: #ebe9ff;
+  --gd-accent-ink: #ffffff;
+
+  --gd-primary: #0f172a;
+  --gd-primary-ink: #ffffff;
+  --gd-primary-hover: #1e293b;
+
+  --gd-success: #16a34a;
+  --gd-warning: #ea580c;
+  --gd-danger: #dc2626;
+  --gd-info: #2563eb;
+
+  --gd-shadow-card: 0 1px 3px 0 rgba(0, 0, 0, 0.06), 0 1px 2px -1px rgba(0, 0, 0, 0.04);
+  --gd-shadow-card-hover: 0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 4px 10px -5px rgba(0, 0, 0, 0.06);
+}
+
+[data-theme='dark'] {
+  --gd-bg: #0f172a;
+  --gd-surface: #1e293b;
+  --gd-surface-2: #0f172a;
+
+  --gd-border: #334155;
+  --gd-border-2: #475569;
+  --gd-border-light: #1e293b;
+
+  --gd-text-1: #f1f5f9;
+  --gd-text-2: #94a3b8;
+  --gd-text-3: #64748b;
+
+  --gd-accent: #7c75ff;
+  --gd-accent-hover: #9690ff;
+  --gd-accent-soft: #1a1740;
+  --gd-accent-ink: #ffffff;
+
+  --gd-primary: #f1f5f9;
+  --gd-primary-ink: #0f172a;
+  --gd-primary-hover: #e2e8f0;
+
+  --gd-success: #4ade80;
+  --gd-warning: #fb923c;
+  --gd-danger: #f87171;
+  --gd-info: #60a5fa;
+
+  --gd-shadow-card: 0 1px 3px 0 rgba(0, 0, 0, 0.3), 0 1px 2px -1px rgba(0, 0, 0, 0.2);
+  --gd-shadow-card-hover: 0 10px 25px -5px rgba(0, 0, 0, 0.5), 0 4px 10px -5px rgba(0, 0, 0, 0.3);
+}
+
+:root {
+  --gd-brand-mark: #635bff;
+}
+
+@layer base {
+  html {
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+    color-scheme: dark;
+    overflow-y: scroll;
+    scrollbar-gutter: stable;
+  }
+}

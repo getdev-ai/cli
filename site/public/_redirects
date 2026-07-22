@@ -1,0 +1,9 @@
+# Cloudflare Pages redirects.
+#
+# The getdev CLI's FROZEN install URLs. getdev.ai/install.sh and /install.ps1
+# must serve a real installer, never HTML — `curl -fsSL | sh` pipes whatever
+# comes back straight into a shell. 302 (temporary) to the GitHub release asset
+# so the frozen URL stays stable while GitHub serves the current release's
+# installer (curl -L and PowerShell iwr both follow redirects).
+/install.sh   https://github.com/getdev-ai/cli/releases/latest/download/getdev-installer.sh   302
+/install.ps1  https://github.com/getdev-ai/cli/releases/latest/download/getdev-installer.ps1  302

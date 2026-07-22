@@ -3,11 +3,13 @@
 # testdata/ holds this repo's rule fixtures and corpus projects — files whose
 # entire PURPOSE is to trigger findings (every rule ships >= 3 positive
 # fixtures; docs/SPEC-RULES.md). packaging/reserve/ holds the npm/PyPI
-# name-reservation placeholders. Neither is product code; without these
-# excludes a self-run drowns in ~660 intentional findings (Ship Score 0/100).
+# name-reservation placeholders. site/ is the getdev.ai landing page (a
+# standalone Next.js static site deployed to Cloudflare Pages), not Rust
+# product code. None is product code; without these excludes a self-run
+# drowns in intentional findings (Ship Score 0/100).
 
 [project]
 stack = "auto"
 
 [ignore]
-paths = ["testdata/", "packaging/reserve/"]
+paths = ["testdata/", "packaging/reserve/", "site/"]
