@@ -24,7 +24,9 @@ Related: [DISTRIBUTION.md](DISTRIBUTION.md) (channels), [CI.md](CI.md) (workflow
 4. **`docker build` succeeds** for every `ship` preset output.
 5. **Manual "first five minutes" smoke** on all 3 OSes from actual release artifacts:
    install → `init` → `check` → `env --write` → `snap`/`back`.
-6. Artifacts signed, checksummed, SBOM attached; **only then** repoint getdev.ai installers.
+6. Artifacts signed, checksummed, SBOM attached; **only then** undraft the GitHub Release
+   (which is what makes `getdev.ai/install.sh` resolve the new version — the getdev.ai
+   `_redirects` target `releases/latest/download/…`; no separate installer-repoint step).
 
 ## v0.1.0 launch runbook (one-time, ship-when-green)
 
@@ -101,9 +103,11 @@ step graph is under [Release procedure](#release-procedure) below. The Release s
 
 Only after Stage 3 is fully green:
 
-1. **Confirm the one web precondition** — getdev.ai serves `install.sh` + `install.ps1`
-   resolving the v0.1.0 GitHub-release artifacts. This is the CLI's own landing/installer
-   hosting; the getdev-gallery marketplace is a **separate product and does not gate this
+1. **Confirm the web precondition** — `getdev.ai/install.sh` + `/install.ps1` 302-redirect
+   to the GitHub-release installer (they're Cloudflare Pages `_redirects` → `latest`, so
+   undrafting the release satisfies this automatically; just verify with `curl -sI`). This
+   hosting lives in **this repo's `site/`** (Cloudflare Pages project `getdev-cli-site`);
+   the getdev-gallery marketplace is a **separate product on Railway and does not gate this
    launch**.
 2. **Undraft** the GitHub Release.
 3. **Merge** the README install/status copy → "v0.1.0 released" (staged in 09-01,
@@ -227,18 +231,19 @@ staleness). So on any key change:
 ### After the workflow completes
 
 1. Run the smoke checklist (below) against the **draft** release artifacts.
-2. Publish the GitHub Release (undraft).
-3. Repoint getdev.ai `install.sh`/`install.ps1` at the new version (checksum-verified
-   deploy — a PR to the website repo) and update the CLI listing there
-   if the release changes user-facing surface.
-4. Verify each channel:
+2. Publish the GitHub Release (undraft). **This is the only action needed to repoint the
+   install URLs** — `getdev.ai/install.sh` and `/install.ps1` are Cloudflare Pages
+   `_redirects` to `releases/latest/download/…`, so undrafting the release makes them serve
+   the new version automatically. No website change or PR (see docs/DISTRIBUTION.md). Only
+   edit `site/` if the release changes the landing copy itself.
+3. Verify each channel:
    - `curl -fsSL https://getdev.ai/install.sh | sh` in a clean container
    - `npx getdev@latest version`
    - `brew update && brew install getdev-ai/tap/getdev`
    - `scoop update getdev` (Windows VM)
    - `cargo binstall getdev` resolves the prebuilt artifact
    - `getdev update` from the previous version self-updates and signature-verifies
-5. Announce (release notes; launch-window posts per plan §11).
+4. Announce (release notes; launch-window posts per plan §11).
 
 ## dist-workspace.toml (reference configuration)
 
@@ -298,8 +303,12 @@ tempted to rush), tag `v0.1.1` from the hotfix branch, then merge back to main.
 
 ## Yanking a bad release
 
-1. Repoint getdev.ai installers at the previous good version (first — this is the widest pipe).
-2. Mark the GitHub Release as pre-release + edit notes with the warning; do not delete
+1. Point the install URLs back to the previous good version (first — this is the widest
+   pipe). Because `getdev.ai/install.sh` redirects to the release tagged **latest** on
+   GitHub, promote the previous good release to "Latest release" (GitHub → Releases → edit
+   the good release → *Set as the latest release*). The redirect then resolves it with no
+   website/DNS change.
+2. Mark the bad GitHub Release as pre-release + edit notes with the warning; do not delete
    artifacts (checksums are referenced elsewhere).
 3. `npm deprecate getdev@X.Y.Z "reason"` · revert the tap formula commit · revert the scoop
    manifest bump · `cargo yank --version X.Y.Z getdev` (and affected lib crates).
