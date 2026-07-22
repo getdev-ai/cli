@@ -38,20 +38,29 @@ Two things make getdev loop-friendly, and every integration below is built on th
 
 ## Claude Code
 
-**Skill (recommended).** Copy the skill into your skills directory so Claude Code invokes getdev at
-the right moments automatically:
+**Plugin (recommended)** — install from the marketplace in two commands:
+
+```
+/plugin marketplace add getdev-ai/cli
+/plugin install getdev@getdev
+```
+
+This installs the getdev skill, so Claude Code invokes getdev at the right moments on its own:
+`snap` before large changes, `check` after, feed findings back into its edits, `back` on a
+regression. The skill is [`claude-code/getdev/SKILL.md`](claude-code/getdev/SKILL.md).
+
+**Or copy the skill by hand:**
 
 ```bash
 cp -r integrations/claude-code/getdev ~/.claude/skills/     # user-wide
-# or, per-project:
-cp -r integrations/claude-code/getdev .claude/skills/
+cp -r integrations/claude-code/getdev .claude/skills/       # or per-project
 ```
 
-See [`claude-code/getdev/SKILL.md`](claude-code/getdev/SKILL.md). It teaches Claude to `snap` before
-large changes, `check` after, feed findings back into its own edits, and `back` on a regression.
-
 **Or just `getdev init`** — it writes the getdev block into `CLAUDE.md`, which Claude Code reads as
-project instructions. The skill and the `CLAUDE.md` block compose; use either or both.
+project instructions. Plugin, skill, and `CLAUDE.md` block all compose — use any or all.
+
+For the tightest integration (getdev as *callable tools*, not shell commands), also add the
+[MCP server](#mcp-server--any-mcp-capable-agent-native-tools).
 
 ---
 

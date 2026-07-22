@@ -1,0 +1,19 @@
+{
+  "name": "getdev",
+  "owner": {
+    "name": "getdev"
+  },
+  "description": "getdev — verify AI-generated code inside your agent's loop. Local, deterministic, no code upload.",
+  "plugins": [
+    {
+      "name": "getdev",
+      "source": "./integrations/claude-code/getdev",
+      "description": "Verify AI-generated code: hallucinated packages, injection, hardcoded secrets, agent debris. The deterministic guardrail loop (snap → check → fix / back), local and offline-capable.",
+      "version": "0.1.0",
+      "homepage": "https://getdev.ai",
+      "repository": "https://github.com/getdev-ai/cli",
+      "license": "Apache-2.0",
+      "keywords": ["ai-agents", "agentic", "code-verification", "security"]
+    }
+  ]
+}

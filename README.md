@@ -61,10 +61,17 @@ getdev init --yes   # writes .getdev.toml + a getdev block into CLAUDE.md / AGEN
   is one command away from a byte-identical rollback.
 - **No code upload, no telemetry, no LLM in the core** — precisely why it's safe to run on every edit.
 
-Ready-to-use per-agent setup — a **Claude Code skill**, Cursor / Cline / Aider / Windsurf / Continue
-rules, and the canonical **`AGENTS.md`** block — is in **[integrations/](integrations/)**. The
-forward plan for first-class agentic support (`getdev fix`, `--format=agent`, `getdev guard`, an MCP
-server) is the [Agentic / auto-mode workflow](docs/ROADMAP.md) theme in the roadmap.
+Ready-to-use setup for every agent is in **[integrations/](integrations/)**:
+
+- **Claude Code** — install the plugin: `/plugin marketplace add getdev-ai/cli` then
+  `/plugin install getdev@getdev`.
+- **Any MCP agent** (Claude Code, Cursor, Cline, Windsurf) — run the
+  [MCP server](integrations/mcp/) so the agent calls getdev as native tools.
+- **Cursor / Cline / Aider / Windsurf / Continue** — the canonical rules / `AGENTS.md` block
+  (also written automatically by `getdev init`).
+
+The forward plan for first-class agentic support (`getdev fix`, `--format=agent`, `getdev guard`) is
+the [Agentic / auto-mode workflow](docs/ROADMAP.md) theme in the roadmap.
 
 ## The privacy promise
 

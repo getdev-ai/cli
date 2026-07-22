@@ -1,0 +1,14 @@
+{
+  "name": "getdev",
+  "displayName": "getdev",
+  "version": "0.1.0",
+  "description": "Verify AI-generated code inside your agent's loop — hallucinated packages, injection, hardcoded secrets, and agent debris — locally and deterministically.",
+  "author": {
+    "name": "getdev",
+    "url": "https://github.com/getdev-ai/cli"
+  },
+  "homepage": "https://getdev.ai",
+  "repository": "https://github.com/getdev-ai/cli",
+  "license": "Apache-2.0",
+  "keywords": ["ai-agents", "agentic", "code-verification", "security", "vibe-coding", "cli"]
+}
