@@ -5,8 +5,10 @@ languages: [javascript, typescript, tsx, python]
 description: >
   A shell-invoking function (child_process.exec/execSync, the bare exec/
   execSync import, Python's exec()/os.system(), or subprocess.call/run/Popen
-  with shell=True) called with a non-literal (variable) command argument —
-  command injection risk if the value is influenced by user input.
+  with shell=True) called with a non-literal command argument — a bare
+  variable OR a string built by concatenation (`"ls " + userVar`) —
+  command injection risk if any interpolated value is influenced by user
+  input.
 message: "Shell command executed with a non-literal argument (command injection risk)"
 remediation: >
   Pass the command and its arguments as a separate array to execFile/spawn
@@ -81,6 +83,68 @@ matchers:
           (keyword_argument
             name: (identifier) @kw (#eq? @kw "shell")
             value: (true))))
+  # --- String-concatenation command building (B-01): `"literal" + userVar`.
+  # The template-literal form is covered by audit/shell-interpolation; these
+  # matchers add the binary `+` concatenation form the earlier matchers (bare
+  # identifier / template string) both miss.
+  # JS/TS: child_process.exec/execSync(<concat>).
+  - language: javascript
+    query: |
+      (call_expression
+        function: (member_expression
+          object: (identifier) @obj (#eq? @obj "child_process")
+          property: (property_identifier) @method (#any-of? @method "exec" "execSync"))
+        arguments: (arguments (binary_expression) @finding))
+  - language: typescript
+    query: |
+      (call_expression
+        function: (member_expression
+          object: (identifier) @obj (#eq? @obj "child_process")
+          property: (property_identifier) @method (#any-of? @method "exec" "execSync"))
+        arguments: (arguments (binary_expression) @finding))
+  - language: tsx
+    query: |
+      (call_expression
+        function: (member_expression
+          object: (identifier) @obj (#eq? @obj "child_process")
+          property: (property_identifier) @method (#any-of? @method "exec" "execSync"))
+        arguments: (arguments (binary_expression) @finding))
+  # JS/TS: bare exec/execSync(<concat>) — the destructured-import form.
+  - language: javascript
+    query: |
+      (call_expression
+        function: (identifier) @fn (#any-of? @fn "exec" "execSync")
+        arguments: (arguments (binary_expression) @finding))
+  - language: typescript
+    query: |
+      (call_expression
+        function: (identifier) @fn (#any-of? @fn "exec" "execSync")
+        arguments: (arguments (binary_expression) @finding))
+  - language: tsx
+    query: |
+      (call_expression
+        function: (identifier) @fn (#any-of? @fn "exec" "execSync")
+        arguments: (arguments (binary_expression) @finding))
+  # Python: os.system(<concat>).
+  - language: python
+    query: |
+      (call
+        function: (attribute
+          object: (identifier) @obj (#eq? @obj "os")
+          attribute: (identifier) @method (#eq? @method "system"))
+        arguments: (argument_list (binary_operator) @finding))
+  # Python: subprocess.call/run/Popen(<concat>, shell=True).
+  - language: python
+    query: |
+      (call
+        function: (attribute
+          object: (identifier) @obj (#eq? @obj "subprocess")
+          attribute: (identifier) @method (#any-of? @method "call" "run" "Popen"))
+        arguments: (argument_list
+          (binary_operator) @finding
+          (keyword_argument
+            name: (identifier) @kw (#eq? @kw "shell")
+            value: (true))))
 fixtures:
   positive:
     - positive/exec_user_input_js_child_process.js
@@ -92,6 +156,11 @@ fixtures:
     - positive/exec_user_input_tsx.tsx
     - positive/exec_user_input_ts_child_process.ts
     - positive/exec_user_input_ts_destructured.ts
+    - positive/exec_user_input_js_concat.js
+    - positive/exec_user_input_ts_concat.ts
+    - positive/exec_user_input_tsx_concat.tsx
+    - positive/exec_user_input_py_os_system_concat.py
+    - positive/exec_user_input_py_subprocess_concat.py
   negative:
     - negative/exec_user_input_neg_constant_js.js
     - negative/exec_user_input_neg_constant_py.py
@@ -99,3 +168,5 @@ fixtures:
     - negative/exec_user_input_neg_subprocess_array_py.py
     - negative/exec_user_input_neg_subprocess_no_shell_py.py
     - negative/exec_user_input_neg_unrelated_identifier_js.js
+    - negative/exec_user_input_neg_concat_execfile_js.js
+    - negative/exec_user_input_neg_concat_string_py.py
