@@ -153,6 +153,7 @@ pub fn run(args: &CheckArgs) -> anyhow::Result<u8> {
     findings.extend(audit_findings);
     findings.extend(env_findings);
     findings.extend(review_findings);
+    dedupe_cross_command_secrets(&mut findings);
     skip_errors.extend(real_skipped);
     skip_errors.extend(audit_skipped);
     skip_errors.extend(env_skipped);
@@ -248,4 +249,79 @@ pub fn run(args: &CheckArgs) -> anyhow::Result<u8> {
 
 fn display_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
+}
+
+/// `audit/hardcoded-secret` and `env/hardcoded-secret` are the SAME underlying
+/// detection (`core::secrets`) surfaced by two commands. Standalone `audit`
+/// and `env` runs keep their own view, but the check aggregate must not count
+/// one secret twice — a single hardcoded key would otherwise inflate the
+/// critical tally and drag the Ship Score double. Keep env's finding (it is
+/// the fixable one — `getdev env --write` extracts it) and drop audit's twin
+/// at the same file:line.
+fn dedupe_cross_command_secrets(findings: &mut Vec<Finding>) {
+    let env_secret_sites: std::collections::HashSet<(&str, Option<u32>)> = findings
+        .iter()
+        .filter(|f| f.id == "env/hardcoded-secret")
+        .map(|f| (f.file.as_str(), f.line))
+        .collect();
+    if env_secret_sites.is_empty() {
+        return;
+    }
+    let env_secret_sites: std::collections::HashSet<(String, Option<u32>)> = env_secret_sites
+        .into_iter()
+        .map(|(file, line)| (file.to_owned(), line))
+        .collect();
+    findings.retain(|f| {
+        f.id != "audit/hardcoded-secret" || !env_secret_sites.contains(&(f.file.clone(), f.line))
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use getdev_core::findings::{Confidence, Severity};
+
+    fn secret_finding(id: &str, file: &str, line: u32) -> Finding {
+        Finding {
+            id: id.into(),
+            command: id.split('/').next().unwrap_or("").into(),
+            severity: Severity::Critical,
+            confidence: Confidence::High,
+            file: file.into(),
+            line: Some(line),
+            column: None,
+            end_line: None,
+            fingerprint: None,
+            message: "stripe secret assigned to 'API_KEY'".into(),
+            detail: None,
+            remediation: None,
+            suggestion: None,
+            fixable: id.starts_with("env/"),
+            refs: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn audit_twin_of_an_env_secret_is_dropped_once_not_both() {
+        let mut findings = vec![
+            secret_finding("audit/hardcoded-secret", "app.js", 2),
+            secret_finding("env/hardcoded-secret", "app.js", 2),
+            // A different site only audit saw stays.
+            secret_finding("audit/hardcoded-secret", "other.js", 9),
+        ];
+        dedupe_cross_command_secrets(&mut findings);
+        let ids: Vec<(&str, &str)> = findings
+            .iter()
+            .map(|f| (f.id.as_str(), f.file.as_str()))
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                ("env/hardcoded-secret", "app.js"),
+                ("audit/hardcoded-secret", "other.js"),
+            ]
+        );
+    }
 }
