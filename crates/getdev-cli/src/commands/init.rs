@@ -148,19 +148,28 @@ pub fn run(args: &InitArgs) -> anyhow::Result<u8> {
                 Ok(text) => text,
                 Err(_) => continue,
             };
-            let updated = upsert_managed_block(&existing, AGENT_BLOCK_BODY);
-            // Idempotent: if the block is already current, don't queue a
-            // no-op rewrite of identical bytes.
-            if updated == existing {
-                notes.push(format!("{name} — managed block already up to date"));
-                continue;
+            match upsert_managed_block(&existing, AGENT_BLOCK_BODY) {
+                // Idempotent: the block is already current — no rewrite queued.
+                ManagedBlockOutcome::Unchanged => {
+                    notes.push(format!("{name} — managed block already up to date"));
+                }
+                ManagedBlockOutcome::Updated(updated) => {
+                    notes.push(format!("{name} — managed block upserted"));
+                    writes.push(PlannedWrite::WriteFile {
+                        path: agent_path,
+                        original: Some(existing),
+                        new_content: updated,
+                    });
+                }
+                // Malformed markers: leave the file untouched and tell the
+                // user, rather than risk clobbering content across the
+                // ambiguous region (WR-03).
+                ManagedBlockOutcome::Anomaly(reason) => {
+                    notes.push(format!(
+                        "{name} — left untouched: {reason}; resolve the getdev:managed markers by hand"
+                    ));
+                }
             }
-            notes.push(format!("{name} — managed block upserted"));
-            writes.push(PlannedWrite::WriteFile {
-                path: agent_path,
-                original: Some(existing),
-                new_content: updated,
-            });
         }
     }
 
@@ -256,35 +265,78 @@ fn offer(prompt: &str, yes: bool) -> anyhow::Result<bool> {
     ))
 }
 
-/// Idempotent marker-delimited upsert (pure string transform, no I/O): replace
-/// the region between [`MARKER_START`]/[`MARKER_END`] (inclusive) if both are
-/// present, else append a fresh block. Everything outside the markers is user
-/// content and is preserved byte-for-byte — so running init twice neither
-/// duplicates the block nor alters the surrounding file.
-fn upsert_managed_block(existing: &str, body: &str) -> String {
+/// The result of an [`upsert_managed_block`] transform.
+enum ManagedBlockOutcome {
+    /// The managed block is already byte-identical — nothing to write.
+    Unchanged,
+    /// New file content to write (a clean in-place replace, or a first append
+    /// under existing user content).
+    Updated(String),
+    /// The file's markers are malformed — the payload is the human-facing
+    /// reason. The file is left UNTOUCHED so init can never clobber user
+    /// content across ambiguous markers (WR-03).
+    Anomaly(&'static str),
+}
+
+/// Idempotent marker-delimited upsert (pure string transform, no I/O).
+///
+/// Safe cases only:
+/// - **no markers** → append a fresh block under the existing content;
+/// - **exactly one well-ordered `START…END` pair** → replace that region
+///   (inclusive) in place, preserving everything outside byte-for-byte.
+///
+/// Anything else — a reversed pair (`END` before `START`), an orphaned single
+/// marker, or duplicated markers — is an [`ManagedBlockOutcome::Anomaly`]: the
+/// file is left untouched and the caller warns. Blindly splicing on the first
+/// `find` of each marker (the pre-WR-03 behavior) could delete every byte
+/// between an unrelated stray marker and the real one, or corrupt a reversed
+/// pair; and blindly appending would grow a fresh block on every re-run once a
+/// duplicate exists (non-idempotent). Refusing to touch a malformed file is the
+/// only choice that is both non-destructive and idempotent.
+fn upsert_managed_block(existing: &str, body: &str) -> ManagedBlockOutcome {
     let block = format!("{MARKER_START}\n{body}\n{MARKER_END}");
-    if let (Some(start), Some(end_at)) = (existing.find(MARKER_START), existing.find(MARKER_END)) {
-        let end = end_at + MARKER_END.len();
-        if end >= start {
+    let starts = existing.matches(MARKER_START).count();
+    let ends = existing.matches(MARKER_END).count();
+
+    match (starts, ends) {
+        // First run: no managed block yet — append cleanly under user content.
+        (0, 0) => {
+            let mut out = existing.to_owned();
+            if !out.is_empty() && !out.ends_with('\n') {
+                out.push('\n');
+            }
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&block);
+            out.push('\n');
+            ManagedBlockOutcome::Updated(out)
+        }
+        // Exactly one of each — the only shape we replace in place, and only
+        // when START precedes END (a well-ordered, non-overlapping pair).
+        (1, 1) => {
+            let (Some(start), Some(end_at)) =
+                (existing.find(MARKER_START), existing.find(MARKER_END))
+            else {
+                return ManagedBlockOutcome::Anomaly("getdev managed markers are malformed");
+            };
+            if start >= end_at {
+                return ManagedBlockOutcome::Anomaly("getdev end marker precedes its start marker");
+            }
+            let end = end_at + MARKER_END.len();
             let mut out = String::with_capacity(existing.len() + block.len());
             out.push_str(&existing[..start]);
             out.push_str(&block);
             out.push_str(&existing[end..]);
-            return out;
+            if out == existing {
+                ManagedBlockOutcome::Unchanged
+            } else {
+                ManagedBlockOutcome::Updated(out)
+            }
         }
+        // Duplicated or orphaned markers — refuse to guess which span is ours.
+        _ => ManagedBlockOutcome::Anomaly("duplicated or orphaned getdev managed markers"),
     }
-    // No markers yet — append the block after the existing content, separated by
-    // a blank line so it reads cleanly under whatever the user already wrote.
-    let mut out = existing.to_owned();
-    if !out.is_empty() && !out.ends_with('\n') {
-        out.push('\n');
-    }
-    if !out.is_empty() {
-        out.push('\n');
-    }
-    out.push_str(&block);
-    out.push('\n');
-    out
 }
 
 /// Map the detected [`ShipStack`] onto the `[project] stack` config value,
@@ -387,5 +439,92 @@ impl getdev_core::mutate::PreMutateHook for AutoSnapHook<'_> {
         )
         .map(|_outcome| ())
         .map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{upsert_managed_block, ManagedBlockOutcome, MARKER_END, MARKER_START};
+
+    fn updated(existing: &str) -> String {
+        match upsert_managed_block(existing, "BODY") {
+            ManagedBlockOutcome::Updated(out) => out,
+            other => panic!("expected Updated, got {}", label(&other)),
+        }
+    }
+
+    fn label(o: &ManagedBlockOutcome) -> &'static str {
+        match o {
+            ManagedBlockOutcome::Unchanged => "Unchanged",
+            ManagedBlockOutcome::Updated(_) => "Updated",
+            ManagedBlockOutcome::Anomaly(_) => "Anomaly",
+        }
+    }
+
+    #[test]
+    fn appends_a_fresh_block_when_no_markers_present() {
+        let out = updated("# Notes\n\nkeep me\n");
+        assert_eq!(out.matches(MARKER_START).count(), 1);
+        assert_eq!(out.matches(MARKER_END).count(), 1);
+        assert!(out.starts_with("# Notes\n\nkeep me\n"));
+        assert!(out.contains("\nBODY\n"));
+    }
+
+    #[test]
+    fn appending_into_empty_content_needs_no_leading_blank_line() {
+        let out = updated("");
+        assert!(out.starts_with(MARKER_START), "no leading blank: {out:?}");
+    }
+
+    #[test]
+    fn replaces_a_well_ordered_pair_in_place_and_preserves_surrounding_bytes() {
+        let existing = format!("above\n{MARKER_START}\nOLD\n{MARKER_END}\nbelow\n");
+        let out = updated(&existing);
+        assert_eq!(
+            out,
+            format!("above\n{MARKER_START}\nBODY\n{MARKER_END}\nbelow\n")
+        );
+    }
+
+    #[test]
+    fn re_running_on_a_current_block_is_unchanged() {
+        let existing = format!("x\n{MARKER_START}\nBODY\n{MARKER_END}\ny\n");
+        assert!(matches!(
+            upsert_managed_block(&existing, "BODY"),
+            ManagedBlockOutcome::Unchanged
+        ));
+    }
+
+    #[test]
+    fn reversed_markers_are_an_anomaly_and_never_splice() {
+        // END before START — the pre-WR-03 guard could splice these and corrupt
+        // the file; now it is refused untouched.
+        let existing = format!("a\n{MARKER_END}\nuser stuff\n{MARKER_START}\nb\n");
+        assert!(matches!(
+            upsert_managed_block(&existing, "BODY"),
+            ManagedBlockOutcome::Anomaly(_)
+        ));
+    }
+
+    #[test]
+    fn a_stray_extra_start_marker_never_deletes_user_content() {
+        // A stray START in prose ABOVE the real block: first-find splicing would
+        // have deleted everything between the stray marker and the real END.
+        let existing = format!(
+            "intro mentioning {MARKER_START} in prose\n\nreal block:\n{MARKER_START}\nOLD\n{MARKER_END}\ntail\n"
+        );
+        assert!(matches!(
+            upsert_managed_block(&existing, "BODY"),
+            ManagedBlockOutcome::Anomaly(_)
+        ));
+    }
+
+    #[test]
+    fn an_orphaned_single_marker_is_an_anomaly() {
+        let existing = format!("only an opening marker\n{MARKER_START}\ntrailing\n");
+        assert!(matches!(
+            upsert_managed_block(&existing, "BODY"),
+            ManagedBlockOutcome::Anomaly(_)
+        ));
     }
 }
