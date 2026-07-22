@@ -34,7 +34,11 @@ struct ModuleListFile {
 pub fn node_builtins() -> Result<HashSet<String>, DepsError> {
     let file: ModuleListFile =
         serde_json::from_str(EMBEDDED_NODE_BUILTINS).map_err(|source| DepsError::Json {
-            path: PathBuf::from("rules/real/node-builtins.json"),
+            // IN-01: unambiguous repo-relative label for this compile-time-
+            // embedded dataset (a parse failure here is a build-time bug, never
+            // a user's file) — `rules/` alone was ambiguous after the pack moved
+            // under `crates/getdev-core/`.
+            path: PathBuf::from("crates/getdev-core/rules/real/node-builtins.json"),
             source,
         })?;
     Ok(file.modules.into_iter().collect())

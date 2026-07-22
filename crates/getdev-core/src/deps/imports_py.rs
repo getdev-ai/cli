@@ -29,7 +29,8 @@ struct ModuleListFile {
 pub fn python_stdlib() -> Result<HashSet<String>, DepsError> {
     let file: ModuleListFile =
         serde_json::from_str(EMBEDDED_PYTHON_STDLIB).map_err(|source| DepsError::Json {
-            path: PathBuf::from("rules/real/python-stdlib.json"),
+            // IN-01: unambiguous repo-relative label for this embedded dataset.
+            path: PathBuf::from("crates/getdev-core/rules/real/python-stdlib.json"),
             source,
         })?;
     Ok(file.modules.into_iter().collect())
@@ -53,7 +54,8 @@ struct ImportAliasFile {
 pub fn python_import_aliases() -> Result<HashMap<String, Vec<String>>, DepsError> {
     let file: ImportAliasFile =
         serde_json::from_str(EMBEDDED_PY_IMPORT_ALIASES).map_err(|source| DepsError::Json {
-            path: PathBuf::from("rules/real/py-import-aliases.json"),
+            // IN-01: unambiguous repo-relative label for this embedded dataset.
+            path: PathBuf::from("crates/getdev-core/rules/real/py-import-aliases.json"),
             source,
         })?;
     Ok(file.aliases)
