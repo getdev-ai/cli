@@ -75,6 +75,14 @@ Notes:
 generated sections; regenerate on cargo-dist upgrades and review the diff. Trigger: tags
 matching `v*`. Full behavior documented in [RELEASING.md](RELEASING.md).
 
+> **Post-generate patch (WR-02) — re-apply after any `dist generate`.** The four publish jobs
+> (`publish-homebrew-formula`, `publish-npm`, `getdev-bump-scoop`, `getdev-publish-crates`) each
+> carry `getdev-sign-sbom-size` in their `needs:`, so registry publishing is gated behind the
+> 25 MB size gate + cosign signature. Without it, the gate runs in parallel with the publishes
+> and an oversized or unsignable build could still reach npm/crates.io/Homebrew/Scoop. `dist
+> generate` rewrites the two cargo-dist-native jobs (homebrew, npm) and will drop this `needs`
+> entry — re-add it and re-diff.
+
 Required permissions on the release workflow (the generated jobs set `attestations`/`id-token`
 per-job for the attestation step; the custom self-update-signing job needs `contents: write`):
 

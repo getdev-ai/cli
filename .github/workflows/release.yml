@@ -294,6 +294,10 @@ jobs:
     needs:
       - plan
       - host
+      # WR-02: gate registry publishing behind the 25 MB size gate + cosign
+      # signature. Without this, an oversized/unsignable build could publish to
+      # Homebrew in parallel with the gate. Re-apply after any `dist generate`.
+      - getdev-sign-sbom-size
     runs-on: "ubuntu-22.04"
     # GHA-002: the cross-repo tap-push token sits behind the required-reviewer
     # `release` environment gate, so a compromised PR can never reach it.
@@ -348,6 +352,10 @@ jobs:
     needs:
       - plan
       - host
+      # WR-02: gate registry publishing behind the 25 MB size gate + cosign
+      # signature. Without this, an oversized/unsignable build could publish to
+      # npm in parallel with the gate. Re-apply after any `dist generate`.
+      - getdev-sign-sbom-size
     runs-on: "ubuntu-22.04"
     # npm Trusted Publishing (OIDC): the npm package's trusted publisher is
     # bound to getdev-ai/cli + release.yml + the `release` environment — no
@@ -598,7 +606,10 @@ jobs:
     needs:
       - plan
       - host
-    if: ${{ needs.plan.outputs.publishing == 'true' && needs.host.result == 'success' }}
+      # WR-02: never bump the Scoop manifest for a build that failed the 25 MB
+      # size gate or could not be cosign-signed.
+      - getdev-sign-sbom-size
+    if: ${{ needs.plan.outputs.publishing == 'true' && needs.host.result == 'success' && needs.getdev-sign-sbom-size.result == 'success' }}
     runs-on: "ubuntu-22.04"
     # GHA-002: the cross-repo SCOOP_BUCKET_TOKEN sits behind the required-reviewer
     # `release` environment gate. GHA-001: checkouts pinned to a full commit SHA.
@@ -675,7 +686,11 @@ jobs:
     needs:
       - plan
       - host
-    if: ${{ needs.plan.outputs.publishing == 'true' && needs.host.result == 'success' }}
+      # WR-02: crates.io publishing is irreversible (a version can be yanked but
+      # never re-used). Gate it behind the 25 MB size gate + cosign signature so
+      # an oversized/unsignable build can never reach the registry.
+      - getdev-sign-sbom-size
+    if: ${{ needs.plan.outputs.publishing == 'true' && needs.host.result == 'success' && needs.getdev-sign-sbom-size.result == 'success' }}
     runs-on: "ubuntu-22.04"
     environment: release
     env:
