@@ -32,6 +32,7 @@ use getdev_core::report::{self, ColorMode};
 use getdev_core::review::{self, ReviewOptions};
 use getdev_core::rules;
 use getdev_core::scan::ScanContext;
+use getdev_core::ship;
 use getdev_core::suppress;
 
 use crate::commands::real;
@@ -190,7 +191,15 @@ pub fn run(args: &CheckArgs) -> anyhow::Result<u8> {
         env!("CARGO_PKG_VERSION"),
         ProjectInfo {
             path: display_path(&args.path),
-            stack: Vec::new(),
+            // B-02: populate the detected stack (reusing ship::detect_stack over
+            // the SAME dependency graph the analyzer legs used — no second walk)
+            // so `check --json` reports `project.stack` like `ship` does,
+            // instead of an empty list. `Unknown` → `[]` (undetected).
+            stack: ship::detect_stack(&graph, &args.path)
+                .identifiers()
+                .iter()
+                .map(|id| (*id).to_owned())
+                .collect(),
         },
         findings,
     );

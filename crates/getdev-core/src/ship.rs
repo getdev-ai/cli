@@ -75,6 +75,24 @@ impl ShipStack {
             Self::Unknown => "unknown",
         }
     }
+
+    /// The `project.stack` identifier list for a findings report
+    /// (docs/SPEC-FINDINGS.md: `string[]`, e.g. `["node", "nextjs"]`) — the
+    /// language root plus any detected framework, most-general first. `Unknown`
+    /// is the empty list ("undetected"). Coarser than [`as_str`](Self::as_str)'s
+    /// single banner label on purpose: consumers filter on the individual
+    /// identifiers.
+    #[must_use]
+    pub fn identifiers(self) -> &'static [&'static str] {
+        match self {
+            Self::NodeNextjs => &["node", "nextjs"],
+            Self::Node => &["node"],
+            Self::Fastapi => &["python", "fastapi"],
+            Self::Flask => &["python", "flask"],
+            Self::Django => &["python", "django"],
+            Self::Unknown => &[],
+        }
+    }
 }
 
 /// The deployment target a `SHIP.md` checklist is tailored for. Mirrors the

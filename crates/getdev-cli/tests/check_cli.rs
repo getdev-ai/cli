@@ -123,6 +123,20 @@ fn check_json_aggregates_four_analyzers() {
         "the seeded Missing package must surface, got {ids:?}"
     );
 
+    // B-02: `check --json` populates `project.stack` (it used to be an empty
+    // list even when `ship` detected the stack on the same tree). A project
+    // with a `package.json` detects at least `node`.
+    let stack: Vec<String> = report["project"]["stack"]
+        .as_array()
+        .expect("project.stack must be an array")
+        .iter()
+        .map(|v| v.as_str().unwrap_or_default().to_owned())
+        .collect();
+    assert!(
+        stack.iter().any(|s| s == "node"),
+        "check --json must report the detected stack (expected 'node'), got {stack:?}"
+    );
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 
