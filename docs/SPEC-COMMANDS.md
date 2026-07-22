@@ -38,8 +38,8 @@ color — identical under `--no-color`/`NO_COLOR`/piped output.
 ```
 $ getdev check
 ┌─ getdev check ───────────────────────────────┐
-│  Ship Score: 43/100                          │
-│  2 critical · 3 high · 5 medium · 4 low      │
+│  Ship Score: 35/100                          │
+│  2 critical · 1 high · 1 medium · 1 low      │
 └──────────────────────────────────────────────┘
 requirements.txt — 1 finding · 1 critical
          4 ✖ critical 'requests-auth-helper' does not exist on PyPI  real/nonexistent-package
