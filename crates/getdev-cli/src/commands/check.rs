@@ -39,6 +39,8 @@ use crate::commands::real;
 pub struct CheckArgs {
     pub path: PathBuf,
     pub json: bool,
+    /// Write the full JSON report here; terminal keeps a short summary (global flag).
+    pub output: Option<std::path::PathBuf>,
     pub no_color: bool,
     pub fail_on: Option<Severity>,
     /// Never hit the network; use cache only (global flag, resolved once by
@@ -192,7 +194,9 @@ pub fn run(args: &CheckArgs) -> anyhow::Result<u8> {
     // command that ever sets a Ship Score (every other leaves it `None`).
     report.score = Some(report::ship_score(&report.summary));
 
-    if args.json {
+    if let Some(out_path) = args.output.as_deref() {
+        super::emit_report_file(&report, out_path, args.json, args.no_color)?;
+    } else if args.json {
         // `score` rides in the JSON envelope (docs/SPEC-FINDINGS.md).
         print!("{}", report::render_json(&report)?);
     } else {

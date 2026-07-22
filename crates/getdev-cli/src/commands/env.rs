@@ -13,6 +13,8 @@ use getdev_core::suppress;
 pub struct EnvArgs {
     pub path: std::path::PathBuf,
     pub json: bool,
+    /// Write the full JSON report here; terminal keeps a short summary (global flag).
+    pub output: Option<std::path::PathBuf>,
     pub no_color: bool,
     pub fail_on: Option<Severity>,
     pub env_file: String,
@@ -151,7 +153,9 @@ pub fn run(args: &EnvArgs) -> anyhow::Result<u8> {
         });
     }
 
-    if args.json {
+    if let Some(out_path) = args.output.as_deref() {
+        super::emit_report_file(&report, out_path, args.json, args.no_color)?;
+    } else if args.json {
         print!("{}", report::render_json(&report)?);
     } else {
         let color = ColorMode::resolve(args.no_color, std::io::stdout().is_terminal());
@@ -377,6 +381,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.snap.auto_snap_before_fix = auto_snap;
         EnvArgs {
+            output: None,
             path: dir.to_path_buf(),
             json: false,
             no_color: true,
@@ -562,6 +567,7 @@ mod tests {
         cfg.ignore.paths = vec!["fixture.js".to_owned()];
 
         let args = EnvArgs {
+            output: None,
             path: dir.clone(),
             json: false,
             no_color: true,

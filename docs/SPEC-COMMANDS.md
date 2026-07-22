@@ -6,6 +6,8 @@ Normative behavior spec for every getdev command in v0.1: synopsis, behavior, fl
 
 Global flags (`--json`, `--quiet`, `--verbose`, `--no-color`, `--config`, `--path`, `--fail-on`, `--fix`, `--offline`, `--version`, `--help`) apply to every command and live in `docs/PLAN.md` §2.2, together with the exit-code contract (0 clean · 1 findings ≥ `--fail-on` · 2 execution error · 3 config error).
 
+`-o/--output <FILE>` (v0.1.3, findings commands: `check`/`real`/`audit`/`review`/`env`/`ship`): write the full JSON report (docs/SPEC-FINDINGS.md schema) to FILE while the terminal keeps a short summary — banner + top-3 (check) and the one-line tally, ending with `full report → FILE (N finding(s) · K KB)`. Combined with `--json`, stdout prints only the file path (script-friendly). The file is an explicitly requested artifact — no `--write` gate, overwrite allowed (eslint/trivy `-o` semantics). There is deliberately NO interactive output-format prompt: prompts after a computed report break CI/pipes and determinism; the >25-findings terminal render appends a one-line `-o` tip instead. Format selection beyond JSON (e.g. SARIF) remains the v0.5 `--format` roadmap item.
+
 Cross-cutting contracts:
 - **Mutation:** no command mutates project files without explicit `--write`/`--fix`; all mutations go through `core::mutate` (see `docs/ARCHITECTURE.md`).
 - **Network:** only `real`, `check` (via real), `doctor` (optional reachability/version check), and `update` may touch the network; destinations limited to npm registry, PyPI, GitHub Releases. `--offline` disables all.

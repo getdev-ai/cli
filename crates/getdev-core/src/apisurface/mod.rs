@@ -412,6 +412,7 @@ mod tests {
         DependencyGraph {
             declared,
             direct: BTreeMap::new(),
+            declared_in: BTreeMap::new(),
             imports: Vec::new(),
             unsupported_stack: None,
         }

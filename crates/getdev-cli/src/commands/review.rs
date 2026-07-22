@@ -24,6 +24,8 @@ use getdev_core::suppress;
 pub struct ReviewArgs {
     pub path: PathBuf,
     pub json: bool,
+    /// Write the full JSON report here; terminal keeps a short summary (global flag).
+    pub output: Option<std::path::PathBuf>,
     pub no_color: bool,
     pub fail_on: Option<Severity>,
     /// The display/reporting floor. Review has no `--severity` flag or config
@@ -93,7 +95,9 @@ pub fn run(args: &ReviewArgs) -> anyhow::Result<u8> {
         })
         .collect();
 
-    if args.json {
+    if let Some(out_path) = args.output.as_deref() {
+        super::emit_report_file(&report, out_path, args.json, args.no_color)?;
+    } else if args.json {
         print!("{}", report::render_json(&report)?);
     } else {
         let color = ColorMode::resolve(args.no_color, std::io::stdout().is_terminal());

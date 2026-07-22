@@ -35,6 +35,10 @@ struct GlobalArgs {
     /// Machine-readable output (findings schema, docs/SPEC-FINDINGS.md)
     #[arg(long, global = true)]
     json: bool,
+    /// Write the full JSON report to FILE; the terminal keeps a short
+    /// summary (with --json: only the file path is printed)
+    #[arg(long, short = 'o', global = true, value_name = "FILE")]
+    output: Option<PathBuf>,
     /// Suppress banner/progress; findings only
     #[arg(long, short = 'q', global = true, conflicts_with = "verbose")]
     quiet: bool,
@@ -72,6 +76,7 @@ impl Default for GlobalArgs {
     fn default() -> Self {
         Self {
             json: false,
+            output: None,
             quiet: false,
             verbose: 0,
             no_color: false,
@@ -317,6 +322,7 @@ fn run(cli: Cli) -> anyhow::Result<u8> {
     let quiet = cli.global.quiet;
     let verbose = cli.global.verbose;
     let json = cli.global.json;
+    let output = cli.global.output.clone();
     let no_color = cli.global.no_color;
     let fail_on = cli.global.fail_on;
     let path = cli.global.path.clone();
@@ -331,6 +337,7 @@ fn run(cli: Cli) -> anyhow::Result<u8> {
         Command::Check => commands::check::run(&commands::check::CheckArgs {
             path,
             json,
+            output: output.clone(),
             no_color,
             fail_on,
             offline,
@@ -361,6 +368,7 @@ fn run(cli: Cli) -> anyhow::Result<u8> {
             commands::env::run(&commands::env::EnvArgs {
                 path,
                 json,
+                output: output.clone(),
                 no_color,
                 fail_on,
                 env_file,
@@ -378,6 +386,7 @@ fn run(cli: Cli) -> anyhow::Result<u8> {
         } => commands::real::run(&commands::real::RealArgs {
             path,
             json,
+            output: output.clone(),
             no_color,
             fail_on,
             offline,
@@ -399,6 +408,7 @@ fn run(cli: Cli) -> anyhow::Result<u8> {
             commands::audit::run(&commands::audit::AuditArgs {
                 path,
                 json,
+                output: output.clone(),
                 no_color,
                 fail_on,
                 severity_min,
@@ -445,6 +455,7 @@ fn run(cli: Cli) -> anyhow::Result<u8> {
             commands::review::run(&commands::review::ReviewArgs {
                 path,
                 json,
+                output: output.clone(),
                 no_color,
                 fail_on,
                 // Review has no `--severity` flag/config — report every
@@ -469,6 +480,7 @@ fn run(cli: Cli) -> anyhow::Result<u8> {
             target: target.map(Into::into),
             run_build,
             json,
+            output: output.clone(),
             no_color,
             fail_on,
             cfg: cfg.clone(),

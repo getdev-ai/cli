@@ -236,6 +236,7 @@ mod tests {
         // env --write: mutates both source files AND records a pre-mutation
         // auto-snap (05-05).
         crate::commands::env::run(&crate::commands::env::EnvArgs {
+            output: None,
             path: dir.clone(),
             json: false,
             no_color: true,

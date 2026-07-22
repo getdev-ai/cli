@@ -125,6 +125,17 @@ pub fn render_terminal(report: &FindingsReport, color: ColorMode) -> String {
         }
     }
 
+    // A very long terminal report is better read from a file — point at `-o`
+    // once the list stops being scannable (threshold, not truncation: CI logs
+    // and grep keep the complete output either way).
+    if report.findings.len() > LONG_REPORT_HINT_THRESHOLD {
+        let _ = writeln!(
+            out,
+            "\ntip: {} findings — write the full JSON report to a file with: -o report.json",
+            report.findings.len()
+        );
+    }
+
     if report.score.is_some() {
         render_top_three(&mut out, &report.findings);
         let fixable = report.summary.fixable;
@@ -148,6 +159,33 @@ pub fn render_terminal(report: &FindingsReport, color: ColorMode) -> String {
             s.fixable
         );
     }
+    out
+}
+
+/// Findings count past which the full terminal render appends the `-o` tip.
+const LONG_REPORT_HINT_THRESHOLD: usize = 25;
+
+/// Short terminal companion for `-o/--output` runs: the score banner and
+/// top-3 when present (`check`), the one-line tally always — the full
+/// findings list lives in the report file, so the terminal stays scannable.
+pub fn render_terminal_short(report: &FindingsReport) -> String {
+    let mut out = String::new();
+    if let Some(score) = report.score {
+        render_score_banner(&mut out, &report.summary, score);
+        render_top_three(&mut out, &report.findings);
+    }
+    let s = &report.summary;
+    let _ = writeln!(
+        out,
+        "{} finding(s): {} critical · {} high · {} medium · {} low · {} info ({} fixable)",
+        s.total(),
+        s.critical,
+        s.high,
+        s.medium,
+        s.low,
+        s.info,
+        s.fixable
+    );
     out
 }
 
