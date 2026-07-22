@@ -350,6 +350,12 @@ pub fn load_embedded_review() -> Result<RulePack, RuleLoadError> {
 /// Shared body for both embedded-pack loaders: walk one `Dir<'static>`'s
 /// `.yaml` files (skipping `schema.json` and anything else), parse + validate
 /// + compile each, ANY error fatal.
+///
+/// The `schema.json` each pack dir carries is NOT a rule — it is the shared
+/// rule JSON Schema (audit's copy is embedded as `schema::SCHEMA_JSON` and is
+/// the single authority every rule in BOTH packs validates against; review's is
+/// a byte-identical editor/reference mirror, guarded by a drift test). It is
+/// skipped here by the non-`.yaml` filter.
 fn load_embedded_dir(dir: &Dir<'static>) -> Result<RulePack, RuleLoadError> {
     let mut pack = RulePack::new();
     for file in dir.files() {

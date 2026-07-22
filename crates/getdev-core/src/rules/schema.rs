@@ -78,6 +78,23 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// IN-04: `rules/review/schema.json` is an intentional byte-identical mirror
+    /// of the audit rule schema (the single validation authority — the loader
+    /// validates BOTH the audit and review packs against `SCHEMA_JSON`, and
+    /// skips each pack dir's own `schema.json` as a non-rule file). It ships in
+    /// the review dir purely as an editor/reference schema for contributors.
+    /// This guard fails the moment the two copies drift, so the mirror can never
+    /// silently diverge from what the loader actually enforces.
+    #[test]
+    fn review_schema_mirror_is_byte_identical_to_the_audit_schema() {
+        const REVIEW_SCHEMA_JSON: &str = include_str!("../../rules/review/schema.json");
+        assert_eq!(
+            SCHEMA_JSON, REVIEW_SCHEMA_JSON,
+            "rules/review/schema.json must stay byte-identical to rules/audit/schema.json \
+             (the single schema the loader enforces); update both together or drop the mirror"
+        );
+    }
+
     #[test]
     fn valid_rule_passes_schema() {
         let value = json!({

@@ -158,8 +158,11 @@ else
 fi
 
 # Extract "name": "url" pairs from the release assets (portable, no jq).
-asset_url() { # asset-name-or-suffix  ->  browser_download_url
-  # matches the browser_download_url whose tail matches the argument
+# IN-02: the argument is a POSIX ERE matched against each browser_download_url,
+# NOT a literal suffix — the caller must escape regex metacharacters (`.` → `\.`)
+# and anchor with `$` as the current call sites do. Kept as an ERE (not a
+# `grep -F` literal) so the `$`-anchored suffix match stays exact.
+asset_url() { # <ERE matched against the asset URL>  ->  browser_download_url
   grep -o '"browser_download_url": *"[^"]*"' "$REL_JSON" 2>/dev/null \
     | sed 's/.*"browser_download_url": *"//; s/"$//' \
     | grep -E "$1" | head -n1

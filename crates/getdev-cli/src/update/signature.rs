@@ -170,6 +170,13 @@ mod tests {
     // The committed REAL keyed-cosign vector (see
     // testdata/update/signature/README.md). Paths are relative to THIS source
     // file: crates/getdev-cli/src/update/ → repo root is four levels up.
+    //
+    // IN-03: this testdata lives at the REPO ROOT, outside the published crate
+    // package, so these `#[cfg(test)]` includes are compiled only in a workspace
+    // checkout. `cargo publish` verifies with a plain (non-test) build, so
+    // publishing is unaffected; only running `cargo test` from an unpacked
+    // crates.io tarball (no repo tree) would fail to compile this module — an
+    // accepted, documented limitation, not a shipping bug.
     const MANIFEST: &[u8] = include_bytes!("../../../../testdata/update/signature/SHA256SUMS");
     const SIGNATURE: &str = include_str!("../../../../testdata/update/signature/SHA256SUMS.sig");
     const PUBKEY: &str = include_str!("../../../../testdata/update/signature/cosign.pub");
