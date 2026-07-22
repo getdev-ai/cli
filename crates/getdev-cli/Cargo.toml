@@ -29,7 +29,6 @@ clap = { workspace = true }
 # Interactive prompts for `getdev init`'s offer-steps (Confirm only). Default
 # features (editor/password/zeroize/tempfile) are unused here, so trim them —
 # `Confirm` lives in the base crate. Legitimacy verdict OK (07-RESEARCH).
-dialoguer = { version = "0.12.0", default-features = false }
 getdev-core = { workspace = true }
 getdev-gitx = { workspace = true }
 getdev-grammars = { workspace = true }

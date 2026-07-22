@@ -223,18 +223,37 @@ pub fn run(args: &InitArgs) -> anyhow::Result<u8> {
 }
 
 /// Offer a yes/no step: `--yes` takes the documented default (yes) and bypasses
-/// the prompt entirely (CI-safe); otherwise ask via `dialoguer::Confirm`
-/// (default yes). A prompt error (e.g. no TTY without `--yes`) surfaces as an
-/// `anyhow` error at the CLI boundary.
+/// the prompt entirely (CI-safe); otherwise ask a plain line-based `[Y/n]`
+/// question on stdout. Deliberately NOT a raw-mode prompt library: raw mode
+/// hides the cursor, swallows unechoed keystrokes, and renders to stderr —
+/// when any of that misfires the user sees a blank line that eats typing and
+/// concludes the program hung (observed in the field on v0.1.2, which used
+/// `dialoguer`). A flushed stdout prompt + `read_line` echoes what the user
+/// types, accepts Enter for the default, and behaves identically in every
+/// terminal. Non-TTY stdin/stdout without `--yes` skips the offer (answer
+/// no) instead of blocking on input that can never arrive; EOF (ctrl-d)
+/// likewise answers no.
 fn offer(prompt: &str, yes: bool) -> anyhow::Result<bool> {
+    use std::io::{IsTerminal as _, Write as _};
     if yes {
         return Ok(true);
     }
-    let confirmed = dialoguer::Confirm::new()
-        .with_prompt(prompt)
-        .default(true)
-        .interact()?;
-    Ok(confirmed)
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        println!("{prompt} — skipped (non-interactive; pass --yes to accept offers)");
+        return Ok(false);
+    }
+    let mut stdout = std::io::stdout();
+    write!(stdout, "{prompt} [Y/n]: ")?;
+    stdout.flush()?;
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line)? == 0 {
+        println!();
+        return Ok(false);
+    }
+    Ok(matches!(
+        line.trim().to_ascii_lowercase().as_str(),
+        "" | "y" | "yes"
+    ))
 }
 
 /// Idempotent marker-delimited upsert (pure string transform, no I/O): replace
