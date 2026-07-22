@@ -23,10 +23,22 @@ pub use manifest_py::{declared_pypi, normalize_pep503};
 
 /// `(all declared names, direct/manifest-only subset, skip list)` — shared
 /// return shape for `manifest_js::declared_npm`/`manifest_py::declared_pypi`
-/// (F5). A named alias rather than an inline 3-tuple-in-a-Result to keep
-/// clippy's `type_complexity` lint happy.
-pub(crate) type DeclaredNamesResult =
-    Result<(BTreeSet<String>, BTreeSet<String>, Vec<ScanError>), DepsError>;
+/// (F5). A named alias rather than an inline tuple-in-a-Result to keep
+/// clippy's `type_complexity` lint happy. The `BTreeMap<String, String>` is
+/// name → root-relative display path of the manifest/lockfile that first
+/// declared it (manifests are parsed before lockfiles, so a direct manifest
+/// wins) — the provenance `real` reports for declared-but-never-imported
+/// packages instead of a bare basename that no `[ignore] paths` prefix or
+/// monorepo triage can resolve.
+pub(crate) type DeclaredNamesResult = Result<
+    (
+        BTreeSet<String>,
+        BTreeSet<String>,
+        BTreeMap<String, String>,
+        Vec<ScanError>,
+    ),
+    DepsError,
+>;
 
 /// Bound on recursive manifest/lockfile discovery (A4): deep enough to find
 /// a realistic monorepo/service layout (`backend/requirements.txt`,
@@ -179,6 +191,13 @@ pub struct DependencyGraph {
     /// to `direct` (plus imported names) to avoid scoring thousands of
     /// transitives on every run (F5, interacts with E1's DoS guard).
     pub direct: BTreeMap<Ecosystem, BTreeSet<String>>,
+    /// Name → root-relative display path of the manifest/lockfile that FIRST
+    /// declared it (manifests parsed before lockfiles, so a direct manifest
+    /// wins). Consumers report this as the finding location for a declared
+    /// package with no import site — a real path that `[ignore] paths` prefix
+    /// filters and monorepo triage can actually resolve, instead of a bare
+    /// `package.json`/`requirements.txt` basename.
+    pub declared_in: BTreeMap<Ecosystem, BTreeMap<String, String>>,
     pub imports: Vec<ImportRef>,
     pub unsupported_stack: Option<StackHint>,
 }
@@ -251,8 +270,10 @@ pub fn build_graph_with_context(
     ctx: &ScanContext,
     root: &Path,
 ) -> Result<(DependencyGraph, Vec<ScanError>), DepsError> {
-    let (declared_npm_set, direct_npm_set, npm_skipped) = manifest_js::declared_npm(root)?;
-    let (declared_pypi_set, direct_pypi_set, pypi_skipped) = manifest_py::declared_pypi(root)?;
+    let (declared_npm_set, direct_npm_set, npm_declared_in, npm_skipped) =
+        manifest_js::declared_npm(root)?;
+    let (declared_pypi_set, direct_pypi_set, pypi_declared_in, pypi_skipped) =
+        manifest_py::declared_pypi(root)?;
 
     let node_builtins = imports_js::node_builtins()?;
     let python_stdlib = imports_py::python_stdlib()?;
@@ -340,10 +361,15 @@ pub fn build_graph_with_context(
     direct.insert(Ecosystem::Npm, direct_npm_set);
     direct.insert(Ecosystem::Pypi, direct_pypi_set);
 
+    let mut declared_in = BTreeMap::new();
+    declared_in.insert(Ecosystem::Npm, npm_declared_in);
+    declared_in.insert(Ecosystem::Pypi, pypi_declared_in);
+
     Ok((
         DependencyGraph {
             declared,
             direct,
+            declared_in,
             imports,
             unsupported_stack,
         },

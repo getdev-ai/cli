@@ -2,10 +2,10 @@
 //! normalized (Pitfall 3 — `Django`/`django`/`DJANGO` must collapse to one
 //! entry, or downstream registry lookups triple their work for nothing).
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use super::{discover_manifests, record_or_fail, DeclaredNamesResult, DepsError};
+use super::{discover_manifests, record_or_fail, relative_display, DeclaredNamesResult, DepsError};
 
 /// Depth cap on `-r`/`--requirement` include resolution (F8): deep enough
 /// for a realistic split (`requirements.txt` -> `base.txt` -> `common.txt`)
@@ -25,7 +25,20 @@ const MAX_REQUIREMENTS_INCLUDE_DEPTH: usize = 3;
 pub fn declared_pypi(root: &Path) -> DeclaredNamesResult {
     let mut raw = Vec::new();
     let mut direct_raw = Vec::new();
+    let mut declared_in = BTreeMap::new();
     let mut skipped = Vec::new();
+
+    // `declared_in` records the FIRST file that declared each (PEP 503
+    // normalized) name; manifests are parsed before lockfiles, so a direct
+    // requirements.txt/pyproject.toml wins over the lockfile echo.
+    let record_origin =
+        |declared_in: &mut BTreeMap<String, String>, found: &[String], path: &Path| {
+            for name in found {
+                declared_in
+                    .entry(normalize_pep503(name))
+                    .or_insert_with(|| relative_display(path, root));
+            }
+        };
 
     for path in discover_manifests(root, "requirements.txt") {
         match std::fs::read_to_string(&path) {
@@ -38,6 +51,7 @@ pub fn declared_pypi(root: &Path) -> DeclaredNamesResult {
                     &mut visited,
                     MAX_REQUIREMENTS_INCLUDE_DEPTH,
                 );
+                record_origin(&mut declared_in, &found, &path);
                 direct_raw.extend(found.iter().cloned());
                 raw.extend(found);
             }
@@ -50,6 +64,7 @@ pub fn declared_pypi(root: &Path) -> DeclaredNamesResult {
         match read_optional(&path) {
             Ok(Some(text)) => match pyproject_deps(&text, &path) {
                 Ok(found) => {
+                    record_origin(&mut declared_in, &found, &path);
                     direct_raw.extend(found.iter().cloned());
                     raw.extend(found);
                 }
@@ -63,7 +78,10 @@ pub fn declared_pypi(root: &Path) -> DeclaredNamesResult {
     for path in discover_manifests(root, "poetry.lock") {
         match read_optional(&path) {
             Ok(Some(text)) => match toml_lock_package_names(&text, &path) {
-                Ok(found) => raw.extend(found),
+                Ok(found) => {
+                    record_origin(&mut declared_in, &found, &path);
+                    raw.extend(found);
+                }
                 Err(err) => record_or_fail(err, &path, &mut skipped)?,
             },
             Ok(None) => {}
@@ -74,7 +92,10 @@ pub fn declared_pypi(root: &Path) -> DeclaredNamesResult {
     for path in discover_manifests(root, "uv.lock") {
         match read_optional(&path) {
             Ok(Some(text)) => match toml_lock_package_names(&text, &path) {
-                Ok(found) => raw.extend(found),
+                Ok(found) => {
+                    record_origin(&mut declared_in, &found, &path);
+                    raw.extend(found);
+                }
                 Err(err) => record_or_fail(err, &path, &mut skipped)?,
             },
             Ok(None) => {}
@@ -88,6 +109,7 @@ pub fn declared_pypi(root: &Path) -> DeclaredNamesResult {
             .iter()
             .map(|name| normalize_pep503(name))
             .collect(),
+        declared_in,
         skipped,
     ))
 }
@@ -390,7 +412,7 @@ mod tests {
         )
         .unwrap();
 
-        let (names, _direct, skipped) = declared_pypi(&dir).unwrap();
+        let (names, _direct, _declared_in, skipped) = declared_pypi(&dir).unwrap();
         assert!(skipped.is_empty());
         assert_eq!(
             names,
@@ -413,7 +435,7 @@ mod tests {
         )
         .unwrap();
 
-        let (names, _direct, skipped) = declared_pypi(&dir).unwrap();
+        let (names, _direct, _declared_in, skipped) = declared_pypi(&dir).unwrap();
         assert!(skipped.is_empty());
         assert_eq!(
             names,
@@ -436,7 +458,7 @@ mod tests {
         )
         .unwrap();
 
-        let (names, _direct, skipped) = declared_pypi(&dir).unwrap();
+        let (names, _direct, _declared_in, skipped) = declared_pypi(&dir).unwrap();
         assert!(skipped.is_empty());
         assert_eq!(names, BTreeSet::from(["django".to_owned()]));
     }
@@ -453,7 +475,7 @@ mod tests {
         )
         .unwrap();
 
-        let (names, _direct, skipped) = declared_pypi(&dir).unwrap();
+        let (names, _direct, _declared_in, skipped) = declared_pypi(&dir).unwrap();
         assert!(skipped.is_empty());
         assert_eq!(names, BTreeSet::from(["flask".to_owned()]));
     }
@@ -473,7 +495,7 @@ mod tests {
         )
         .unwrap();
 
-        let (names, _direct, skipped) = declared_pypi(&dir).unwrap();
+        let (names, _direct, _declared_in, skipped) = declared_pypi(&dir).unwrap();
         assert!(skipped.is_empty());
         assert_eq!(
             names,
@@ -502,7 +524,7 @@ mod tests {
         )
         .unwrap();
 
-        let (names, direct, skipped) = declared_pypi(&dir).unwrap();
+        let (names, direct, _declared_in, skipped) = declared_pypi(&dir).unwrap();
         assert!(skipped.is_empty());
         assert_eq!(
             names,
@@ -518,7 +540,7 @@ mod tests {
     #[test]
     fn absent_project_yields_empty_set_not_an_error() {
         let dir = tempdir("empty");
-        let (names, _direct, skipped) = declared_pypi(&dir).unwrap();
+        let (names, _direct, _declared_in, skipped) = declared_pypi(&dir).unwrap();
         assert!(skipped.is_empty());
         assert!(names.is_empty());
     }

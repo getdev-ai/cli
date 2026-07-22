@@ -294,7 +294,20 @@ fn run_deps_group(
         });
         let (file, line) = match import_site {
             Some(imp) => (imp.file.clone(), Some(imp.line)),
-            None => (default_manifest_file(eco).to_owned(), None),
+            // Declared but never imported: report the actual manifest that
+            // declared it (root-relative — resolvable by monorepo triage and
+            // `[ignore] paths` prefixes alike). The bare-basename default only
+            // survives as a last resort for lockfile dialects that predate
+            // `declared_in` tracking.
+            None => (
+                graph
+                    .declared_in
+                    .get(&eco)
+                    .and_then(|origins| origins.get(&name))
+                    .cloned()
+                    .unwrap_or_else(|| default_manifest_file(eco).to_owned()),
+                None,
+            ),
         };
         // A15: `declared` reflects actual manifest membership now, not a
         // hardcoded `true` — a Phantom-resolution import added to `names`

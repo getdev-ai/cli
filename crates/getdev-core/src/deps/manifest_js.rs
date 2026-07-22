@@ -5,12 +5,12 @@
 //! unrecognized or absent lockfile must never silently yield an empty set),
 //! and whichever lockfile is present contributes additional names on top.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use serde_json::{Map, Value};
 
-use super::{discover_manifests, record_or_fail, DeclaredNamesResult, DepsError};
+use super::{discover_manifests, record_or_fail, relative_display, DeclaredNamesResult, DepsError};
 
 /// Parse every JS/TS manifest/lockfile dialect present anywhere under `root`
 /// (bounded-depth recursive discovery — A4) and return the union of
@@ -23,12 +23,26 @@ use super::{discover_manifests, record_or_fail, DeclaredNamesResult, DepsError};
 pub fn declared_npm(root: &Path) -> DeclaredNamesResult {
     let mut names = BTreeSet::new();
     let mut direct = BTreeSet::new();
+    let mut declared_in = BTreeMap::new();
     let mut skipped = Vec::new();
+
+    // `declared_in` records the FIRST file that declared each name; manifests
+    // are parsed before lockfiles, so a direct package.json wins over the
+    // lockfile echo of the same dependency.
+    let record_origin =
+        |declared_in: &mut BTreeMap<String, String>, found: &BTreeSet<String>, path: &Path| {
+            for name in found {
+                declared_in
+                    .entry(name.clone())
+                    .or_insert_with(|| relative_display(path, root));
+            }
+        };
 
     for path in discover_manifests(root, "package.json") {
         match read_json(&path) {
             Ok(Some(pkg)) => {
                 let found = package_json_deps(&pkg);
+                record_origin(&mut declared_in, &found, &path);
                 direct.extend(found.iter().cloned());
                 names.extend(found);
             }
@@ -39,7 +53,11 @@ pub fn declared_npm(root: &Path) -> DeclaredNamesResult {
 
     for path in discover_manifests(root, "package-lock.json") {
         match read_json(&path) {
-            Ok(Some(lock)) => names.extend(package_lock_deps(&lock)),
+            Ok(Some(lock)) => {
+                let found = package_lock_deps(&lock);
+                record_origin(&mut declared_in, &found, &path);
+                names.extend(found);
+            }
             Ok(None) => {}
             Err(err) => record_or_fail(err, &path, &mut skipped)?,
         }
@@ -48,7 +66,10 @@ pub fn declared_npm(root: &Path) -> DeclaredNamesResult {
     for path in discover_manifests(root, "pnpm-lock.yaml") {
         match read_optional(&path) {
             Ok(Some(text)) => match pnpm_lock_deps(&text, &path) {
-                Ok(found) => names.extend(found),
+                Ok(found) => {
+                    record_origin(&mut declared_in, &found, &path);
+                    names.extend(found);
+                }
                 Err(err) => record_or_fail(err, &path, &mut skipped)?,
             },
             Ok(None) => {}
@@ -59,7 +80,10 @@ pub fn declared_npm(root: &Path) -> DeclaredNamesResult {
     for path in discover_manifests(root, "yarn.lock") {
         match read_optional(&path) {
             Ok(Some(text)) => match yarn_lock_deps(&text, &path) {
-                Ok(found) => names.extend(found),
+                Ok(found) => {
+                    record_origin(&mut declared_in, &found, &path);
+                    names.extend(found);
+                }
                 Err(err) => record_or_fail(err, &path, &mut skipped)?,
             },
             Ok(None) => {}
@@ -67,7 +91,7 @@ pub fn declared_npm(root: &Path) -> DeclaredNamesResult {
         }
     }
 
-    Ok((names, direct, skipped))
+    Ok((names, direct, declared_in, skipped))
 }
 
 fn read_optional(path: &Path) -> Result<Option<String>, DepsError> {
@@ -375,6 +399,28 @@ mod tests {
 
     use super::*;
 
+    /// A nested manifest's declarations must carry the FULL root-relative
+    /// manifest path in `declared_in` — a bare `package.json` basename can
+    /// neither be resolved in a monorepo nor matched by `[ignore] paths`
+    /// prefixes (the v0.1.2 self-scan false-attribution bug).
+    #[test]
+    fn declared_in_carries_root_relative_nested_manifest_path() {
+        let dir = tempdir("declared-in-nested");
+        let sub = dir.join("apps/web");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(
+            sub.join("package.json"),
+            r#"{"dependencies":{"left-pat":"^1.0.0"}}"#,
+        )
+        .unwrap();
+        let (_names, _direct, declared_in, _skipped) = declared_npm(&dir).unwrap();
+        assert_eq!(
+            declared_in.get("left-pat").map(String::as_str),
+            Some("apps/web/package.json")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn tempdir(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "getdev-manifest-js-test-{name}-{}-{:?}",
@@ -400,7 +446,7 @@ mod tests {
         )
         .unwrap();
 
-        let (names, _direct, skipped) = declared_npm(&dir).unwrap();
+        let (names, _direct, _declared_in, skipped) = declared_npm(&dir).unwrap();
         assert!(skipped.is_empty());
         assert_eq!(
             names,
@@ -428,7 +474,7 @@ mod tests {
         )
         .unwrap();
 
-        let (names, _direct, skipped) = declared_npm(&dir).unwrap();
+        let (names, _direct, _declared_in, skipped) = declared_npm(&dir).unwrap();
         assert!(skipped.is_empty());
         assert!(!names.is_empty(), "Pitfall 8: must not silently empty out");
         assert_eq!(names, BTreeSet::from(["left-pad".to_owned()]));
@@ -457,7 +503,7 @@ mod tests {
         )
         .unwrap();
 
-        let (names, _direct, skipped) = declared_npm(&dir).unwrap();
+        let (names, _direct, _declared_in, skipped) = declared_npm(&dir).unwrap();
         assert!(skipped.is_empty());
         assert!(!names.is_empty());
         assert_eq!(
@@ -492,7 +538,7 @@ mod tests {
         )
         .unwrap();
 
-        let (names, _direct, skipped) = declared_npm(&dir).unwrap();
+        let (names, _direct, _declared_in, skipped) = declared_npm(&dir).unwrap();
         assert!(skipped.is_empty());
         assert!(!names.is_empty());
         assert_eq!(
@@ -531,7 +577,7 @@ mod tests {
         )
         .unwrap();
 
-        let (names, direct, skipped) = declared_npm(&dir).unwrap();
+        let (names, direct, _declared_in, skipped) = declared_npm(&dir).unwrap();
         assert!(skipped.is_empty());
         assert_eq!(
             names,
@@ -569,7 +615,7 @@ mod tests {
         )
         .unwrap();
 
-        let (names, _direct, skipped) = declared_npm(&dir).unwrap();
+        let (names, _direct, _declared_in, skipped) = declared_npm(&dir).unwrap();
         assert!(skipped.is_empty());
         assert_eq!(
             names,
@@ -605,7 +651,7 @@ mod tests {
         )
         .unwrap();
 
-        let (names, _direct, skipped) = declared_npm(&dir).unwrap();
+        let (names, _direct, _declared_in, skipped) = declared_npm(&dir).unwrap();
         assert!(skipped.is_empty());
         assert_eq!(
             names,
@@ -616,7 +662,7 @@ mod tests {
     #[test]
     fn absent_project_yields_empty_set_not_an_error() {
         let dir = tempdir("empty");
-        let (names, _direct, skipped) = declared_npm(&dir).unwrap();
+        let (names, _direct, _declared_in, skipped) = declared_npm(&dir).unwrap();
         assert!(skipped.is_empty());
         assert!(names.is_empty());
     }
@@ -647,7 +693,7 @@ mod tests {
         )
         .unwrap();
 
-        let (names, direct, skipped) = declared_npm(&dir).unwrap();
+        let (names, direct, _declared_in, skipped) = declared_npm(&dir).unwrap();
         assert!(skipped.is_empty());
         assert_eq!(names, BTreeSet::from(["lodash".to_owned()]));
         assert_eq!(direct, BTreeSet::from(["lodash".to_owned()]));
@@ -671,7 +717,7 @@ mod tests {
         )
         .unwrap();
 
-        let (names, direct, skipped) = declared_npm(&dir).unwrap();
+        let (names, direct, _declared_in, skipped) = declared_npm(&dir).unwrap();
         assert!(skipped.is_empty());
         let expected = BTreeSet::from([
             "real-pkg".to_owned(),
@@ -715,7 +761,7 @@ mod tests {
         )
         .unwrap();
 
-        let (names, _direct, skipped) = declared_npm(&dir).unwrap();
+        let (names, _direct, _declared_in, skipped) = declared_npm(&dir).unwrap();
         assert!(skipped.is_empty());
         assert!(
             !names.contains("@myorg/utils"),
