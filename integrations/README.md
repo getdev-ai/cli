@@ -78,6 +78,15 @@ so every AI edit is followed by a getdev gate and Aider self-corrects on a non-z
 
 ---
 
+## MCP server — any MCP-capable agent (native tools)
+
+For the tightest integration, run **[`getdev-mcp`](mcp/)** — a Model Context Protocol server that
+exposes getdev as native tools (`getdev_check`, `getdev_real`, `getdev_audit`, `getdev_review`,
+`getdev_env_detect`, `getdev_snap`, `getdev_back`). The agent calls them directly instead of running
+shell commands, and gets structured JSON back. It's a thin synchronous wrapper over the installed
+`getdev` binary — same local, deterministic, network-confined behavior. Setup (build + `claude mcp
+add` / `.mcp.json` / Cursor / Cline) is in [`mcp/README.md`](mcp/README.md).
+
 ## Generic harness / your own agent loop
 
 If you drive an agent programmatically, wrap each risky step as a transaction:
