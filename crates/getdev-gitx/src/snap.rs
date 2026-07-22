@@ -19,7 +19,15 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Process-wide monotonic sequence making every [`temp_index_path`] unique even
+/// when two calls land in the same OS clock tick — the timestamp alone is NOT
+/// enough (macOS `SystemTime` resolution is coarse), and two concurrent
+/// `snapshot()` calls that computed the same path would collide on git's
+/// `<index>.lock` (`fatal: Unable to create '…index…lock': File exists`).
+static INDEX_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Where a snapshot ref lives. Ids are allocated from a single shared counter
 /// across both namespaces (see `next_id`) so a given id is never present in
@@ -138,8 +146,12 @@ fn temp_index_path(tag: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
+    // pid disambiguates across processes; the atomic seq disambiguates across
+    // concurrent calls WITHIN this process (the timestamp can repeat under a
+    // coarse clock); nanos stays for human readability / cross-run spread.
+    let seq = INDEX_SEQ.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!(
-        ".getdev-snap-index.{tag}.{}.{nanos}",
+        ".getdev-snap-index.{tag}.{}.{nanos}.{seq}",
         std::process::id()
     ))
 }
