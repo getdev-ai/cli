@@ -700,9 +700,7 @@ export default function ComingSoonPage() {
           <div className="flex flex-col items-start justify-between gap-4 sm:flex-row sm:items-center">
             <div className="flex items-center gap-2">
               <TerminalIcon size={16} className="text-gd-brand-mark" />
-              <span className="text-body-sm text-gd-text-2">
-                getdev — verify, secure, and ship AI-generated code
-              </span>
+              <span className="text-body-sm text-gd-text-2">getdev</span>
             </div>
             <nav className="flex flex-wrap gap-x-6 gap-y-2 font-mono text-body-sm text-gd-text-3">
               <a href={REPO} {...ext} className="transition-colors hover:text-gd-text-1">
