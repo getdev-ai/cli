@@ -16,8 +16,9 @@
 //! Entry points and framework-router files are referenced by a runtime, not by
 //! a textual import, so they are exempt whole: top-level `index`/`main`/`app`/
 //! `server` files, Next.js `pages/**` + app-router `page`/`layout`/`route`,
-//! Django `urls.py`/`views.py`/`settings.py`/`manage.py`, test files, and
-//! Python `__init__.py`.
+//! Django `urls.py`/`views.py`/`settings.py`/`manage.py`, tooling config files
+//! (`*.config.*`), standalone `scripts/**`, Python `conftest.py`/`wsgi.py`/
+//! `asgi.py`, test files, and Python `__init__.py`.
 //!
 //! ## Path-traversal safety (T-06-12)
 //! Import resolution normalizes `.`/`..` components and DISCARDS any specifier
@@ -83,6 +84,23 @@ const EXEMPT_PATH_GLOBS: &[&str] = &[
     // Python package initializers
     "__init__.py",
     "**/__init__.py",
+    // Tooling config files (B-03): loaded by a build tool / framework by name,
+    // never `import`ed — e.g. next.config.js, vite.config.ts, tailwind.config.js,
+    // jest.config.js, eslint.config.mjs, drizzle.config.ts, ...
+    "*.config.*",
+    "**/*.config.*",
+    // Standalone scripts (B-03): run directly (node/python foo.js, npm scripts,
+    // CI steps), not imported by application code.
+    "scripts/**",
+    "**/scripts/**",
+    // Python server/test entry points invoked by a runtime, not imported:
+    // pytest's conftest, and the WSGI/ASGI app modules gunicorn/uvicorn load.
+    "conftest.py",
+    "**/conftest.py",
+    "wsgi.py",
+    "**/wsgi.py",
+    "asgi.py",
+    "**/asgi.py",
     // test files
     "**/*.test.*",
     "**/*.spec.*",
@@ -329,6 +347,37 @@ mod tests {
         assert!(
             detect_with_referenced(&referenced, &files).is_empty(),
             "a top-level index.js must be exempt (entry point)"
+        );
+    }
+
+    #[test]
+    fn tooling_config_and_scripts_and_py_entry_points_are_exempt() {
+        // B-03: framework/tooling entry points are loaded by a runtime, not by a
+        // textual import, so a newly added one must NOT be flagged an orphan.
+        let referenced = referenced_paths(&[]);
+        for rel in [
+            "next.config.js",
+            "vite.config.ts",
+            "tailwind.config.js",
+            "scripts/train.py",
+            "scripts/seed.js",
+            "conftest.py",
+            "app/wsgi.py",
+        ] {
+            let files = [review_file(rel, true)];
+            assert!(
+                detect_with_referenced(&referenced, &files).is_empty(),
+                "{rel} is a tooling/entry-point convention and must be exempt"
+            );
+        }
+
+        // Guard the widening: an ordinary unreferenced module next to them must
+        // still fire (the allowlist did not swallow real orphans).
+        let files = [review_file("src/orphaned.js", true)];
+        assert_eq!(
+            detect_with_referenced(&referenced, &files).len(),
+            1,
+            "a plain unreferenced new module must still be flagged"
         );
     }
 
