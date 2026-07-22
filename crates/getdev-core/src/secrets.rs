@@ -484,6 +484,47 @@ mod tests {
         assert_eq!(aws.provider, "aws");
     }
 
+    /// B-05: the AWS secret-access-key half (a 40-char base64 blob with no
+    /// distinctive prefix — deliberately NOT pattern-matched, as any such regex
+    /// is a false-positive minefield) fires INDEPENDENTLY of the access-key id
+    /// via the name-anchored entropy fallback. The dogfood run's apparent
+    /// "only the id flagged" miss was the canonical AWS *example* value
+    /// (`…EXAMPLEKEY`) being correctly placeholder-screened — not a detection
+    /// gap. This test pins both halves of that behavior.
+    #[test]
+    fn aws_secret_access_key_fires_independently_of_the_id() {
+        let p = patterns();
+
+        // The access-key id: matched by its vendor shape (critical/high).
+        let id = p
+            .classify("AKIAIOSFODNN7EXAMPLE", "AWS_ACCESS_KEY_ID")
+            .unwrap();
+        assert_eq!(id.provider, "aws");
+
+        // The secret-access-key: a high-entropy value assigned to the canonical
+        // name → caught by the entropy fallback, on its own. Deliberately a
+        // 29-char stand-in, NOT a real 40-char AWS-shaped key: a test for a
+        // secret detector must not itself carry a literal that trips upstream
+        // secret scanners (GitHub push protection blocks the AWS 40-char shape).
+        let realistic = "Zx7Qm2Kp9Rv4Tb6Nw1Lc8Hj3Yd5Fs";
+        let secret = p.classify(realistic, "AWS_SECRET_ACCESS_KEY").unwrap();
+        assert_eq!(secret.pattern_id, "entropy");
+        assert_eq!(secret.confidence, Confidence::Medium);
+        assert!(!secret.masked.contains(realistic), "value must be masked");
+
+        // The canonical AWS *example* secret is intentionally suppressed (it
+        // contains "EXAMPLE") — flagging example values would train users to
+        // ignore real findings (FP policy §9.2). This is the dogfood miss cause.
+        assert!(
+            p.classify(
+                "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+                "AWS_SECRET_ACCESS_KEY"
+            )
+            .is_none(),
+            "the AWS example secret value must stay placeholder-screened"
+        );
+    }
+
     #[test]
     fn entropy_fallback_requires_secretish_identifier() {
         let p = patterns();
