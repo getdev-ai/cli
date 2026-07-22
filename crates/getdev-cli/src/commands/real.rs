@@ -94,10 +94,21 @@ pub fn run(args: &RealArgs) -> anyhow::Result<u8> {
     };
     let sensitivity = Sensitivity::parse(&args.typosquat_sensitivity);
 
+    // Interactive-only stderr spinner (auto-suppressed under --json/-o/--quiet/
+    // non-TTY); torn down before any report renders to stdout.
+    let show_progress = !args.json && !args.quiet && args.output.is_none();
+    let progress =
+        crate::progress::Progress::start(show_progress, args.no_color, "resolving dependencies…");
+
     // The dependency graph is always computed once — `apis` needs its
     // declared sets to know which ecosystem a used package belongs to, and
     // `unsupported_stack` must be surfaced regardless of scope.
     let (graph, deps_skipped) = deps::build_graph(&args.path)?;
+    progress.phase(if args.offline {
+        "checking packages, APIs & models (offline)…"
+    } else {
+        "checking packages against registries…"
+    });
     let mut skip_errors: Vec<getdev_core::scan::ScanError> = deps_skipped;
 
     let mut findings = Vec::new();
@@ -139,6 +150,8 @@ pub fn run(args: &RealArgs) -> anyhow::Result<u8> {
             reason: e.to_string(),
         })
         .collect();
+
+    progress.finish();
 
     if let Some(out_path) = args.output.as_deref() {
         super::emit_report_file(&report, out_path, args.json, args.no_color)?;

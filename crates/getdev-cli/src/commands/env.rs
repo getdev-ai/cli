@@ -41,6 +41,12 @@ pub fn run(args: &EnvArgs) -> anyhow::Result<u8> {
         // detection.
         include_urls: args.include_urls,
     };
+    // Interactive-only stderr spinner (auto-suppressed under --json/-o/--quiet/
+    // non-TTY); torn down before any report renders to stdout.
+    let show_progress = !args.json && !args.quiet && args.output.is_none();
+    let progress =
+        crate::progress::Progress::start(show_progress, args.no_color, "scanning for secrets…");
+
     let mut plan = env::plan(&args.path, &options)?;
     let mut findings = env::findings(&plan, &options);
 
@@ -152,6 +158,8 @@ pub fn run(args: &EnvArgs) -> anyhow::Result<u8> {
             example_file: summary.example_file.clone(),
         });
     }
+
+    progress.finish();
 
     if let Some(out_path) = args.output.as_deref() {
         super::emit_report_file(&report, out_path, args.json, args.no_color)?;

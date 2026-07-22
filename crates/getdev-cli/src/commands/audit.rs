@@ -47,6 +47,12 @@ pub struct AuditArgs {
 }
 
 pub fn run(args: &AuditArgs) -> anyhow::Result<u8> {
+    // Interactive-only stderr spinner (auto-suppressed under --json/-o/--quiet/
+    // non-TTY); torn down before any report renders to stdout.
+    let show_progress = !args.json && !args.quiet && args.output.is_none();
+    let progress =
+        crate::progress::Progress::start(show_progress, args.no_color, "scanning project…");
+
     // The dependency graph is only needed for framework detection here
     // (unlike `real`, which also uses it for registry lookups) — its own
     // skip errors still get surfaced in `--json`/`-v`.
@@ -79,6 +85,7 @@ pub fn run(args: &AuditArgs) -> anyhow::Result<u8> {
     // `ctx.skipped` carries the oversized/unreadable SOURCE files; `audit::run`
     // returns any non-source read failures it incurs on top.
     let ctx = getdev_core::scan::ScanContext::build(&args.path)?;
+    progress.phase(&format!("auditing {} files…", ctx.files.len()));
     let (mut findings, audit_skipped) = audit::run(
         &ctx,
         &pack,
@@ -121,6 +128,8 @@ pub fn run(args: &AuditArgs) -> anyhow::Result<u8> {
             reason: e.to_string(),
         })
         .collect();
+
+    progress.finish();
 
     if let Some(out_path) = args.output.as_deref() {
         super::emit_report_file(&report, out_path, args.json, args.no_color)?;

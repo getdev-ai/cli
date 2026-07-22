@@ -50,6 +50,12 @@ pub fn run(args: &ReviewArgs) -> anyhow::Result<u8> {
     let opts = ReviewOptions {
         severity_min: args.severity_min,
     };
+    // Interactive-only stderr spinner (auto-suppressed under --json/-o/--quiet/
+    // non-TTY); torn down before any report renders to stdout.
+    let show_progress = !args.json && !args.quiet && args.output.is_none();
+    let progress =
+        crate::progress::Progress::start(show_progress, args.no_color, "reviewing changes…");
+
     // Parse-once for the `--all` scope (the one `check` reuses): build ONE
     // shared ScanContext (walk + parse) and pass it in — there is exactly one
     // walk/parse code path (07-02). `ctx.skipped` carries the oversized/
@@ -94,6 +100,8 @@ pub fn run(args: &ReviewArgs) -> anyhow::Result<u8> {
             reason: e.to_string(),
         })
         .collect();
+
+    progress.finish();
 
     if let Some(out_path) = args.output.as_deref() {
         super::emit_report_file(&report, out_path, args.json, args.no_color)?;

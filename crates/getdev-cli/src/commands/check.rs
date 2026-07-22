@@ -58,11 +58,19 @@ pub struct CheckArgs {
 }
 
 pub fn run(args: &CheckArgs) -> anyhow::Result<u8> {
+    // Interactive-only "processing" spinner on stderr (auto-suppressed under
+    // --json / -o / --quiet / non-TTY). stdout stays byte-clean — the spinner
+    // is torn down before any report renders below.
+    let show_progress = !args.json && !args.quiet && args.output.is_none();
+    let progress =
+        crate::progress::Progress::start(show_progress, args.no_color, "scanning project…");
+
     // ONE shared parse-once context: walk + parse the project EXACTLY once,
     // then hand it to every analyzer below (there is a single walk/parse code
     // path — CLAUDE.md rule 5 / Phase 7 Success Criterion 1). `ctx.skipped`
     // carries the oversized/unreadable SOURCE skips, surfaced once at the end.
     let ctx = ScanContext::build(&args.path)?;
+    progress.phase("resolving dependencies…");
 
     let mut skip_errors: Vec<getdev_core::scan::ScanError> = Vec::new();
 
@@ -135,6 +143,10 @@ pub fn run(args: &CheckArgs) -> anyhow::Result<u8> {
         Ok((findings, Vec::new()))
     };
 
+    progress.phase(&format!(
+        "analyzing {} files · real · audit · env · review",
+        ctx.files.len()
+    ));
     let ((real_out, audit_out), (env_out, review_out)) = rayon::join(
         || rayon::join(real_leg, audit_leg),
         || rayon::join(env_leg, review_leg),
@@ -193,6 +205,9 @@ pub fn run(args: &CheckArgs) -> anyhow::Result<u8> {
     // The ONE net-new report field check populates — `check` is the only
     // command that ever sets a Ship Score (every other leaves it `None`).
     report.score = Some(report::ship_score(&report.summary));
+
+    // Erase the spinner line before anything renders to stdout.
+    progress.finish();
 
     if let Some(out_path) = args.output.as_deref() {
         super::emit_report_file(&report, out_path, args.json, args.no_color)?;

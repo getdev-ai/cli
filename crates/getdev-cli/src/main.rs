@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod commands;
+mod progress;
 mod update;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
