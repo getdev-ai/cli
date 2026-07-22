@@ -35,8 +35,9 @@ struct GlobalArgs {
     /// Machine-readable output (findings schema, docs/SPEC-FINDINGS.md)
     #[arg(long, global = true)]
     json: bool,
-    /// Write the full JSON report to FILE; the terminal keeps a short
-    /// summary (with --json: only the file path is printed)
+    /// Write the full JSON report to FILE (findings commands: check/real/
+    /// audit/review/env/ship); the terminal keeps a short summary. With
+    /// --json, only the file path is printed
     #[arg(long, short = 'o', global = true, value_name = "FILE")]
     output: Option<PathBuf>,
     /// Suppress banner/progress; findings only
