@@ -184,17 +184,23 @@ const WELCOME_WORDMARK: &str = r"               __      __
 pub fn render_welcome_banner(version: &str, color: ColorMode) -> String {
     let promise = "  verify · secure · ship AI-generated code";
     let footer = format!("  v{version} · local-first · nothing leaves your machine");
+    // Plain facts, not a call-to-action (CLAUDE.md standing rules): where the
+    // source lives, where the docs live, and the license — the three things a
+    // first-run user reasonably wants at hand.
+    let links = "  getdev.ai · github.com/getdev-ai/cli · Apache-2.0";
     let mut out = String::new();
     match color {
         ColorMode::On => {
             let _ = writeln!(out, "{}", WELCOME_WORDMARK.cyan().bold());
             let _ = writeln!(out, "{}", promise.dimmed());
             let _ = writeln!(out, "{}", footer.dimmed());
+            let _ = writeln!(out, "{}", links.dimmed());
         }
         ColorMode::Off => {
             let _ = writeln!(out, "{WELCOME_WORDMARK}");
             let _ = writeln!(out, "{promise}");
             let _ = writeln!(out, "{footer}");
+            let _ = writeln!(out, "{links}");
         }
     }
     out
