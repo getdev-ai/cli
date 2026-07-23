@@ -655,6 +655,59 @@ pub fn restore(root: &Path, id: u32) -> Result<RestoreOutcome, GitxError> {
     })
 }
 
+/// Materialize snapshot `snap_id`'s tree into `dest` — a plain "unpack this
+/// tree here", NOT an in-place restore (D-05). Reuses `restore()`'s exact
+/// primitives — `resolve_ref` → `rev-parse <commit>^{tree}` → `read-tree` into
+/// a fresh throwaway `TempIndex` → `checkout-index -a -f` — but writes under
+/// `--prefix=<dest>/` into a caller-supplied dest dir instead of over the live
+/// working tree. Because a snapshot captures tracked + untracked-non-ignored
+/// files (`build_current_tree` = `add -A`) and gitignored paths never entered
+/// the tree, `dest` faithfully reproduces the project as it was at the snapshot,
+/// with gitignored paths excluded for free (the same guarantee `restore` relies
+/// on). Read-only with respect to the source repo: it never mutates HEAD, the
+/// index, refs, or the live working tree.
+///
+/// `dest` MUST be an ABSOLUTE path. `git_command` sets `-C root`, so a RELATIVE
+/// `dest` would resolve against `root` — not the caller's intended location —
+/// and the `--prefix` value MUST carry a trailing slash or it fuses onto the
+/// first checked-out path segment (05-RESEARCH § Pitfall 4). Do NOT pre-create
+/// `dest`: `checkout-index --prefix` creates it and every nested subdirectory
+/// itself (an empty-tree snapshot writes nothing, leaving `dest` uncreated — a
+/// valid, non-error outcome). The target is resolved BEFORE any write, so a bad
+/// id is a clean [`GitxError::NoSuchSnapshot`], never a partial materialize
+/// (mirrors `restore`'s T-05-10). Unlike `snapshot()`, this NEVER `git init`s a
+/// missing repo — reading a snapshot from a non-repo is a clean error, not a
+/// bootstrap (mirrors `require_repo`'s read-only philosophy). No new
+/// `GitxError` variant is needed: `NoSuchSnapshot`/`Command`/`Io` cover every
+/// failure mode.
+pub fn materialize(root: &Path, snap_id: u32, dest: &Path) -> Result<(), GitxError> {
+    // Resolve the target BEFORE touching `dest` — a bad id must be a clean
+    // `NoSuchSnapshot`, never a partial materialize (mirrors restore, T-05-10).
+    let (_, target_commit) = resolve_ref(root, snap_id)?;
+    let target_tree =
+        rev_parse_tree(root, &target_commit)?.ok_or(GitxError::NoSuchSnapshot { id: snap_id })?;
+
+    // A FRESH throwaway index (never reuse one across operations — snap.rs
+    // pitfall): `read-tree` loads the target tree, `checkout-index -a -f` writes
+    // every entry under `--prefix=<dest>/`, creating `dest` + nested dirs.
+    let index = TempIndex::new("materialize");
+    let dest_prefix = format!("{}/", dest.to_string_lossy());
+    capture(
+        git_command(root, index.path()).args(["read-tree", &target_tree]),
+        "read-tree",
+    )?;
+    capture(
+        git_command(root, index.path()).args([
+            "checkout-index",
+            "-a",
+            "-f",
+            &format!("--prefix={dest_prefix}"),
+        ]),
+        "checkout-index",
+    )?;
+    Ok(())
+}
+
 /// The id of the most recent manual snapshot (`refs/getdev/snaps/<N>`), the
 /// target of a bare `back`, or `None` when no manual snapshot exists (D-02).
 pub fn latest_manual(root: &Path) -> Result<Option<u32>, GitxError> {
