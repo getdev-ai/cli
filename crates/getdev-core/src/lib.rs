@@ -5,6 +5,7 @@
 
 pub mod apisurface;
 pub mod audit;
+pub mod baseline;
 pub mod config;
 pub mod deps;
 pub mod env;

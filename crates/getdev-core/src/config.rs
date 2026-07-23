@@ -48,6 +48,23 @@ pub enum ConfigError {
     /// into memory (unbounded-read DoS on a hostile repo).
     #[error("config {path} exceeds {MAX_CONFIG_FILE_BYTES} byte limit")]
     TooLarge { path: PathBuf },
+    /// A `.getdev-baseline` line that is not blank, not a `#`-comment, and not
+    /// a whole `gdv1:` fingerprint token (LOOP-03, D-01). Lives on `ConfigError`
+    /// — not a parallel error type — so `main.rs`'s existing downcast routes it
+    /// to exit 3 like any other malformed-config failure.
+    #[error(
+        "malformed baseline entry in {path} at line {line_no}: {line:?} is not a gdv1: fingerprint token — re-run `getdev check --update-baseline` to regenerate the baseline"
+    )]
+    BaselineMalformed {
+        path: PathBuf,
+        line_no: usize,
+        line: String,
+    },
+    /// An explicit `--baseline` was passed but its file does not exist
+    /// (LOOP-03, D-04) — exit 3, naming the file and pointing at
+    /// `--update-baseline` (which creates it).
+    #[error("baseline file {path} not found — run `getdev check --update-baseline` to create it")]
+    BaselineMissing { path: PathBuf },
 }
 
 /// Read a config file, enforcing [`MAX_CONFIG_FILE_BYTES`] via a metadata
