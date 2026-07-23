@@ -28,7 +28,11 @@ use getdev_registry::{
 
 pub struct RealArgs {
     pub path: std::path::PathBuf,
-    pub json: bool,
+    /// Resolved stdout format (global flag, D-04/D-10): human | json | agent.
+    pub format: report::Format,
+    /// `--min-score N` (global flag, D-01) — inert on `real` (no Ship Score);
+    /// carried uniformly so every findings command routes the gate identically.
+    pub min_score: Option<u8>,
     /// Write the full JSON report here; terminal keeps a short summary (global flag).
     pub output: Option<std::path::PathBuf>,
     pub no_color: bool,
@@ -96,7 +100,8 @@ pub fn run(args: &RealArgs) -> anyhow::Result<u8> {
 
     // Interactive-only stderr spinner (auto-suppressed under --json/-o/--quiet/
     // non-TTY); torn down before any report renders to stdout.
-    let show_progress = !args.json && !args.quiet && args.output.is_none();
+    let show_progress =
+        matches!(args.format, report::Format::Human) && !args.quiet && args.output.is_none();
     let progress =
         crate::progress::Progress::start(show_progress, args.no_color, "resolving dependencies…");
 
@@ -158,56 +163,70 @@ pub fn run(args: &RealArgs) -> anyhow::Result<u8> {
 
     progress.finish();
 
+    // The single-sourced exit gate (D-02/D-03): both the agent `GATE:` line and
+    // the exit code below read this ONE computation. `--min-score` is inert here
+    // (real sets no score), so this reduces to the `--fail-on` verdict.
+    let gate = report::evaluate_gate(&report, args.fail_on, args.min_score);
+
     if let Some(out_path) = args.output.as_deref() {
-        super::emit_report_file(&report, out_path, args.json, args.no_color)?;
-    } else if args.json {
-        print!("{}", report::render_json(&report)?);
+        // `-o` always writes JSON regardless of `--format` (D-11); machine
+        // formats print only the path, human prints the short summary.
+        super::emit_report_file(
+            &report,
+            out_path,
+            !matches!(args.format, report::Format::Human),
+            args.no_color,
+        )?;
     } else {
-        let color = ColorMode::resolve(args.no_color, std::io::stdout().is_terminal());
-        print!(
-            "{}",
-            report::render_terminal(&report, color, args.verbose > 0)
-        );
-        if !skipped.is_empty() {
-            if args.verbose > 0 {
-                println!("{} unreadable file(s) skipped:", skipped.len());
-                for reason in &skipped {
-                    println!("  - {reason}");
+        match args.format {
+            report::Format::Json => print!("{}", report::render_json(&report)?),
+            report::Format::Agent => print!("{}", report::render_agent(&report, &gate)),
+            report::Format::Human => {
+                let color = ColorMode::resolve(args.no_color, std::io::stdout().is_terminal());
+                print!(
+                    "{}",
+                    report::render_terminal(&report, color, args.verbose > 0)
+                );
+                if !skipped.is_empty() {
+                    if args.verbose > 0 {
+                        println!("{} unreadable file(s) skipped:", skipped.len());
+                        for reason in &skipped {
+                            println!("  - {reason}");
+                        }
+                    } else if !args.quiet {
+                        println!(
+                            "{} unreadable file(s) skipped (-v for details)",
+                            skipped.len()
+                        );
+                    }
                 }
-            } else if !args.quiet {
-                println!(
-                    "{} unreadable file(s) skipped (-v for details)",
-                    skipped.len()
-                );
-            }
-        }
-        if !filter_outcome.suppressed.is_empty() {
-            if args.verbose > 0 {
-                println!(
-                    "{} finding(s) suppressed by config:",
-                    filter_outcome.suppressed.len()
-                );
-                for s in &filter_outcome.suppressed {
-                    println!(
-                        "  - {} {} — {}",
-                        s.finding.id,
-                        s.finding.file,
-                        s.reason.describe()
-                    );
+                if !filter_outcome.suppressed.is_empty() {
+                    if args.verbose > 0 {
+                        println!(
+                            "{} finding(s) suppressed by config:",
+                            filter_outcome.suppressed.len()
+                        );
+                        for s in &filter_outcome.suppressed {
+                            println!(
+                                "  - {} {} — {}",
+                                s.finding.id,
+                                s.finding.file,
+                                s.reason.describe()
+                            );
+                        }
+                    } else if !args.quiet {
+                        println!(
+                            "{} finding(s) suppressed by config (-v for details)",
+                            filter_outcome.suppressed.len()
+                        );
+                    }
                 }
-            } else if !args.quiet {
-                println!(
-                    "{} finding(s) suppressed by config (-v for details)",
-                    filter_outcome.suppressed.len()
-                );
             }
         }
     }
 
-    let failed = args
-        .fail_on
-        .is_some_and(|threshold| report.summary.at_or_above(threshold) > 0);
-    Ok(u8::from(failed))
+    // Exit from the SAME gate the agent GATE line renders (D-03).
+    Ok(u8::from(gate.failed))
 }
 
 /// `real/nonexistent-package` + `real/typosquat-suspect` +

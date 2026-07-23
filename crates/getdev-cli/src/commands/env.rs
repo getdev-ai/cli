@@ -12,7 +12,11 @@ use getdev_core::suppress;
 
 pub struct EnvArgs {
     pub path: std::path::PathBuf,
-    pub json: bool,
+    /// Resolved stdout format (global flag, D-04/D-10): human | json | agent.
+    pub format: report::Format,
+    /// `--min-score N` (global flag, D-01) — inert on `env` (no Ship Score);
+    /// carried uniformly so every findings command routes the gate identically.
+    pub min_score: Option<u8>,
     /// Write the full JSON report here; terminal keeps a short summary (global flag).
     pub output: Option<std::path::PathBuf>,
     pub no_color: bool,
@@ -43,7 +47,8 @@ pub fn run(args: &EnvArgs) -> anyhow::Result<u8> {
     };
     // Interactive-only stderr spinner (auto-suppressed under --json/-o/--quiet/
     // non-TTY); torn down before any report renders to stdout.
-    let show_progress = !args.json && !args.quiet && args.output.is_none();
+    let show_progress =
+        matches!(args.format, report::Format::Human) && !args.quiet && args.output.is_none();
     let progress =
         crate::progress::Progress::start(show_progress, args.no_color, "scanning for secrets…");
 
@@ -177,110 +182,125 @@ pub fn run(args: &EnvArgs) -> anyhow::Result<u8> {
 
     progress.finish();
 
+    // The single-sourced exit gate (D-02/D-03): both the agent `GATE:` line and
+    // the exit code below read this ONE computation. `--min-score` is inert here
+    // (env sets no score), so this reduces to the `--fail-on` verdict.
+    let gate = report::evaluate_gate(&report, args.fail_on, args.min_score);
+
     if let Some(out_path) = args.output.as_deref() {
-        super::emit_report_file(&report, out_path, args.json, args.no_color)?;
-    } else if args.json {
-        print!("{}", report::render_json(&report)?);
+        // `-o` always writes JSON regardless of `--format` (D-11); machine
+        // formats print only the path, human prints the short summary.
+        super::emit_report_file(
+            &report,
+            out_path,
+            !matches!(args.format, report::Format::Human),
+            args.no_color,
+        )?;
     } else {
-        let color = ColorMode::resolve(args.no_color, std::io::stdout().is_terminal());
-        print!(
-            "{}",
-            report::render_terminal(&report, color, args.verbose > 0)
-        );
-        if !args.quiet {
-            match applied_result.as_ref() {
-                Some(Ok(summary)) => {
-                    println!();
-                    println!(
-                        "applied: {} var(s) → {} ({}), {} file(s) rewritten{}",
-                        summary.vars_written.len(),
-                        options.env_file,
-                        if summary.env_file_created {
-                            "created"
-                        } else {
-                            "appended"
-                        },
-                        summary.files_rewritten.len(),
-                        if summary.gitignore_patched {
-                            ", .gitignore patched"
-                        } else {
-                            ""
+        match args.format {
+            report::Format::Json => print!("{}", report::render_json(&report)?),
+            report::Format::Agent => print!("{}", report::render_agent(&report, &gate)),
+            report::Format::Human => {
+                let color = ColorMode::resolve(args.no_color, std::io::stdout().is_terminal());
+                print!(
+                    "{}",
+                    report::render_terminal(&report, color, args.verbose > 0)
+                );
+                if !args.quiet {
+                    match applied_result.as_ref() {
+                        Some(Ok(summary)) => {
+                            println!();
+                            println!(
+                                "applied: {} var(s) → {} ({}), {} file(s) rewritten{}",
+                                summary.vars_written.len(),
+                                options.env_file,
+                                if summary.env_file_created {
+                                    "created"
+                                } else {
+                                    "appended"
+                                },
+                                summary.files_rewritten.len(),
+                                if summary.gitignore_patched {
+                                    ", .gitignore patched"
+                                } else {
+                                    ""
+                                }
+                            );
+                            println!(
+                                "keys documented in {} — commit that file, never {}",
+                                summary.example_file, options.env_file
+                            );
+                            if !summary.vars_skipped_stale.is_empty() {
+                                println!(
+                                    "{} var(s) already present in {} — not duplicated: {}",
+                                    summary.vars_skipped_stale.len(),
+                                    options.env_file,
+                                    summary.vars_skipped_stale.join(", ")
+                                );
+                            }
                         }
-                    );
-                    println!(
-                        "keys documented in {} — commit that file, never {}",
-                        summary.example_file, options.env_file
-                    );
-                    if !summary.vars_skipped_stale.is_empty() {
-                        println!(
-                            "{} var(s) already present in {} — not duplicated: {}",
-                            summary.vars_skipped_stale.len(),
-                            options.env_file,
-                            summary.vars_skipped_stale.join(", ")
-                        );
-                    }
-                }
-                // F4: apply failed — say nothing extra here, the findings
-                // above already printed; the error itself surfaces after
-                // this block via the caller's `?`/exit-code-2 path.
-                Some(Err(_)) => {}
-                None if !plan.entries.is_empty() => {
-                    println!();
-                    println!(
+                        // F4: apply failed — say nothing extra here, the findings
+                        // above already printed; the error itself surfaces after
+                        // this block via the caller's `?`/exit-code-2 path.
+                        Some(Err(_)) => {}
+                        None if !plan.entries.is_empty() => {
+                            println!();
+                            println!(
                         "dry run — nothing written. {} secret(s) would move to {} (getdev env --write)",
                         plan.entries.len(),
                         options.env_file
                     );
+                        }
+                        None => {}
+                    }
                 }
-                None => {}
-            }
-        }
-        if !plan.skipped.is_empty() {
-            if args.verbose > 0 {
-                println!("{} unreadable file(s) skipped:", plan.skipped.len());
-                for skipped in &plan.skipped {
-                    println!("  - {skipped}");
+                if !plan.skipped.is_empty() {
+                    if args.verbose > 0 {
+                        println!("{} unreadable file(s) skipped:", plan.skipped.len());
+                        for skipped in &plan.skipped {
+                            println!("  - {skipped}");
+                        }
+                    } else if !args.quiet {
+                        println!(
+                            "{} unreadable file(s) skipped (-v for details)",
+                            plan.skipped.len()
+                        );
+                    }
                 }
-            } else if !args.quiet {
-                println!(
-                    "{} unreadable file(s) skipped (-v for details)",
-                    plan.skipped.len()
-                );
-            }
-        }
-        if !filter_outcome.suppressed.is_empty() {
-            if args.verbose > 0 {
-                println!(
-                    "{} finding(s) suppressed by config:",
-                    filter_outcome.suppressed.len()
-                );
-                for s in &filter_outcome.suppressed {
-                    println!(
-                        "  - {} {} — {}",
-                        s.finding.id,
-                        s.finding.file,
-                        s.reason.describe()
-                    );
+                if !filter_outcome.suppressed.is_empty() {
+                    if args.verbose > 0 {
+                        println!(
+                            "{} finding(s) suppressed by config:",
+                            filter_outcome.suppressed.len()
+                        );
+                        for s in &filter_outcome.suppressed {
+                            println!(
+                                "  - {} {} — {}",
+                                s.finding.id,
+                                s.finding.file,
+                                s.reason.describe()
+                            );
+                        }
+                    } else if !args.quiet {
+                        println!(
+                            "{} finding(s) suppressed by config (-v for details)",
+                            filter_outcome.suppressed.len()
+                        );
+                    }
                 }
-            } else if !args.quiet {
-                println!(
-                    "{} finding(s) suppressed by config (-v for details)",
-                    filter_outcome.suppressed.len()
-                );
             }
         }
     }
 
-    // F4: the apply error is propagated only now — findings (and, for
-    // --json, the full report) have already printed above.
+    // F4: the apply error is propagated only now — findings (and, for a machine
+    // format, the full report) have already printed above.
     if let Some(Err(err)) = applied_result {
         return Err(err.into());
     }
 
-    let failed = args
-        .fail_on
-        .is_some_and(|threshold| report.summary.at_or_above(threshold) > 0);
-    Ok(u8::from(failed))
+    // Exit from the SAME single-sourced gate the agent `GATE:` line renders
+    // (D-03) — the inline `fail_on.is_some_and(...)` is gone.
+    Ok(u8::from(gate.failed))
 }
 
 fn env_file_committed_finding(env_file: &str) -> Finding {
@@ -418,7 +438,8 @@ mod tests {
         EnvArgs {
             output: None,
             path: dir.to_path_buf(),
-            json: false,
+            format: report::Format::Human,
+            min_score: None,
             no_color: true,
             fail_on: None,
             env_file: ".env".to_owned(),
@@ -604,7 +625,8 @@ mod tests {
         let args = EnvArgs {
             output: None,
             path: dir.clone(),
-            json: false,
+            format: report::Format::Human,
+            min_score: None,
             no_color: true,
             fail_on: None,
             env_file: ".env".to_owned(),

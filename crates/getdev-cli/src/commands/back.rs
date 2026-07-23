@@ -238,7 +238,8 @@ mod tests {
         crate::commands::env::run(&crate::commands::env::EnvArgs {
             output: None,
             path: dir.clone(),
-            json: false,
+            format: getdev_core::report::Format::Human,
+            min_score: None,
             no_color: true,
             fail_on: None,
             env_file: ".env".to_owned(),

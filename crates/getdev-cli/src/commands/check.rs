@@ -39,7 +39,11 @@ use crate::commands::real;
 
 pub struct CheckArgs {
     pub path: PathBuf,
-    pub json: bool,
+    /// Resolved stdout format (global flag, D-04/D-10): human | json | agent.
+    pub format: report::Format,
+    /// `--min-score N` — the Ship-Score exit gate (global flag, D-01); active on
+    /// `check` (which sets a score), inert elsewhere.
+    pub min_score: Option<u8>,
     /// Write the full JSON report here; terminal keeps a short summary (global flag).
     pub output: Option<std::path::PathBuf>,
     pub no_color: bool,
@@ -250,7 +254,8 @@ pub fn run(args: &CheckArgs) -> anyhow::Result<u8> {
     // Interactive-only "processing" spinner on stderr (auto-suppressed under
     // --json / -o / --quiet / non-TTY). stdout stays byte-clean — the spinner
     // is torn down before any report renders below.
-    let show_progress = !args.json && !args.quiet && args.output.is_none();
+    let show_progress =
+        matches!(args.format, report::Format::Human) && !args.quiet && args.output.is_none();
     let progress =
         crate::progress::Progress::start(show_progress, args.no_color, "scanning project…");
 
@@ -267,74 +272,92 @@ pub fn run(args: &CheckArgs) -> anyhow::Result<u8> {
     // Erase the spinner line before anything renders to stdout.
     progress.finish();
 
+    // The single-sourced exit gate (D-02/D-03): `--fail-on` (severity) OR
+    // `--min-score` (Ship Score) — both the printed `GATE:` line (agent format)
+    // and the process exit code below read this ONE computation, so they can
+    // never disagree. `--min-score` is active here (check sets a score).
+    let gate = report::evaluate_gate(&report, args.fail_on, args.min_score);
+
     if let Some(out_path) = args.output.as_deref() {
-        super::emit_report_file(&report, out_path, args.json, args.no_color)?;
-    } else if args.json {
-        // `score` rides in the JSON envelope (docs/SPEC-FINDINGS.md).
-        print!("{}", report::render_json(&report)?);
+        // `-o` always writes the full JSON artifact regardless of `--format`
+        // (D-11); machine formats (json/agent) print only the path, human prints
+        // the short summary.
+        super::emit_report_file(
+            &report,
+            out_path,
+            !matches!(args.format, report::Format::Human),
+            args.no_color,
+        )?;
     } else {
-        let color = ColorMode::resolve(args.no_color, std::io::stdout().is_terminal());
-        print!(
-            "{}",
-            report::render_terminal(&report, color, args.verbose > 0)
-        );
-        // First-run clarity (docs/SPEC-COMMANDS.md `check`): when the project has
-        // no `.getdev.toml`, tell the user check ran on built-in defaults and how
-        // to customize. Human render only — suppressed under `--quiet`, a non-tty
-        // stdout, and CI; `--json`/`-o` never reach this branch, so the hint is
-        // never in the JSON envelope (determinism). A single stat, never a config
-        // re-read; never affects the Ship Score or exit code.
-        if !args.quiet
-            && std::io::stdout().is_terminal()
-            && std::env::var_os("CI").is_none()
-            && !args.path.join(".getdev.toml").exists()
-        {
-            print!("{}", report::render_no_config_hint(color));
-        }
-        // Under `-v`, print the versioned Ship Score weight table (single-
-        // sourced in `getdev-core` — never inlined here).
-        if args.verbose > 0 {
-            print!("{}", report::render_ship_score_weights());
-        }
-        if !skipped.is_empty() {
-            if args.verbose > 0 {
-                println!("{} unreadable file(s) skipped:", skipped.len());
-                for reason in &skipped {
-                    println!("  - {reason}");
-                }
-            } else if !args.quiet {
-                println!(
-                    "{} unreadable file(s) skipped (-v for details)",
-                    skipped.len()
+        match args.format {
+            // `score` rides in the JSON envelope (docs/SPEC-FINDINGS.md).
+            report::Format::Json => print!("{}", report::render_json(&report)?),
+            // The token-lean agent stream: GATE/SUMMARY/FINDINGS/NEXT-ACTIONS,
+            // no human-only affordances, no ANSI (D-05).
+            report::Format::Agent => print!("{}", report::render_agent(&report, &gate)),
+            report::Format::Human => {
+                let color = ColorMode::resolve(args.no_color, std::io::stdout().is_terminal());
+                print!(
+                    "{}",
+                    report::render_terminal(&report, color, args.verbose > 0)
                 );
-            }
-        }
-        if !suppressed.is_empty() {
-            if args.verbose > 0 {
-                println!("{} finding(s) suppressed by config:", suppressed.len());
-                for s in &suppressed {
-                    println!(
-                        "  - {} {} — {}",
-                        s.finding.id,
-                        s.finding.file,
-                        s.reason.describe()
-                    );
+                // First-run clarity (docs/SPEC-COMMANDS.md `check`): when the
+                // project has no `.getdev.toml`, tell the user check ran on
+                // built-in defaults and how to customize. Human render only —
+                // suppressed under `--quiet`, a non-tty stdout, and CI;
+                // `--json`/`--format=agent`/`-o` never reach this arm, so the
+                // hint is never in a machine stream (determinism). A single stat,
+                // never a config re-read; never affects the score or exit code.
+                if !args.quiet
+                    && std::io::stdout().is_terminal()
+                    && std::env::var_os("CI").is_none()
+                    && !args.path.join(".getdev.toml").exists()
+                {
+                    print!("{}", report::render_no_config_hint(color));
                 }
-            } else if !args.quiet {
-                println!(
-                    "{} finding(s) suppressed by config (-v for details)",
-                    suppressed.len()
-                );
+                // Under `-v`, print the versioned Ship Score weight table
+                // (single-sourced in `getdev-core` — never inlined here).
+                if args.verbose > 0 {
+                    print!("{}", report::render_ship_score_weights());
+                }
+                if !skipped.is_empty() {
+                    if args.verbose > 0 {
+                        println!("{} unreadable file(s) skipped:", skipped.len());
+                        for reason in &skipped {
+                            println!("  - {reason}");
+                        }
+                    } else if !args.quiet {
+                        println!(
+                            "{} unreadable file(s) skipped (-v for details)",
+                            skipped.len()
+                        );
+                    }
+                }
+                if !suppressed.is_empty() {
+                    if args.verbose > 0 {
+                        println!("{} finding(s) suppressed by config:", suppressed.len());
+                        for s in &suppressed {
+                            println!(
+                                "  - {} {} — {}",
+                                s.finding.id,
+                                s.finding.file,
+                                s.reason.describe()
+                            );
+                        }
+                    } else if !args.quiet {
+                        println!(
+                            "{} finding(s) suppressed by config (-v for details)",
+                            suppressed.len()
+                        );
+                    }
+                }
             }
         }
     }
 
-    // Exit code via the SAME `Summary::at_or_above(--fail-on)` comparator every
-    // command uses — no bespoke check-only threshold (docs/PLAN.md §2.2).
-    let failed = args
-        .fail_on
-        .is_some_and(|threshold| report.summary.at_or_above(threshold) > 0);
-    Ok(u8::from(failed))
+    // Exit code from the SAME single-sourced gate the agent `GATE:` line renders
+    // (D-03) — `--fail-on` OR `--min-score`, no bespoke check-only threshold.
+    Ok(u8::from(gate.failed))
 }
 
 fn display_path(path: &Path) -> String {

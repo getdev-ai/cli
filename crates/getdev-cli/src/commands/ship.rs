@@ -38,7 +38,11 @@ pub struct ShipArgs {
     /// The ONE opt-in that lets getdev execute project code (the build). Off by
     /// default; the single subprocess spawn lives in this module.
     pub run_build: bool,
-    pub json: bool,
+    /// Resolved stdout format (global flag, D-04/D-10): human | json | agent.
+    pub format: report::Format,
+    /// `--min-score N` (global flag, D-01) — inert on `ship` (no Ship Score);
+    /// carried uniformly so every findings command routes the gate identically.
+    pub min_score: Option<u8>,
     /// Write the full JSON report here; terminal keeps a short summary (global flag).
     pub output: Option<std::path::PathBuf>,
     pub no_color: bool,
@@ -142,86 +146,104 @@ pub fn run(args: &ShipArgs) -> anyhow::Result<u8> {
         })
         .collect();
 
+    // The single-sourced exit gate (D-02/D-03): both the agent `GATE:` line and
+    // the findings half of the exit code below read this ONE computation.
+    // `--min-score` is inert here (ship sets no score).
+    let gate = report::evaluate_gate(&report, args.fail_on, args.min_score);
+
     if let Some(out_path) = args.output.as_deref() {
-        super::emit_report_file(&report, out_path, args.json, args.no_color)?;
-    } else if args.json {
-        print!("{}", report::render_json(&report)?);
+        // `-o` always writes JSON regardless of `--format` (D-11); machine
+        // formats print only the path, human prints the short summary.
+        super::emit_report_file(
+            &report,
+            out_path,
+            !matches!(args.format, report::Format::Human),
+            args.no_color,
+        )?;
     } else {
-        let color = ColorMode::resolve(args.no_color, std::io::stdout().is_terminal());
-        print!(
-            "{}",
-            report::render_terminal(&report, color, args.verbose > 0)
-        );
-        if !args.quiet {
-            println!();
-            println!("stack: {} · target: {}", stack.as_str(), target.as_str());
-            match applied_ok {
-                Some(applied) => {
-                    println!(
-                        "wrote {} file(s): {}",
-                        applied.files_written.len(),
-                        applied
-                            .files_written
-                            .iter()
-                            .map(|p| p
-                                .file_name()
-                                .map(|n| n.to_string_lossy().into_owned())
-                                .unwrap_or_default())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    );
-                    if stack == ShipStack::Unknown {
-                        println!(
+        match args.format {
+            report::Format::Json => print!("{}", report::render_json(&report)?),
+            report::Format::Agent => print!("{}", report::render_agent(&report, &gate)),
+            report::Format::Human => {
+                let color = ColorMode::resolve(args.no_color, std::io::stdout().is_terminal());
+                print!(
+                    "{}",
+                    report::render_terminal(&report, color, args.verbose > 0)
+                );
+                if !args.quiet {
+                    println!();
+                    println!("stack: {} · target: {}", stack.as_str(), target.as_str());
+                    match applied_ok {
+                        Some(applied) => {
+                            println!(
+                                "wrote {} file(s): {}",
+                                applied.files_written.len(),
+                                applied
+                                    .files_written
+                                    .iter()
+                                    .map(|p| p
+                                        .file_name()
+                                        .map(|n| n.to_string_lossy().into_owned())
+                                        .unwrap_or_default())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            );
+                            if stack == ShipStack::Unknown {
+                                println!(
                             "note: stack not recognized — no Dockerfile generated (add a manifest so getdev can detect it)"
+                        );
+                            }
+                        }
+                        None => {
+                            // Dry run — show the checklist getdev *would* write.
+                            println!(
+                                "dry run — nothing written (getdev ship --write to generate):"
+                            );
+                            println!();
+                            print!("{ship_md}");
+                        }
+                    }
+                }
+                if !skipped.is_empty() {
+                    if args.verbose > 0 {
+                        println!("{} unreadable file(s) skipped:", skipped.len());
+                        for reason in &skipped {
+                            println!("  - {reason}");
+                        }
+                    } else if !args.quiet {
+                        println!(
+                            "{} unreadable file(s) skipped (-v for details)",
+                            skipped.len()
                         );
                     }
                 }
-                None => {
-                    // Dry run — show the checklist getdev *would* write.
-                    println!("dry run — nothing written (getdev ship --write to generate):");
-                    println!();
-                    print!("{ship_md}");
+                if !filter_outcome.suppressed.is_empty() {
+                    if args.verbose > 0 {
+                        println!(
+                            "{} finding(s) suppressed by config:",
+                            filter_outcome.suppressed.len()
+                        );
+                        for s in &filter_outcome.suppressed {
+                            println!(
+                                "  - {} {} — {}",
+                                s.finding.id,
+                                s.finding.file,
+                                s.reason.describe()
+                            );
+                        }
+                    } else if !args.quiet {
+                        println!(
+                            "{} finding(s) suppressed by config (-v for details)",
+                            filter_outcome.suppressed.len()
+                        );
+                    }
                 }
-            }
-        }
-        if !skipped.is_empty() {
-            if args.verbose > 0 {
-                println!("{} unreadable file(s) skipped:", skipped.len());
-                for reason in &skipped {
-                    println!("  - {reason}");
-                }
-            } else if !args.quiet {
-                println!(
-                    "{} unreadable file(s) skipped (-v for details)",
-                    skipped.len()
-                );
-            }
-        }
-        if !filter_outcome.suppressed.is_empty() {
-            if args.verbose > 0 {
-                println!(
-                    "{} finding(s) suppressed by config:",
-                    filter_outcome.suppressed.len()
-                );
-                for s in &filter_outcome.suppressed {
-                    println!(
-                        "  - {} {} — {}",
-                        s.finding.id,
-                        s.finding.file,
-                        s.reason.describe()
-                    );
-                }
-            } else if !args.quiet {
-                println!(
-                    "{} finding(s) suppressed by config (-v for details)",
-                    filter_outcome.suppressed.len()
-                );
             }
         }
     }
 
-    // The mutate error is propagated only now — the findings (and, for --json,
-    // the full report) have already printed above (env.rs F4 precedent).
+    // The mutate error is propagated only now — the findings (and, for a machine
+    // format, the full report) have already printed above (env.rs F4 precedent).
     if let Some(Err(err)) = applied_result {
         return Err(err.into());
     }
@@ -233,10 +255,9 @@ pub fn run(args: &ShipArgs) -> anyhow::Result<u8> {
         build_failed = !run_project_build(stack, &args.path, args.quiet);
     }
 
-    let findings_failed = args
-        .fail_on
-        .is_some_and(|threshold| report.summary.at_or_above(threshold) > 0);
-    Ok(u8::from(findings_failed || build_failed))
+    // The findings half of the exit reads the SAME single-sourced gate the agent
+    // `GATE:` line renders (D-03); the build half is ship's own opt-in signal.
+    Ok(u8::from(gate.failed || build_failed))
 }
 
 /// A whole-file [`PlannedWrite::WriteFile`] for `path` (its `original` is the

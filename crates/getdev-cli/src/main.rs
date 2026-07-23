@@ -9,6 +9,7 @@ use std::path::PathBuf;
 
 use getdev_core::config::{self, Config};
 use getdev_core::findings::Severity;
+use getdev_core::report;
 
 #[derive(Parser)]
 #[command(
@@ -33,9 +34,26 @@ struct Cli {
 /// `env`/`real` only — every command now genuinely shares one flag surface.
 #[derive(Args, Debug, Clone)]
 struct GlobalArgs {
-    /// Machine-readable output (findings schema, docs/SPEC-FINDINGS.md)
+    /// Machine-readable output (findings schema, docs/SPEC-FINDINGS.md).
+    /// Back-compat alias for `--format=json` (docs/PLAN.md §2.2, D-04).
     #[arg(long, global = true)]
     json: bool,
+    /// Output format for findings commands: `human` (default terminal),
+    /// `json` (the findings envelope), or `agent` (the token-lean, ANSI-free
+    /// LLM format). Conflicts with `--json` (which is the `json` alias)
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        default_value = "human",
+        value_name = "FORMAT",
+        conflicts_with = "json"
+    )]
+    format: OutputFormat,
+    /// Exit code 1 if the Ship Score is below N (0-100) — the Ship-Score twin
+    /// of `--fail-on`; effective only where a score exists (`check`)
+    #[arg(long, global = true, value_name = "0-100", value_parser = parse_min_score)]
+    min_score: Option<u8>,
     /// Write the full JSON report to FILE (findings commands: check/real/
     /// audit/review/env/ship); the terminal keeps a short summary. With
     /// --json, only the file path is printed
@@ -78,6 +96,8 @@ impl Default for GlobalArgs {
     fn default() -> Self {
         Self {
             json: false,
+            format: OutputFormat::Human,
+            min_score: None,
             output: None,
             quiet: false,
             verbose: 0,
@@ -89,6 +109,45 @@ impl Default for GlobalArgs {
             offline: false,
         }
     }
+}
+
+/// The `--format` values (docs/SPEC-FINDINGS.md §Renderers, D-04). A thin clap
+/// `ValueEnum` at the CLI boundary mapped onto [`getdev_core::report::Format`],
+/// which owns the canonical three render targets. SARIF etc. remain the v0.5
+/// `--format` slot — this reserves the flag with exactly three values.
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+enum OutputFormat {
+    /// The default terminal render (grouped, colored — a human reading aid).
+    #[default]
+    Human,
+    /// The serialized findings envelope (same as `--json`).
+    Json,
+    /// The deterministic, ANSI-free, token-lean LLM format.
+    Agent,
+}
+
+impl From<OutputFormat> for report::Format {
+    fn from(format: OutputFormat) -> Self {
+        match format {
+            OutputFormat::Human => Self::Human,
+            OutputFormat::Json => Self::Json,
+            OutputFormat::Agent => Self::Agent,
+        }
+    }
+}
+
+/// `--min-score` accepts an integer `0..=100` (a Ship-Score floor); anything
+/// above 100 is a clean parse error (docs/PLAN.md §2.2, D-01). Parsed through a
+/// wider integer first so `101`..`255` are rejected rather than silently
+/// wrapping into a valid `u8`.
+fn parse_min_score(raw: &str) -> Result<u8, String> {
+    let value: u32 = raw
+        .parse()
+        .map_err(|_| format!("`{raw}` is not a valid score (expected an integer 0-100)"))?;
+    if value > 100 {
+        return Err(format!("--min-score must be 0-100, got {value}"));
+    }
+    Ok(value as u8)
 }
 
 /// `--fail-on` accepts `critical|high|medium|low` only — `info` is rejected
@@ -298,11 +357,31 @@ fn main() -> std::process::ExitCode {
 /// doc-comment for why this stays explicit rather than becoming hidden
 /// global state.
 fn run(cli: Cli) -> anyhow::Result<u8> {
+    // Resolve the effective output format ONCE (D-04): an explicit `--format`
+    // wins; a bare `--json` maps to `Json`; the default is `Human`. `--format`
+    // `conflicts_with = "json"` at the clap level, so both can never be set —
+    // hence `--json` present ⇒ `--format` is at its default and we pick `Json`.
+    // `json` is the derived "machine-json" bool the non-findings commands
+    // (doctor/snap/back/init/update) still take; the six findings commands take
+    // the full `format`, so `--format=json` also aliases for them.
+    let format = if cli.global.json {
+        report::Format::Json
+    } else {
+        report::Format::from(cli.global.format)
+    };
+    let json = matches!(format, report::Format::Json);
+    let min_score = cli.global.min_score;
+
     // One-time first-run welcome (best-effort): the decorative banner shows once,
     // on the first getdev invocation of ANY command, then never again. It NEVER
     // fails or delays a command — see `maybe_first_run_welcome`. Runs before the
-    // doctor early-return so it covers every command uniformly.
-    maybe_first_run_welcome(cli.global.quiet, cli.global.json, cli.global.no_color);
+    // doctor early-return so it covers every command uniformly. Any machine
+    // format (`json`/`agent`) suppresses it, exactly like `--json` always did.
+    maybe_first_run_welcome(
+        cli.global.quiet,
+        !matches!(format, report::Format::Human),
+        cli.global.no_color,
+    );
 
     // B3: doctor must survive a malformed config — it exists specifically to
     // diagnose things like a broken `.getdev.toml`, so a `ConfigError` here
@@ -323,7 +402,7 @@ fn run(cli: Cli) -> anyhow::Result<u8> {
             path: cli.global.path.clone(),
             offline,
             fix: cli.global.fix,
-            json: cli.global.json,
+            json,
             quiet: cli.global.quiet,
             no_color: cli.global.no_color,
         });
@@ -333,7 +412,6 @@ fn run(cli: Cli) -> anyhow::Result<u8> {
     let offline = config::offline_resolved(cli.global.offline, &cfg);
     let quiet = cli.global.quiet;
     let verbose = cli.global.verbose;
-    let json = cli.global.json;
     let output = cli.global.output.clone();
     let no_color = cli.global.no_color;
     let fail_on = cli.global.fail_on;
@@ -348,7 +426,8 @@ fn run(cli: Cli) -> anyhow::Result<u8> {
         // aggregation run.
         Command::Check => commands::check::run(&commands::check::CheckArgs {
             path,
-            json,
+            format,
+            min_score,
             output: output.clone(),
             no_color,
             fail_on,
@@ -379,7 +458,8 @@ fn run(cli: Cli) -> anyhow::Result<u8> {
             let include_urls = include_urls || cfg.env.include_urls;
             commands::env::run(&commands::env::EnvArgs {
                 path,
-                json,
+                format,
+                min_score,
                 output: output.clone(),
                 no_color,
                 fail_on,
@@ -397,7 +477,8 @@ fn run(cli: Cli) -> anyhow::Result<u8> {
             models_only,
         } => commands::real::run(&commands::real::RealArgs {
             path,
-            json,
+            format,
+            min_score,
             output: output.clone(),
             no_color,
             fail_on,
@@ -419,7 +500,8 @@ fn run(cli: Cli) -> anyhow::Result<u8> {
             let severity_min = severity.unwrap_or(cfg.audit.severity_min);
             commands::audit::run(&commands::audit::AuditArgs {
                 path,
-                json,
+                format,
+                min_score,
                 output: output.clone(),
                 no_color,
                 fail_on,
@@ -466,7 +548,8 @@ fn run(cli: Cli) -> anyhow::Result<u8> {
             };
             commands::review::run(&commands::review::ReviewArgs {
                 path,
-                json,
+                format,
+                min_score,
                 output: output.clone(),
                 no_color,
                 fail_on,
@@ -491,7 +574,8 @@ fn run(cli: Cli) -> anyhow::Result<u8> {
             write,
             target: target.map(Into::into),
             run_build,
-            json,
+            format,
+            min_score,
             output: output.clone(),
             no_color,
             fail_on,
