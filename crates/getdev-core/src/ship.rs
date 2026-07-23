@@ -632,7 +632,12 @@ pub fn missing_env_declaration(ctx: &ScanContext, root: &Path) -> Vec<Finding> {
                 )),
                 fixable: false,
                 refs: Vec::new(),
-                seed: crate::fingerprint::FingerprintSeed::default(),
+                // D-01/D-11 (Shape 2, node discarded upstream): the referenced
+                // env-var name is the discriminating content.
+                seed: crate::fingerprint::FingerprintSeed {
+                    node_kind: "env_var_ref",
+                    matched_text: env_ref.name.clone(),
+                },
                 fingerprint: None,
             });
         }
@@ -710,7 +715,12 @@ pub fn hardcoded_port(ctx: &ScanContext) -> Vec<Finding> {
                 ),
                 fixable: false,
                 refs: Vec::new(),
-                seed: crate::fingerprint::FingerprintSeed::default(),
+                // D-01/D-11 (Shape 1, real node in scope): anchor on the port
+                // literal node's kind + text, from the same parse-once source.
+                seed: crate::fingerprint::FingerprintSeed {
+                    node_kind: node.kind(),
+                    matched_text: node.utf8_text(source).unwrap_or_default().to_owned(),
+                },
                 fingerprint: None,
             });
         }
@@ -767,7 +777,11 @@ pub fn blocking_findings(ctx: &ScanContext, root: &Path) -> Vec<Finding> {
             remediation: f.remediation,
             fixable: false,
             refs: f.refs,
-            seed: crate::fingerprint::FingerprintSeed::default(),
+            // D-11 (Shape 5): re-wrapping an already-seeded audit finding —
+            // forward its seed verbatim. The distinct rule_id
+            // `ship/blocking-findings` already differentiates the hash (D-03),
+            // so no new content need be captured.
+            seed: f.seed.clone(),
             fingerprint: None,
         })
         .collect();

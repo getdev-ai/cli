@@ -265,6 +265,10 @@ pub fn run(args: &EnvArgs) -> anyhow::Result<u8> {
 }
 
 fn env_file_committed_finding(env_file: &str) -> Finding {
+    // Project-level finding (`line: None`) — no node to anchor on, so the D-02
+    // message fallback is the stable seed. Clone it before it moves into the
+    // `message` field; the batch pass normalizes matched_text centrally.
+    let message = format!("{env_file} is committed to git — its secrets are in history");
     Finding {
         id: "env/env-file-committed".to_owned(),
         command: "env".to_owned(),
@@ -274,7 +278,7 @@ fn env_file_committed_finding(env_file: &str) -> Finding {
         line: None,
         column: None,
         end_line: None,
-        message: format!("{env_file} is committed to git — its secrets are in history"),
+        message: message.clone(),
         detail: Some(
             "values in git history stay exposed even after the file is removed; \
              getdev never rewrites history automatically"
@@ -286,7 +290,10 @@ fn env_file_committed_finding(env_file: &str) -> Finding {
         )),
         fixable: false,
         refs: vec!["https://getdev.ai/rules/env/env-file-committed".to_owned()],
-        seed: getdev_core::fingerprint::FingerprintSeed::default(),
+        seed: getdev_core::fingerprint::FingerprintSeed {
+            node_kind: "message_fallback",
+            matched_text: message,
+        },
         fingerprint: None,
     }
 }

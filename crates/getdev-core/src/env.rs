@@ -236,7 +236,14 @@ pub fn findings(plan: &EnvPlan, options: &EnvOptions) -> Vec<Finding> {
                 remediation: Some("run: getdev env --write".to_owned()),
                 fixable: true,
                 refs: vec!["https://getdev.ai/rules/env/hardcoded-secret".to_owned()],
-                seed: crate::fingerprint::FingerprintSeed::default(),
+                // D-05: the raw secret value is the identity seed — two distinct
+                // secrets on one line differentiate intrinsically. It is hashed
+                // only; `FingerprintSeed`'s redacting `Debug` + `#[serde(skip)]`
+                // keep `entry.value` off every wire/renderer (Invariant 2).
+                seed: crate::fingerprint::FingerprintSeed {
+                    node_kind: "secret_literal",
+                    matched_text: entry.value.clone(),
+                },
                 fingerprint: None,
             }
         })
