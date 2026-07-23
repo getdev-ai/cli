@@ -282,3 +282,68 @@ fn scan_actually_covers_the_workspace() {
         );
     }
 }
+
+/// D-15 (MCP-01): `getdev-mcp` graduated into the workspace as a PREBUILT
+/// release artifact, so its network-free guarantee is now load-bearing — it
+/// ships to users. Assertion 1 already fails if the crate ever gains a
+/// `reqwest::`/`std::net::`/socket symbol (the walk covers `crates/*/src`), but
+/// that is emergent; this makes the requirement's "scope its source" concrete
+/// with an explicit POSITIVE assertion: `crates/getdev-mcp/src` is (a) actually
+/// scanned and (b) contains ZERO network symbols. getdev-mcp uses
+/// `std::process::Command` (a subprocess — deliberately NOT a network symbol; it
+/// shells out to `getdev`, which owns the egress), so it passes today and must
+/// stay that way. `crates/getdev-mcp/src` is NOT a sanctioned network location —
+/// it is network-FREE, not network-owning.
+#[test]
+fn getdev_mcp_is_network_free() {
+    let root = workspace_root();
+    let mcp_src: PathBuf = ["crates", "getdev-mcp", "src"].iter().collect();
+
+    let mcp_files: Vec<PathBuf> = workspace_source_files(&root)
+        .into_iter()
+        .filter(|f| f.strip_prefix(&root).unwrap_or(f).starts_with(&mcp_src))
+        .collect();
+
+    // (a) the source walk genuinely reaches getdev-mcp — otherwise (b) below
+    // would be vacuously true (e.g. after a crate rename).
+    assert!(
+        !mcp_files.is_empty(),
+        "the workspace source walk found no files under `{}` — getdev-mcp is not \
+         being scanned, so its network-free proof would vacuously pass",
+        mcp_src.display()
+    );
+
+    // getdev-mcp must NOT be a sanctioned network location — it owns no network
+    // code, it only spawns `getdev`.
+    assert!(
+        !allowed_network_locations()
+            .iter()
+            .any(|loc| loc == &mcp_src),
+        "getdev-mcp must not be listed as a network-owning location — it is \
+         network-FREE (it shells out to `getdev`), not network-owning"
+    );
+
+    // (b) zero network symbols anywhere under crates/getdev-mcp/src.
+    let mut violations: Vec<String> = Vec::new();
+    for file in &mcp_files {
+        let contents = match fs::read_to_string(file) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let rel = file.strip_prefix(&root).unwrap_or(file).display();
+        for symbol in NETWORK_SYMBOLS {
+            if contents.contains(symbol) {
+                violations.push(format!(
+                    "  {rel}: contains network symbol `{symbol}` — getdev-mcp must \
+                     stay network-free (it shells out to `getdev`; DEC-05/DEC-16)"
+                ));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "getdev-mcp gained a network symbol — it ships prebuilt and must remain \
+         network-free:\n{}",
+        violations.join("\n")
+    );
+}
