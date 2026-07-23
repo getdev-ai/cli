@@ -259,6 +259,21 @@ pub fn render_welcome_banner(version: &str, color: ColorMode) -> String {
     out
 }
 
+/// The one-line first-run clarity hint `getdev check` prints when the project
+/// has no `.getdev.toml` (docs/SPEC-COMMANDS.md `check`): a dim reminder that
+/// config is optional and where to customize it. Human-render only — the caller
+/// (`check`) suppresses it under `--json`/`--quiet`/a non-tty stdout/CI; this
+/// decides only how the dim line looks. It carries a trailing newline so it
+/// slots directly under the score banner. NO call-to-action beyond naming the
+/// command (CLAUDE.md standing rules).
+pub fn render_no_config_hint(color: ColorMode) -> String {
+    let hint = "using built-in defaults · run `getdev init` to customize";
+    match color {
+        ColorMode::On => format!("{}\n", hint.dimmed()),
+        ColorMode::Off => format!("{hint}\n"),
+    }
+}
+
 /// "top 3 things to fix first" (docs/SPEC-COMMANDS.md `check`): the three
 /// highest-severity findings. `findings` is already sorted worst-first by
 /// [`FindingsReport::new`], so the slice head IS that ordering — deterministic

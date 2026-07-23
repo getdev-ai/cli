@@ -275,6 +275,19 @@ pub fn run(args: &CheckArgs) -> anyhow::Result<u8> {
     } else {
         let color = ColorMode::resolve(args.no_color, std::io::stdout().is_terminal());
         print!("{}", report::render_terminal(&report, color));
+        // First-run clarity (docs/SPEC-COMMANDS.md `check`): when the project has
+        // no `.getdev.toml`, tell the user check ran on built-in defaults and how
+        // to customize. Human render only — suppressed under `--quiet`, a non-tty
+        // stdout, and CI; `--json`/`-o` never reach this branch, so the hint is
+        // never in the JSON envelope (determinism). A single stat, never a config
+        // re-read; never affects the Ship Score or exit code.
+        if !args.quiet
+            && std::io::stdout().is_terminal()
+            && std::env::var_os("CI").is_none()
+            && !args.path.join(".getdev.toml").exists()
+        {
+            print!("{}", report::render_no_config_hint(color));
+        }
         // Under `-v`, print the versioned Ship Score weight table (single-
         // sourced in `getdev-core` — never inlined here).
         if args.verbose > 0 {
