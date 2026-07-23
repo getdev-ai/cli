@@ -34,6 +34,23 @@ Source: distilled from the project master plan (internal) §5.
 - Inline suppression (in code): `// getdev-ignore <rule-id> -- <reason>` — reason required;
   a bare ignore emits an `info` finding.
 
+## Detection precision (v0.2) — deliberately no new config
+
+The v0.2 detection-precision work (Phase 13) adds **no new config key**. Two behaviors it
+introduces are **auto-detected / always-on** and intentionally have no knob:
+
+- **TS/Vite path-alias resolution** — `tsconfig.json` `compilerOptions.paths`/`baseUrl` and
+  `vite.config.*` `resolve.alias` entries are discovered and resolved automatically, so aliased
+  imports (`@/…`, `@shared/…`) are not misreported as phantom/nonexistent. No path list is
+  configured by the user.
+- **Test-file secret-fixture suppression** — the `audit/hardcoded-secret` entropy fallback is
+  suppressed in `*.test.*`/`*.spec.*`/`**/tests/**` files as always-on behavior (provider-format
+  keys still fire everywhere).
+
+This is a recorded, deliberate decision: keeping these auto/always-on leaves the parser surface and
+`config.rs` untouched (a per-project override knob is deferred, not forgotten — see the phase's
+deferred ideas). A future reader should **not** "add the missing config" for either behavior.
+
 ## Full v0.1 surface (with defaults)
 
 ```toml
