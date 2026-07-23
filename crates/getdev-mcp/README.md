@@ -29,13 +29,18 @@ also take `offline`.
 
 - **getdev** installed and on `PATH` (`curl -fsSL https://getdev.ai/install.sh | sh`, or see the
   [main README](../../README.md#install)). Override the binary location with `GETDEV_BIN`.
-- A recent Rust toolchain to build the server (until a prebuilt `getdev-mcp` ships).
 
-## Build
+## Install
+
+`getdev-mcp` ships **prebuilt** in each getdev release — no Rust toolchain, no `cargo build`.
+Download the `getdev-mcp-<target>` archive from the
+[latest GitHub Release](https://github.com/getdev-ai/cli/releases/latest), unpack it, and point
+your agent at the `getdev-mcp` binary (see below).
+
+To build from source instead (e.g. for local development), it is a normal workspace member:
 
 ```bash
-cd integrations/mcp
-cargo build --release
+cargo build --release -p getdev-mcp
 # binary at ./target/release/getdev-mcp
 ```
 
@@ -96,6 +101,6 @@ You should see an `initialize` result and the 7-tool catalogue.
 - **`env` is detect-only** — the MCP tool never passes `--write`, so an agent can *find* secrets but
   extraction stays an explicit human action.
 
-This crate is a preview ahead of the `getdev-mcp` slot in the
-[Agentic / auto-mode workflow](../../docs/ROADMAP.md) roadmap; it will graduate into the main
-workspace (and ship prebuilt) as that milestone lands.
+This crate is a first-class workspace member shipped **prebuilt** in each getdev release
+(DEC-16). Phase 17 (MCP-02) bundles it into the Claude-Code plugin installer and lists it on the
+MCP registry.

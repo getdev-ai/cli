@@ -6,6 +6,7 @@ members = [
     "crates/getdev-registry",
     "crates/getdev-gitx",
     "crates/getdev-grammars",
+    "crates/getdev-mcp",
 ]
 
 [workspace.package]

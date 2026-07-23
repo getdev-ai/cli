@@ -1,0 +1,41 @@
+# getdev-mcp — a Model Context Protocol server exposing getdev to AI agents.
+#
+# A first-class workspace member (DEC-16), shipped PREBUILT via cargo-dist: the
+# per-package `[package.metadata.dist] dist = true` below overrides `publish =
+# false` to force the binary into the release artifacts WITHOUT publishing to
+# crates.io, and `installers = []` makes it archive-only (no npm/homebrew/shell
+# installer of its own — only the `getdev` CLI mints those).
+#
+# It respects getdev's settled invariants: NO async runtime (a blocking stdio
+# JSON-RPC loop, no tokio — DEC-01; rmcp/tokio are rejected), and it makes NO
+# network calls of its own — every tool shells out to the installed `getdev`
+# binary, which owns the (already egress-confined) network behavior.
+# `serde`/`serde_json` only; nothing banned. It inherits the workspace lints
+# (`unsafe_code = "forbid"`, `unwrap_used`/`expect_used = "deny"`) below.
+[package]
+name = "getdev-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Model Context Protocol (MCP) server exposing getdev as tools for AI agents"
+publish = false
+
+# Ship PREBUILT without publishing to crates.io: cargo-dist's documented
+# override — `dist = true` forces this binary into the release artifacts even
+# though `publish = false`. Archive-only: no per-app installers (only the CLI
+# generates shell/powershell/npm/homebrew installers).
+[package.metadata.dist]
+dist = true
+installers = []
+
+[[bin]]
+name = "getdev-mcp"
+path = "src/main.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

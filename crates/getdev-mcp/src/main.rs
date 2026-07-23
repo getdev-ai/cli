@@ -50,7 +50,10 @@ fn main() {
             Ok(v) => v,
             Err(err) => {
                 // We can't know the id of an unparseable message (JSON-RPC §5.1).
-                write_message(&mut stdout, &error(Value::Null, -32700, &format!("parse error: {err}")));
+                write_message(
+                    &mut stdout,
+                    &error(Value::Null, -32700, &format!("parse error: {err}")),
+                );
                 continue;
             }
         };
@@ -208,7 +211,10 @@ fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
         .and_then(Value::as_str)
         .unwrap_or(".")
         .to_owned();
-    let offline = args.get("offline").and_then(Value::as_bool).unwrap_or(false);
+    let offline = args
+        .get("offline")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
 
     let mut argv: Vec<String> = Vec::new();
     match name {
@@ -280,7 +286,8 @@ fn run_getdev(getdev_bin: &str, argv: &[String]) -> Result<String, String> {
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
         Err(format!(
             "getdev exited with {} and no output. stderr: {}",
-            output.status, stderr.trim()
+            output.status,
+            stderr.trim()
         ))
     }
 }
@@ -310,6 +317,11 @@ fn write_message(stdout: &mut io::Stdout, message: &Value) {
 
 #[cfg(test)]
 mod tests {
+    // The crate now inherits the workspace lints (`unwrap_used`/`expect_used =
+    // "deny"`); tests are the sanctioned exception, matching every other crate's
+    // test module.
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
     use super::*;
 
     #[test]
@@ -368,7 +380,10 @@ mod tests {
     #[test]
     fn back_is_non_interactive_and_takes_optional_id() {
         let argv = build_argv("getdev_back", &json!({ "id": 3 })).unwrap();
-        assert!(argv.contains(&"--quiet".to_owned()), "back must not block on a prompt");
+        assert!(
+            argv.contains(&"--quiet".to_owned()),
+            "back must not block on a prompt"
+        );
         assert!(argv.contains(&"3".to_owned()));
     }
 
@@ -394,6 +409,8 @@ mod tests {
         let req = json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/list" });
         let resp = handle("getdev", &req).expect("reply");
         assert_eq!(resp["id"], 7);
-        assert!(resp["result"]["tools"].as_array().is_some_and(|t| !t.is_empty()));
+        assert!(resp["result"]["tools"]
+            .as_array()
+            .is_some_and(|t| !t.is_empty()));
     }
 }
