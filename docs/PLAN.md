@@ -31,13 +31,15 @@ Canonical working reference for getdev's product definition: command inventory, 
 ### 2.2 Global flags (every command)
 
 ```
---json              machine-readable output (findings schema, docs/SPEC-FINDINGS.md)
+--json              machine-readable output (findings schema, docs/SPEC-FINDINGS.md); alias for --format=json
+--format <fmt>      output format: human (default) | json | agent; --json is an alias for --format=json (conflicts with --json)
 --quiet, -q         suppress banner/progress; findings only
 --verbose, -v       debug-level detail (repeatable: -vv)
 --no-color          disable ANSI colors (also honors NO_COLOR env)
 --config <path>     alternate config file (default: ./.getdev.toml)
 --path <dir>        run against a directory other than CWD
 --fail-on <sev>     exit code 1 if any finding ≥ severity (critical|high|medium|low)
+--min-score <0-100> exit code 1 if the Ship Score is below N (check only; inert elsewhere)
 --fix               apply auto-fixes where the command supports them
 --offline           never hit the network; use cache only
 --version
@@ -48,10 +50,17 @@ Canonical working reference for getdev's product definition: command inventory, 
 
 | Code | Meaning |
 |---|---|
-| `0` | clean / below `--fail-on` threshold |
-| `1` | findings ≥ `--fail-on` |
+| `0` | clean / all configured gates passed |
+| `1` | a configured gate failed (findings ≥ `--fail-on`, or Ship Score < `--min-score`) |
 | `2` | execution error |
 | `3` | config error |
+
+`--fail-on` and `--min-score` are **independent gates over the same exit code `1`**; they do not
+override each other. The run exits `1` if **either** trips and `0` only when **both** pass
+(OR-to-fail / AND-to-pass). Execution (`2`) and config (`3`) errors still dominate — they
+short-circuit before the gate is evaluated. `--min-score` is global but only `check` computes a
+Ship Score, so it is inert (a documented no-op, not an error) on every other command; `--format`
+governs stdout on every findings command.
 
 ### 2.3 Per-command specification (v0.1 scope) — CONTRACTUAL
 

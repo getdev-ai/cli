@@ -120,6 +120,69 @@ to the hasher only. It is a crate-internal, `#[serde(skip)]` value with a redact
 never reaches any field, any renderer, or the wire — only the one-way `gdv1:` digest is
 serialized. This upholds Invariant 2 (secrets never appear).
 
+## Renderers
+
+There are **three renderers**, all consuming the one `FindingsReport` / `Vec<Finding>` schema
+(Invariant 1) and all upholding secret masking (Invariant 2) — no renderer has its own shape or
+its own finding fields:
+
+- **`human`** — the default terminal render: grouped by file, colored, glyph severities,
+  summary-by-default collapse when long (B-06). A human reading aid.
+- **`json`** (`--json`, alias `--format=json`) — the serialized envelope above, the full machine
+  report.
+- **`agent`** (`--format=agent`) — a deterministic, plain-text, ANSI-free, LLM-shaped report:
+  `--json` minus the JSON tax, plus a synthesized next-actions checklist. Selected on stdout for
+  any findings command (`check`/`real`/`audit`/`review`/`env`/`ship`).
+
+### The `agent` output shape
+
+```
+GATE: <pass|fail>[ · score NN/100 < min NN][ · <sev>+ findings ≥ <fail-on>]
+SUMMARY: <N> findings · <C> critical · <H> high · <M> medium · <L> low · <I> info · <K> fixable[ · score NN/100]
+FINDINGS:
+<SEV> <id> <file>:<line>:<col> — <message> [fixable] <gdv1:…[#N]>
+… (one line per finding, in the report's existing worst-first total order)
+NEXT ACTIONS:
+- <deduped remediation 1>
+- <deduped remediation 2>
+```
+
+- **`GATE:`** — `pass` or `fail`, rendered from the **same** gate evaluation that computes the
+  exit code (so the printed verdict and the exit code can never disagree). The `score NN/100 <
+  min NN` fragment appears only when `--min-score` set the gate; the `<sev>+ findings ≥ <fail-on>`
+  fragment only when `--fail-on` did.
+- **`SUMMARY:`** — the severity tally; the `· score NN/100` fragment appears only when
+  `report.score` is `Some` (i.e. `check` set it — every other command omits it, mirroring the
+  envelope's omit-not-null score).
+- **`FINDINGS:`** — one **dense line per finding**, flat (no per-file grouping — a greppable,
+  worst-first total-ordered list), carrying `severity · id · file:line:col · message · [fixable]
+  · gdv1:…`. Position renders as `file:line:col`, `file:line`, or `file` per the same
+  `(line, column)` availability logic as the human renderer, and confidence < high is appended as
+  `(confidence: low)` (Finding fields §`confidence`: renderers must distinguish confidence). The
+  `gdv1:` fingerprint is embedded **verbatim** so an agent can diff runs / cross-reference a
+  baseline without a second `--json` call — this is the whole point of the agent format existing
+  alongside `--json`.
+- **`NEXT ACTIONS:`** — the **deduped** set of finding remediations, sourced from each finding's
+  `suggestion` (falling back to `remediation`), deduped by action string, ordered worst-severity-
+  first then by first appearance (deterministic because `findings` is already totally ordered),
+  and capped at a small bounded constant with a trailing `… (M more)` line when capped. Findings
+  with no suggestion/remediation contribute nothing. This turns N noisy findings into a short,
+  actionable checklist.
+- **No findings:** `FINDINGS:` and `NEXT ACTIONS:` collapse to a single `no findings — clean` line.
+- **No summary-by-default collapse.** Unlike the human render, the agent format has no >25-finding
+  collapse (B-06) — it always carries the full machine list, exactly like `--json`.
+
+**Secret masking (Invariant 2).** The agent renderer, like every renderer, prints only the
+already-masked `Finding` fields (`message` masked preview, `id`, `file`, position) and the one-way
+`gdv1:` digest. It **never** touches the identity seed (`#[serde(skip)]`, redacting `Debug`), which
+for `env` findings *is the raw secret value*. Two distinct secrets appear as two distinct `gdv1:`
+fingerprints with their raw values absent — the same guarantee as `--json`.
+
+**Size (measured).** The agent format is smaller than `--json` by construction (no JSON
+keys/braces/quotes/pretty-print indentation). `len(render_agent) < len(render_json)` on the
+reference corpus is a **tested fact** (a real byte/char comparison, not eyeballed); byte length is
+the token-count proxy for this ASCII-dominant output.
+
 ## Invariants
 
 1. **One schema for everything.** No analyzer emits any other shape; renderers, Ship Score,
