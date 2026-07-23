@@ -371,3 +371,153 @@ fn no_config_hint_is_absent_from_machine_output() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---- LOOP-01 / LOOP-02 (12-03): --min-score gate + --format=agent -----------
+
+/// Seed a scratch project with a hardcoded live secret (critical) plus a debug
+/// leftover (medium) so `check` yields a multi-finding, well-below-100 Ship
+/// Score — the representative fixture for the gate and agent-format tests.
+fn seed_multi_finding_project(dir: &Path) {
+    std::fs::write(
+        dir.join("app.js"),
+        "const stripeKey = \"sk_live_ABCDEFGHIJKLMNOP01\";\n\
+         console.log(\"debug\", stripeKey);\n",
+    )
+    .unwrap();
+}
+
+/// Run `getdev check` over `dir` returning RAW stdout + exit code (no forced
+/// `--json`, so `--format=agent`/`--min-score` can be exercised). Hermetic:
+/// offline + seeded cache + nulled git config, like `run_check_json`.
+fn run_check_raw(dir: &Path, cache_dir: &Path, extra: &[&str]) -> (String, i32) {
+    let mut cmd = getdev();
+    cmd.env("GETDEV_OFFLINE", "1")
+        .env("GETDEV_CACHE_DIR", cache_dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .arg("check")
+        .arg("--offline")
+        .arg("--no-color")
+        .arg("--path")
+        .arg(dir);
+    for a in extra {
+        cmd.arg(a);
+    }
+    let output = cmd.assert().get_output().clone();
+    let code = output.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    (stdout, code)
+}
+
+/// SC1 / D-01/D-02: `--min-score` shares exit code `1` with `--fail-on` — a
+/// score below the floor exits `1`; a score at/above it exits `0`.
+#[test]
+fn min_score_gate_shares_exit_code_one() {
+    let dir = tmp_dir("min-score-gate");
+    let cache = dir.join("cache");
+    seed_multi_finding_project(&dir);
+
+    // The critical secret drags the Ship Score well below 100.
+    let (_out, fail_code) = run_check_raw(&dir, &cache, &["--min-score", "100", "--quiet"]);
+    assert_eq!(
+        fail_code, 1,
+        "score < --min-score must exit 1 (shared with --fail-on)"
+    );
+
+    let (_out, pass_code) = run_check_raw(&dir, &cache, &["--min-score", "1", "--quiet"]);
+    assert_eq!(pass_code, 0, "score >= --min-score must exit 0");
+}
+
+/// D-02: the two gates compose OR-to-fail / AND-to-pass — either tripping fails,
+/// both passing succeeds.
+#[test]
+fn min_score_and_fail_on_compose_or_to_fail() {
+    // Dirty project: a critical secret → a critical finding AND a sub-100 score.
+    let dirty = tmp_dir("gate-dirty");
+    let dcache = dirty.join("cache");
+    seed_multi_finding_project(&dirty);
+    // fail-on critical is MET (min-score 0 passes) → 1 (the severity gate trips).
+    let (_o, c_sev) = run_check_raw(
+        &dirty,
+        &dcache,
+        &["--fail-on", "critical", "--min-score", "0", "--quiet"],
+    );
+    assert_eq!(
+        c_sev, 1,
+        "a met --fail-on trips the OR gate even if score passes"
+    );
+    // score gate trips (min 100) while fail-on critical is also met → 1.
+    let (_o, c_both) = run_check_raw(
+        &dirty,
+        &dcache,
+        &["--fail-on", "low", "--min-score", "100", "--quiet"],
+    );
+    assert_eq!(c_both, 1, "both gates tripping → 1");
+
+    // Clean project: no findings, score 100 → both gates pass → 0.
+    let clean = tmp_dir("gate-clean");
+    let ccache = clean.join("cache");
+    std::fs::write(clean.join("ok.js"), "export const x = 1;\n").unwrap();
+    let (_o, c_pass) = run_check_raw(
+        &clean,
+        &ccache,
+        &["--fail-on", "critical", "--min-score", "0", "--quiet"],
+    );
+    assert_eq!(c_pass, 0, "both gates passing → 0 (AND-to-pass)");
+}
+
+/// SC2 / D-05..D-08: `--format=agent` emits the documented
+/// GATE/SUMMARY/FINDINGS/NEXT-ACTIONS shape with the `gdv1:` fingerprint, is
+/// ANSI-free, and leaks no raw secret value.
+#[test]
+fn format_agent_emits_the_documented_shape_no_ansi_no_secret() {
+    let dir = tmp_dir("agent-shape");
+    let cache = dir.join("cache");
+    seed_multi_finding_project(&dir);
+    let (out, _code) = run_check_raw(&dir, &cache, &["--format", "agent"]);
+    assert!(
+        out.starts_with("GATE: "),
+        "agent output starts with GATE:\n{out}"
+    );
+    assert!(
+        out.contains("\nSUMMARY: "),
+        "agent output carries SUMMARY:\n{out}"
+    );
+    assert!(
+        out.contains("\nFINDINGS:\n"),
+        "agent output carries FINDINGS:\n{out}"
+    );
+    assert!(
+        out.contains("NEXT ACTIONS:"),
+        "agent output carries NEXT ACTIONS:\n{out}"
+    );
+    assert!(
+        out.contains("gdv1:"),
+        "agent finding lines carry the gdv1: fingerprint:\n{out}"
+    );
+    assert!(
+        !out.contains('\u{1b}'),
+        "agent output must be ANSI-free:\n{out}"
+    );
+    assert!(
+        !out.contains("sk_live_ABCDEFGHIJKLMNOP01"),
+        "the raw secret value must never appear in agent output:\n{out}"
+    );
+}
+
+/// SC3 / D-09: the agent render is measured strictly smaller than the JSON
+/// render on the same representative project — a real byte comparison.
+#[test]
+fn format_agent_is_smaller_than_json_measured() {
+    let dir = tmp_dir("agent-smaller");
+    let cache = dir.join("cache");
+    seed_multi_finding_project(&dir);
+    let (agent_out, _a) = run_check_raw(&dir, &cache, &["--format", "agent"]);
+    let (json_out, _j) = run_check_raw(&dir, &cache, &["--format", "json"]);
+    assert!(
+        agent_out.len() < json_out.len(),
+        "agent stdout ({} bytes) must be strictly smaller than json stdout ({} bytes) — SC3",
+        agent_out.len(),
+        json_out.len()
+    );
+}

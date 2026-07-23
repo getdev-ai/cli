@@ -675,3 +675,114 @@ fn fail_on_accepts_every_contractual_severity() {
         );
     }
 }
+
+// ---- LOOP-01 / LOOP-02 (12-03): --format / --json alias / --min-score range -
+
+/// D-04: `--json` still produces the JSON findings envelope (back-compat alias
+/// retained).
+#[test]
+fn json_flag_still_produces_the_findings_envelope() {
+    let dir = tmp_dir("json-alias");
+    std::fs::write(
+        dir.join("pay.js"),
+        "const stripeKey = \"sk_live_FAKEFAKEFAKE1234\";\n",
+    )
+    .unwrap();
+    let assert = getdev().current_dir(&dir).arg("env").arg("--json").assert();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    let report: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|err| panic!("--json must stay valid JSON: {err}\n{stdout}"));
+    assert_eq!(report["schema_version"], "1");
+}
+
+/// D-04: `--format=json` is the alias for `--json` — the same envelope.
+#[test]
+fn format_json_is_an_alias_for_json_output() {
+    let dir = tmp_dir("format-json-alias");
+    std::fs::write(
+        dir.join("pay.js"),
+        "const stripeKey = \"sk_live_FAKEFAKEFAKE1234\";\n",
+    )
+    .unwrap();
+    let assert = getdev()
+        .current_dir(&dir)
+        .arg("env")
+        .arg("--format=json")
+        .assert();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    let report: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|err| panic!("--format=json must be valid JSON: {err}\n{stdout}"));
+    assert_eq!(report["schema_version"], "1");
+}
+
+/// D-04: `--json` and `--format` are mutually exclusive — a clean clap conflict
+/// (exit 2), never a silent format pick.
+#[test]
+fn json_and_format_together_is_a_clap_conflict_exit_2() {
+    let dir = tmp_dir("json-format-conflict");
+    let assert = getdev()
+        .current_dir(&dir)
+        .arg("check")
+        .arg("--json")
+        .arg("--format=agent")
+        .assert()
+        .failure();
+    let code = assert.get_output().status.code().unwrap();
+    assert_eq!(
+        code, 2,
+        "--json + --format is a clap conflict (exit 2), not a silent pick — got {code}"
+    );
+}
+
+/// D-05..D-08: `--format=agent` on a findings command (`env`) emits the agent
+/// shape, is ANSI-free, and leaks no raw secret value.
+#[test]
+fn format_agent_on_env_is_ansi_free_and_leaks_no_secret() {
+    let dir = tmp_dir("agent-env");
+    std::fs::write(
+        dir.join("pay.js"),
+        "const stripeKey = \"sk_live_FAKEFAKEFAKE1234\";\n",
+    )
+    .unwrap();
+    let assert = getdev()
+        .current_dir(&dir)
+        .arg("env")
+        .arg("--format=agent")
+        .arg("--no-color")
+        .assert();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    assert!(
+        stdout.starts_with("GATE: "),
+        "agent starts with GATE:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("gdv1:"),
+        "agent carries the gdv1 fingerprint:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains('\u{1b}'),
+        "agent output must be ANSI-free:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("sk_live_FAKEFAKEFAKE1234"),
+        "the raw secret must never appear in agent output:\n{stdout}"
+    );
+}
+
+/// D-01: `--min-score` above 100 is rejected at parse time (clap error, exit 2).
+#[test]
+fn min_score_above_100_is_a_parse_error_exit_2() {
+    let dir = tmp_dir("min-score-range");
+    let assert = getdev()
+        .current_dir(&dir)
+        .arg("check")
+        .arg("--min-score")
+        .arg("101")
+        .assert()
+        .failure();
+    let code = assert.get_output().status.code().unwrap();
+    assert_eq!(
+        code, 2,
+        "--min-score > 100 must be a clap parse error (exit 2) — got {code}"
+    );
+}
