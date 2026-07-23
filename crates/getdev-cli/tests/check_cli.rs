@@ -276,3 +276,38 @@ fn score_reflects_severity_weights() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// D-14 #5 wire population: EVERY finding in `check --json` carries a populated
+/// `gdv1:` fingerprint. `check` runs `assign_fingerprints` on the aggregate
+/// real→audit→env→review vector before `filter_findings` (11-05); this is the
+/// per-command regression guard that the batch pass never silently skips the
+/// aggregate seam (RESEARCH Pitfall 1). Mirrors `audit_cli.rs`'s tracer proof.
+#[test]
+fn check_json_populates_gdv1_fingerprint_on_every_finding() {
+    let dir = tmp_dir("gdv1-wire");
+    let cache_dir = dir.join("cache");
+    // A hardcoded secret + a debug leftover — seeds findings across the
+    // audit/env and review families so the "every finding" quantifier is not
+    // vacuously true over a single analyzer.
+    std::fs::write(
+        dir.join("app.js"),
+        "const stripeKey = \"sk_live_ABCDEFGHIJKLMNOP01\";\n\
+         console.log(\"debug\", stripeKey);\n",
+    )
+    .unwrap();
+
+    let (report, _code) = run_check_json(&dir, &cache_dir, &[]);
+    let findings = report["findings"].as_array().unwrap();
+    assert!(
+        !findings.is_empty(),
+        "expected at least one finding to assert on, got: {report}"
+    );
+    assert!(
+        findings.iter().all(|f| f["fingerprint"]
+            .as_str()
+            .is_some_and(|fp| fp.starts_with("gdv1:"))),
+        "every check --json finding must carry a gdv1: fingerprint, got: {report}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

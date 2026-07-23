@@ -427,6 +427,55 @@ fn typosquat_scoring_is_scoped_to_direct_names_lockfile_only_transitives_are_exe
     );
 }
 
+/// D-14 #5 wire population: EVERY finding in `real --json` carries a populated
+/// `gdv1:` fingerprint. `real` runs `assign_fingerprints` before
+/// `filter_findings` (11-05); this per-command guard proves the standalone
+/// `real` path stays fingerprinted (RESEARCH Pitfall 1 — it is easy to wire
+/// only `check`). Mirrors `audit_cli.rs`'s tracer proof.
+#[test]
+fn real_json_populates_gdv1_fingerprint_on_every_finding() {
+    let dir = tmp_dir("gdv1-wire");
+    let cache_dir = dir.join("cache");
+    std::fs::write(
+        dir.join("requirements.txt"),
+        "totally-fake-pkg-xyz==1.0.0\n",
+    )
+    .unwrap();
+
+    // Seed the missing package so the finding resolves from cache alone (offline).
+    let cache = Cache::open_at(&cache_dir).unwrap();
+    cache
+        .put_existence(Ecosystem::Pypi, "totally-fake-pkg-xyz", Existence::Missing)
+        .unwrap();
+    drop(cache);
+
+    let assert = getdev()
+        .current_dir(&dir)
+        .env("GETDEV_OFFLINE", "1")
+        .env("GETDEV_CACHE_DIR", &cache_dir)
+        .arg("real")
+        .arg("--deps-only")
+        .arg("--offline")
+        .arg("--json")
+        .assert();
+
+    let output = assert.get_output();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let report: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|err| panic!("stdout was not valid JSON ({err}): {stdout}"));
+    let findings = report["findings"].as_array().unwrap();
+    assert!(
+        !findings.is_empty(),
+        "expected at least one finding to assert on, got: {stdout}"
+    );
+    assert!(
+        findings.iter().all(|f| f["fingerprint"]
+            .as_str()
+            .is_some_and(|fp| fp.starts_with("gdv1:"))),
+        "every real --json finding must carry a gdv1: fingerprint, got: {stdout}"
+    );
+}
+
 #[test]
 fn more_than_one_only_flag_is_rejected() {
     let dir = tmp_dir("conflicting-flags");

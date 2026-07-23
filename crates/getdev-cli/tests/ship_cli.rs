@@ -312,6 +312,45 @@ fn validation_findings_reported() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// D-14 #5 wire population: EVERY finding in `ship --json` carries a populated
+/// `gdv1:` fingerprint. `ship` runs `assign_fingerprints` before
+/// `filter_findings` (11-05); this per-command guard proves the standalone
+/// `ship` validator path stays fingerprinted (RESEARCH Pitfall 1). Mirrors
+/// `audit_cli.rs`'s tracer proof.
+#[test]
+fn ship_json_populates_gdv1_fingerprint_on_every_finding() {
+    let dir = tmp_dir("gdv1-wire");
+    // A referenced-but-undeclared env var + a hardcoded port seed two ship/*
+    // validator findings so the "every finding" quantifier is non-vacuous.
+    write(
+        &dir,
+        "server.js",
+        "const t = process.env.API_TOKEN;\napp.listen(3000);\n",
+    );
+
+    let assert = getdev()
+        .args(["ship", "--json", "--no-color", "--path"])
+        .arg(&dir)
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    let report: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|err| panic!("stdout was not valid JSON ({err}): {stdout}"));
+    let findings = report["findings"].as_array().unwrap();
+    assert!(
+        !findings.is_empty(),
+        "expected at least one ship finding to assert on, got: {stdout}"
+    );
+    assert!(
+        findings.iter().all(|f| f["fingerprint"]
+            .as_str()
+            .is_some_and(|fp| fp.starts_with("gdv1:"))),
+        "every ship --json finding must carry a gdv1: fingerprint, got: {stdout}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Test 7 (REQ-cmd-ship SC4): a multi-file `ship --write` records exactly one
 /// `refs/getdev/auto/` snapshot BEFORE mutating — the multi-file auto-snap
 /// firing through the same `core::mutate` gate `env --write` uses.

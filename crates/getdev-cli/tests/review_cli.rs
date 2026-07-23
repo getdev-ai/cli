@@ -129,6 +129,39 @@ fn default_scope_reports_review_findings() {
     );
 }
 
+/// D-14 #5 wire population: EVERY finding in `review --json` carries a
+/// populated `gdv1:` fingerprint. `review` runs `assign_fingerprints` before
+/// `filter_findings` (11-05); this per-command guard proves the standalone
+/// `review` diff path stays fingerprinted (RESEARCH Pitfall 1). Mirrors
+/// `audit_cli.rs`'s tracer proof.
+#[test]
+fn review_json_populates_gdv1_fingerprint_on_every_finding() {
+    let dir = init_repo("gdv1-wire");
+    write(&dir, "app.js", CLEAN_JS);
+    commit_all(&dir, "init");
+    // Introduce a debug leftover so the default scope reports a finding.
+    write(&dir, "app.js", DIRTY_JS);
+
+    let assert = getdev()
+        .arg("review")
+        .arg("--json")
+        .arg("--path")
+        .arg(&dir)
+        .assert();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    let findings = findings_of(&stdout);
+    assert!(
+        !findings.is_empty(),
+        "expected at least one review finding to assert on, got: {stdout}"
+    );
+    assert!(
+        findings.iter().all(|f| f["fingerprint"]
+            .as_str()
+            .is_some_and(|fp| fp.starts_with("gdv1:"))),
+        "every review --json finding must carry a gdv1: fingerprint, got: {stdout}"
+    );
+}
+
 /// Test 2: `--against <ref>` reports findings introduced since the ref (working
 /// tree vs the ref — Open Q1 LOCKED).
 #[test]
