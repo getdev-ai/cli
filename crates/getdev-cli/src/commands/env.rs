@@ -50,22 +50,37 @@ pub fn run(args: &EnvArgs) -> anyhow::Result<u8> {
     let mut plan = env::plan(&args.path, &options)?;
     let mut findings = env::findings(&plan, &options);
 
-    // CR-02: fingerprints of the per-secret findings, computed BEFORE the
-    // committed-file finding is pushed. `env::findings` maps over
-    // `plan.entries` directly, so this list is 1:1 with `plan.entries` and
-    // in the same order — the index alignment relied on below. We reuse
-    // these to gate what `--write` mutates on the exact same suppression
-    // decision that hides findings from the report.
-    let entry_fingerprints: Vec<String> = findings.iter().map(suppress::fingerprint).collect();
-
     // the env file being in git history is its own critical finding —
-    // getdev never rewrites history automatically (rotation guidance instead)
+    // getdev never rewrites history automatically (rotation guidance instead).
+    // Pushed LAST (D-10): `env::findings` maps over `plan.entries` directly, so
+    // indices 0..plan.entries.len() stay 1:1 with `plan.entries`; appending the
+    // committed-file finding after them preserves that alignment.
     let env_committed = getdev_gitx::is_tracked(&args.path, &options.env_file);
     if env_committed {
         findings.push(env_file_committed_finding(&options.env_file));
     }
 
-    // B2(b): `[ignore] rules`/`paths` and `[[suppress]]` actually filter now.
+    // D-10/D-12: assign the canonical `gdv1:` fingerprints in one batch pass —
+    // the sole writer of `finding.fingerprint`. It runs BEFORE the mutation
+    // gate and suppression both read the stored field, collapsing env.rs's old
+    // ad-hoc `(rule,file,line)` recompute onto the one canonical identity.
+    getdev_core::fingerprint::assign_fingerprints(&mut findings);
+
+    // CR-02: the per-secret fingerprints, taken from the stored field BEFORE
+    // suppression removes anything. `.take(plan.entries.len())` skips the
+    // committed-file finding appended last, so this list stays 1:1 (and in
+    // order) with `plan.entries` — the index alignment the `--write` gate below
+    // relies on. `Option<String>` because a finding without a node/seed could,
+    // in principle, carry no fingerprint (the batch pass populates all, so in
+    // practice every entry is `Some`).
+    let entry_fingerprints: Vec<Option<String>> = findings
+        .iter()
+        .take(plan.entries.len())
+        .map(|f| f.fingerprint.clone())
+        .collect();
+
+    // B2(b): `[ignore] rules`/`paths` and `[[suppress]]` actually filter now
+    // (D-12: `filter_findings` reads the stored `finding.fingerprint`).
     let filter_outcome = suppress::filter_findings(findings, &args.cfg);
 
     // CR-02: suppression previously touched ONLY this display list while
@@ -74,21 +89,22 @@ pub fn run(args: &EnvArgs) -> anyhow::Result<u8> {
     // ([ignore]) still got its literal rewritten and its value appended to
     // `.env`, mutating a file against explicit user intent. Gate the plan on
     // the SAME outcome: drop every entry whose finding was suppressed, so
-    // detect/report and mutate agree. Identity is the finding fingerprint
-    // (rule id + file + line), which suppress uses and which is 1:1 with a
-    // plan entry.
+    // detect/report and mutate agree. Identity is the ONE stored
+    // `finding.fingerprint` (D-12) that suppress matched on — 1:1 with a plan
+    // entry via `entry_fingerprints`.
     let suppressed_fingerprints: HashSet<String> = filter_outcome
         .suppressed
         .iter()
-        .map(|s| suppress::fingerprint(&s.finding))
+        .filter_map(|s| s.finding.fingerprint.clone())
         .collect();
     let mut idx = 0usize;
     plan.entries.retain(|_| {
         // `Vec::retain` visits entries once, in order — same order as
-        // `entry_fingerprints`. Keep an entry unless its finding was
-        // suppressed above.
+        // `entry_fingerprints`. Keep an entry unless its (present) fingerprint
+        // was suppressed above.
         let keep = entry_fingerprints
             .get(idx)
+            .and_then(|fp| fp.as_ref())
             .is_none_or(|fp| !suppressed_fingerprints.contains(fp));
         idx += 1;
         keep

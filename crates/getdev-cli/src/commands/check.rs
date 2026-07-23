@@ -198,6 +198,14 @@ pub(crate) fn collect(
     skip_errors.extend(ctx.skipped);
 
     // --- reuse audit.rs's tail in shape: suppress → report → score → render ---
+    // D-10: assign the canonical `gdv1:` fingerprints in ONE batch pass over the
+    // finalized, fixed-order (real→audit→env→review), deduped `Vec<Finding>` —
+    // the occurrence index (D-04) needs the whole sibling set, so it cannot be
+    // computed per-analyzer. This is the sole writer of `finding.fingerprint`;
+    // it must run AFTER `dedupe_cross_command_secrets` and BEFORE
+    // `filter_findings`, whose `[[suppress]]` branch now reads the stored field.
+    getdev_core::fingerprint::assign_fingerprints(&mut findings);
+
     // check has no `--ignore`/`--severity` flags (global flags only, CLAUDE.md
     // rule 6); `[ignore]`/`[[suppress]]` from config flow through the SAME
     // `suppress::filter_findings` path every other command uses.

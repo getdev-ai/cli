@@ -65,6 +65,11 @@ pub fn run(args: &ShipArgs) -> anyhow::Result<u8> {
     findings.extend(ship::hardcoded_port(&ctx));
     findings.extend(ship::blocking_findings(&ctx, &args.path));
 
+    // D-10: assign the canonical `gdv1:` fingerprints in one batch pass over the
+    // finalized findings before suppression reads them (the sole writer of
+    // `finding.fingerprint`, so `ship --json` emits it on every finding).
+    getdev_core::fingerprint::assign_fingerprints(&mut findings);
+
     // `[ignore]`/`[[suppress]]` filtering — the same machinery every other
     // command routes through (one filtering mechanism, not two).
     let filter_outcome = suppress::filter_findings(findings, &args.cfg);

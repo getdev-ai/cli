@@ -128,6 +128,11 @@ pub fn run(args: &RealArgs) -> anyhow::Result<u8> {
         findings.push(real::unsupported_stack_finding(hint));
     }
 
+    // D-10: assign the canonical `gdv1:` fingerprints in one batch pass over the
+    // finalized findings before suppression reads them (the sole writer of
+    // `finding.fingerprint`, so `real --json` emits it on every finding).
+    getdev_core::fingerprint::assign_fingerprints(&mut findings);
+
     // B2(b): `[ignore] rules`/`paths` and `[[suppress]]` actually filter now.
     let filter_outcome = suppress::filter_findings(findings, &args.cfg);
     let findings = filter_outcome.kept;

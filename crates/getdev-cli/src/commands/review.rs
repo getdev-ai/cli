@@ -72,6 +72,11 @@ pub fn run(args: &ReviewArgs) -> anyhow::Result<u8> {
         scope => review::run(&args.path, scope, &opts)?,
     };
 
+    // D-10: assign the canonical `gdv1:` fingerprints in one batch pass over the
+    // finalized findings before suppression reads them (the sole writer of
+    // `finding.fingerprint`, so `review --json` emits it on every finding).
+    getdev_core::fingerprint::assign_fingerprints(&mut findings);
+
     // Config `[ignore]`/`[[suppress]]` flows through the same
     // `suppress::filter_findings` path used by `audit` — one filtering
     // mechanism, applied to `review/*` identically (no carve-out). Review has
