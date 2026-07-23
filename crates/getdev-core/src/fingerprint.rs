@@ -206,6 +206,91 @@ mod tests {
         assert_eq!(fp_of(a), fp_of(b), "line shift must not change identity");
     }
 
+    /// Temp-dir-invariance / root-independence regression anchor (RESEARCH Focus
+    /// Area 2) — the load-bearing property SC-1's ephemeral `--since` recompute
+    /// rests on. `ScanContext::build(root)` sets `Finding.file` to the path
+    /// RELATIVE to whatever `root` was passed in (never the absolute location),
+    /// and the `gdv1:` hash inputs are `(id, that relative file, node_kind,
+    /// matched_text)` with NO absolute path. So materializing a snapshot into
+    /// `/tmp/getdev-since-xyz/` and scanning it yields byte-identical
+    /// fingerprints to scanning the same content at the live project root — the
+    /// diff `--since`/`--baseline` rests on is apples-to-apples. If this ever
+    /// breaks, every ephemeral `--since` baseline is silently useless, and this
+    /// test catches it.
+    #[test]
+    fn fingerprint_is_temp_dir_invariant_root_independent() {
+        // Two findings whose relative `file` is IDENTICAL (`src/app.js`) — exactly
+        // what `ScanContext::build` guarantees for the same source content scanned
+        // under two DIFFERENT absolute roots (the live project root vs. a `--since`
+        // materialized temp dir). The absolute root never enters the hash.
+        let live = seed_finding(
+            "audit/hardcoded-secret",
+            "src/app.js",
+            Some(12),
+            Some(7),
+            "string",
+            "sk_live_ABCDEF",
+        );
+        let materialized = seed_finding(
+            "audit/hardcoded-secret",
+            "src/app.js",
+            Some(12),
+            Some(7),
+            "string",
+            "sk_live_ABCDEF",
+        );
+        assert_eq!(
+            fp_of(live),
+            fp_of(materialized),
+            "same content + same relative path under two different roots must hash identically"
+        );
+
+        // Negative half (guards against a vacuous always-equal test): a DIFFERENT
+        // relative path — or different matched content — DOES change the digest.
+        let base = seed_finding(
+            "audit/hardcoded-secret",
+            "src/app.js",
+            Some(12),
+            Some(7),
+            "string",
+            "sk_live_ABCDEF",
+        );
+        let elsewhere = seed_finding(
+            "audit/hardcoded-secret",
+            "lib/app.js",
+            Some(12),
+            Some(7),
+            "string",
+            "sk_live_ABCDEF",
+        );
+        assert_ne!(
+            fp_of(base),
+            fp_of(elsewhere),
+            "a different relative path must change the fingerprint"
+        );
+        let other_content = seed_finding(
+            "audit/hardcoded-secret",
+            "src/app.js",
+            Some(12),
+            Some(7),
+            "string",
+            "sk_live_ZZZZZZ",
+        );
+        let same_content = seed_finding(
+            "audit/hardcoded-secret",
+            "src/app.js",
+            Some(12),
+            Some(7),
+            "string",
+            "sk_live_ABCDEF",
+        );
+        assert_ne!(
+            fp_of(same_content),
+            fp_of(other_content),
+            "different matched content must change the fingerprint"
+        );
+    }
+
     /// D-14 #2: two findings on the same line with different matched content
     /// (or a different rule id) get distinct digests with NO positional input;
     /// two secrets on one line differ (closes 05-REVIEW).
