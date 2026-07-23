@@ -78,9 +78,17 @@ paths = []                        # e.g. ["vendor/", "dist/", "migrations/"]
 
 # false-positive suppression with audit trail (repeatable)
 [[suppress]]
-fingerprint = "sha256:abc…"
+fingerprint = "gdv1:3f9a1c02d7b48e6510af2c93e1d70b8a"
 reason = "test fixture key, not a real secret"    # REQUIRED
 ```
+
+A suppression `fingerprint` is the exact `gdv1:` token a finding carries on `--json` (see
+docs/SPEC-FINDINGS.md → *Fingerprint identity*); copy it verbatim, including any `#N` occurrence
+suffix. Match it as a whole string — the part before the first `:` is an opaque version tag, so
+do not hand-edit the digest. **Regenerate on upgrade:** old unversioned `sha256:` entries do not
+match the `gdv1:` scheme and simply suppress nothing; re-copy the current `gdv1:` token from
+`--json` to re-establish the suppression. (A "this suppression matched nothing" warning lands
+with the baseline UX in v0.2.)
 
 ## Reserved for v0.4 (documented now so the schema stays stable)
 
