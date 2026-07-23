@@ -202,8 +202,8 @@ finding's severity/confidence are contractually tied to how that surface was res
 - **Guessed or incomplete surfaces degrade — they never fabricate a miss.** When no trusted entry
   is found (only an alphabetical-first `.d.ts` guess) or the surface is otherwise incomplete
   (unresolvable barrel `export *` chains, dynamic/computed exports, an unlocatable entry), the
-  surface is treated as **not trustworthy**: the finding **degrades to `info` severity / low
-  confidence** rather than asserting the member is absent. getdev never emits a `high` "does not
+  surface is treated as **not trustworthy**: the finding **degrades to `info` severity /
+  low confidence** rather than asserting the member is absent. getdev never emits a `high` "does not
   exist" claim from a guessed entry point. A genuinely nonexistent member of a correctly-located,
   fully-resolved surface still fires `high` — recall is preserved; only guesses are downgraded.
 
