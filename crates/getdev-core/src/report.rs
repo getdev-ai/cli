@@ -37,6 +37,214 @@ pub fn render_json(report: &FindingsReport) -> Result<String, serde_json::Error>
     Ok(out)
 }
 
+/// The resolved stdout render format for a findings command (docs/SPEC-FINDINGS.md
+/// §Renderers, D-04/D-10). `Human`/`Json` are the two existing renderers
+/// ([`render_terminal`]/[`render_json`]); `Agent` is the token-lean LLM format
+/// ([`render_agent`]). Hosted in `core` so the CLI's clap `ValueEnum` maps onto
+/// exactly these three render targets with no bool×enum truth-table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Format {
+    /// The default terminal render — grouped, colored, human reading aid.
+    #[default]
+    Human,
+    /// The serialized findings envelope (`--json`, alias `--format=json`).
+    Json,
+    /// The deterministic, ANSI-free, LLM-shaped report (`--format=agent`).
+    Agent,
+}
+
+/// The single-sourced exit-gate verdict (D-02/D-03): the OR-to-fail /
+/// AND-to-pass composition of the `--fail-on` severity gate and the
+/// `--min-score` Ship-Score gate. Produced by [`evaluate_gate`] and consumed by
+/// BOTH the CLI exit code (plan 12-03) and [`render_agent`]'s `GATE:` line, so
+/// the printed verdict and the process exit code can never disagree. Carries
+/// enough detail (`failed_severity`/`failed_score` + the thresholds + the score)
+/// to render the `GATE:` reason fragments without a second computation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GateOutcome {
+    /// The overall verdict: `failed_severity || failed_score` (OR-to-fail).
+    pub failed: bool,
+    /// The `--fail-on` threshold evaluated (`None` ⇒ no severity gate).
+    pub fail_on: Option<Severity>,
+    /// The `--min-score` floor evaluated (`None` ⇒ no score gate).
+    pub min_score: Option<u8>,
+    /// The Ship Score the gate compared against (`report.score`) — `None` on
+    /// every non-`check` command, which makes `--min-score` inert (D-01).
+    pub score: Option<u8>,
+    /// True iff findings ≥ `fail_on` (the severity gate tripped).
+    pub failed_severity: bool,
+    /// True iff `score < min_score` (the score gate tripped; inert when
+    /// `report.score` is `None`).
+    pub failed_score: bool,
+}
+
+/// Evaluate the exit gate (D-02/D-03): the sole implementation of the
+/// `--fail-on` + `--min-score` verdict. `failed_severity` mirrors the inline
+/// `fail_on.is_some_and(|t| summary.at_or_above(t) > 0)` every command tail used
+/// before; `failed_score` is `score < min_score` and is inert when the report
+/// carries no score (`check` is the only command that sets one — D-01). The two
+/// compose OR-to-fail: `failed` is true iff EITHER trips, so `exit 0` requires
+/// both to pass. Infallible — no `unwrap`/`expect`, no panic.
+pub fn evaluate_gate(
+    report: &FindingsReport,
+    fail_on: Option<Severity>,
+    min_score: Option<u8>,
+) -> GateOutcome {
+    let failed_severity = fail_on.is_some_and(|t| report.summary.at_or_above(t) > 0);
+    let failed_score = match (min_score, report.score) {
+        (Some(min), Some(score)) => score < min,
+        _ => false,
+    };
+    GateOutcome {
+        failed: failed_severity || failed_score,
+        fail_on,
+        min_score,
+        score: report.score,
+        failed_severity,
+        failed_score,
+    }
+}
+
+/// Upper bound on the synthesized `NEXT ACTIONS` checklist ([`render_agent`],
+/// D-07): the deduped remediation list is capped so the section stays
+/// token-lean; a trailing `… (M more)` line signals truncation. Single named
+/// source — never a scattered magic literal (CLAUDE.md rule 7 spirit).
+pub const NEXT_ACTIONS_CAP: usize = 10;
+
+/// The `agent` renderer (`--format=agent`, docs/SPEC-FINDINGS.md §Renderers,
+/// D-05..D-09): a deterministic, plain-text, ANSI-free, token-lean report —
+/// `--json` minus the JSON tax, plus a synthesized next-actions checklist. Four
+/// labeled sections:
+///
+/// ```text
+/// GATE: <pass|fail>[ · score NN/100 < min NN][ · <sev>+ findings ≥ <fail-on>]
+/// SUMMARY: <N> findings · <C> critical · … · <K> fixable[ · score NN/100]
+/// FINDINGS:
+/// <sev> <id> <file>:<line>:<col> — <message> [fixable] <gdv1:…>
+/// NEXT ACTIONS:
+/// - <deduped remediation>
+/// ```
+///
+/// The `GATE:` line is rendered from the SAME [`GateOutcome`] the CLI exit code
+/// reads (D-03), so the printed verdict and the exit code can never disagree.
+/// Secret masking is structural (Invariant 2, D-08): like every renderer it
+/// consumes only the already-masked `Finding` fields (`message`, `id`, `file`,
+/// position) and the one-way `gdv1:` digest — it NEVER touches `finding.seed`
+/// (`#[serde(skip)]`, redacting `Debug`), which for `env` findings is the raw
+/// secret. No color, ever (an agent reads bytes, not a TTY): the output contains
+/// no `\u{1b}`. Deterministic: a pure function of the already-totally-ordered
+/// `report.findings`.
+pub fn render_agent(report: &FindingsReport, gate: &GateOutcome) -> String {
+    let mut out = String::new();
+
+    // GATE: — from the single-sourced `evaluate_gate` (D-03). Each reason
+    // fragment appears only when its gate actually tripped, and reads as the
+    // failing comparison (`score NN < min NN`, `sev+ ≥ fail-on`).
+    let verdict = if gate.failed { "fail" } else { "pass" };
+    let _ = write!(out, "GATE: {verdict}");
+    if gate.failed_score {
+        if let (Some(score), Some(min)) = (gate.score, gate.min_score) {
+            let _ = write!(out, " · score {score}/100 < min {min}");
+        }
+    }
+    if gate.failed_severity {
+        if let Some(fail_on) = gate.fail_on {
+            let sev = fail_on.as_str();
+            let _ = write!(out, " · {sev}+ findings ≥ {sev}");
+        }
+    }
+    out.push('\n');
+
+    // SUMMARY: — the severity tally; the `· score NN/100` fragment only when
+    // `report.score` is `Some` (i.e. `check` set it), mirroring the envelope's
+    // omit-not-null score.
+    let s = &report.summary;
+    let _ = write!(
+        out,
+        "SUMMARY: {} findings · {} critical · {} high · {} medium · {} low · {} info · {} fixable",
+        s.total(),
+        s.critical,
+        s.high,
+        s.medium,
+        s.low,
+        s.info,
+        s.fixable
+    );
+    if let Some(score) = report.score {
+        let _ = write!(out, " · score {score}/100");
+    }
+    out.push('\n');
+
+    // No summary-by-default collapse for the agent format (D-05): it always
+    // carries the full machine list. When empty, FINDINGS/NEXT-ACTIONS collapse
+    // to one clean line under the header.
+    if report.findings.is_empty() {
+        let _ = writeln!(out, "no findings — clean");
+        return out;
+    }
+
+    // FINDINGS: one dense, flat, worst-first line per finding — a greppable,
+    // total-ordered list (no per-file grouping; that is a human reading aid).
+    let _ = writeln!(out, "FINDINGS:");
+    for finding in &report.findings {
+        // Position degrades exactly like the human renderer, but carries the
+        // file so each line is self-contained: `file:line:col` / `file:line` /
+        // `file`.
+        let position = match (finding.line, finding.column) {
+            (Some(line), Some(column)) => format!("{}:{line}:{column}", finding.file),
+            (Some(line), None) => format!("{}:{line}", finding.file),
+            _ => finding.file.clone(),
+        };
+        // Confidence < high is appended to the message exactly as the human
+        // renderer does (SPEC-FINDINGS: renderers must distinguish confidence).
+        let mut message = finding.message.clone();
+        if finding.confidence < Confidence::High {
+            let _ = write!(message, " (confidence: {})", finding.confidence);
+        }
+        let fixable = if finding.fixable { " [fixable]" } else { "" };
+        // The `gdv1:` token is embedded verbatim (D-06) so an agent can diff
+        // runs / cross-reference a baseline without a second `--json` call. The
+        // batch fingerprint pass populates it before any render; the fallback is
+        // a defensive placeholder that never carries secret material.
+        let fingerprint = finding.fingerprint.as_deref().unwrap_or("gdv1:?");
+        let _ = writeln!(
+            out,
+            "{} {} {position} — {message}{fixable} {fingerprint}",
+            finding.severity.as_str(),
+            finding.id
+        );
+    }
+
+    // NEXT ACTIONS: the deduped set of `suggestion.or(remediation)` (the same
+    // precedence `render_finding`/`render_top_three` use), keyed by the action
+    // string. `report.findings` is already totally ordered worst-first, so
+    // first-appearance IS worst-severity-first — a plain insertion-order dedupe
+    // yields the deterministic (severity desc, first-index) ordering D-07 asks
+    // for. Capped at `NEXT_ACTIONS_CAP` with a `… (M more)` line when truncated.
+    let _ = writeln!(out, "NEXT ACTIONS:");
+    let mut seen: BTreeMap<&str, ()> = BTreeMap::new();
+    let mut actions: Vec<&str> = Vec::new();
+    for finding in &report.findings {
+        if let Some(action) = finding
+            .suggestion
+            .as_deref()
+            .or(finding.remediation.as_deref())
+        {
+            if seen.insert(action, ()).is_none() {
+                actions.push(action);
+            }
+        }
+    }
+    for action in actions.iter().take(NEXT_ACTIONS_CAP) {
+        let _ = writeln!(out, "- {action}");
+    }
+    if actions.len() > NEXT_ACTIONS_CAP {
+        let _ = writeln!(out, "… ({} more)", actions.len() - NEXT_ACTIONS_CAP);
+    }
+
+    out
+}
+
 /// The per-severity Ship Score deduction weights, worst-first — the SINGLE
 /// versioned source of the scoring table (docs/SPEC-COMMANDS.md `check`:
 /// "weights live in one versioned source file and are printed with `-v`").
@@ -799,5 +1007,284 @@ mod tests {
         assert!(out.contains("requirements.txt —"));
         assert!(out.contains("✖ critical"));
         assert!(!out.contains("showing the top 3"));
+    }
+
+    // ---- LOOP-01: evaluate_gate — the single-sourced OR-to-fail exit gate ----
+
+    /// `--fail-on` alone: findings ≥ threshold ⇒ fail; below ⇒ pass. The verdict
+    /// is byte-for-byte the inline `fail_on.is_some_and(...)` every command tail
+    /// used before this helper existed.
+    #[test]
+    fn gate_fail_on_only_matches_inline_logic() {
+        let rep = report(vec![finding(Severity::High, Confidence::High)]);
+        // at-or-above the threshold trips it
+        let hit = evaluate_gate(&rep, Some(Severity::High), None);
+        assert!(hit.failed && hit.failed_severity && !hit.failed_score);
+        // below the threshold does not
+        assert!(!evaluate_gate(&rep, Some(Severity::Critical), None).failed);
+        // and it equals the pre-refactor inline expression exactly
+        let inline = Some(Severity::High).is_some_and(|t| rep.summary.at_or_above(t) > 0);
+        assert_eq!(
+            evaluate_gate(&rep, Some(Severity::High), None).failed,
+            inline
+        );
+    }
+
+    /// `--min-score` alone: `score < min` ⇒ fail; `score ≥ min` ⇒ pass; a
+    /// score-less report (every non-`check` command) with a min set ⇒ inert.
+    #[test]
+    fn gate_min_score_only() {
+        let mut rep = report(vec![finding(Severity::Low, Confidence::High)]);
+        rep.score = Some(60);
+        assert!(evaluate_gate(&rep, None, Some(80)).failed, "60 < 80 fails");
+        assert!(
+            !evaluate_gate(&rep, None, Some(60)).failed,
+            "60 ≥ 60 passes"
+        );
+        assert!(!evaluate_gate(&rep, None, Some(0)).failed, "60 ≥ 0 passes");
+        // score None ⇒ min-score inert (D-01: only `check` scores).
+        let noscore = report(vec![finding(Severity::Low, Confidence::High)]);
+        let out = evaluate_gate(&noscore, None, Some(100));
+        assert!(
+            !out.failed && !out.failed_score,
+            "no score ⇒ min-score inert"
+        );
+    }
+
+    /// Both gates compose OR-to-fail / AND-to-pass: fail if EITHER trips, pass
+    /// only when both pass; neither given ⇒ pass.
+    #[test]
+    fn gate_both_or_to_fail() {
+        let mut rep = report(vec![finding(Severity::High, Confidence::High)]);
+        rep.score = Some(50);
+        // severity trips, score passes
+        assert!(evaluate_gate(&rep, Some(Severity::High), Some(0)).failed);
+        // score trips, severity passes
+        assert!(evaluate_gate(&rep, Some(Severity::Critical), Some(80)).failed);
+        // both pass ⇒ pass
+        assert!(!evaluate_gate(&rep, Some(Severity::Critical), Some(50)).failed);
+        // neither given ⇒ pass
+        assert!(!evaluate_gate(&rep, None, None).failed);
+    }
+
+    /// When it fails, the outcome carries enough to render the `GATE:` reasons:
+    /// which gate(s) tripped plus the thresholds and the compared score.
+    #[test]
+    fn gate_reasons_carried_for_rendering() {
+        let mut rep = report(vec![finding(Severity::High, Confidence::High)]);
+        rep.score = Some(40);
+        let out = evaluate_gate(&rep, Some(Severity::High), Some(80));
+        assert!(out.failed && out.failed_severity && out.failed_score);
+        assert_eq!(out.fail_on, Some(Severity::High));
+        assert_eq!(out.min_score, Some(80));
+        assert_eq!(out.score, Some(40));
+    }
+
+    // ---- LOOP-02: render_agent — the deterministic, secret-safe agent format --
+
+    /// Populate `gdv1:` fingerprints the way the CLI does before any render, so
+    /// the agent lines carry real tokens.
+    fn fingerprinted(findings: Vec<Finding>) -> FindingsReport {
+        let mut rep = report(findings);
+        crate::fingerprint::assign_fingerprints(&mut rep.findings);
+        rep
+    }
+
+    /// The agent shape carries all four labeled sections and is ANSI-free.
+    #[test]
+    fn agent_shape_has_all_sections_and_no_ansi() {
+        let rep = fingerprinted(vec![finding(Severity::Critical, Confidence::High)]);
+        let gate = evaluate_gate(&rep, None, None);
+        let out = render_agent(&rep, &gate);
+        assert!(out.starts_with("GATE: pass\n"));
+        assert!(out.contains("\nSUMMARY: 1 findings · 1 critical · "));
+        assert!(out.contains("\nFINDINGS:\n"));
+        assert!(out.contains("\nNEXT ACTIONS:\n"));
+        assert!(!out.contains('\u{1b}'), "agent output must be ANSI-free");
+    }
+
+    /// A clean report collapses FINDINGS/NEXT-ACTIONS to one line under the
+    /// header (still prints GATE + SUMMARY).
+    #[test]
+    fn agent_clean_report_collapses_to_clean_line() {
+        let rep = report(vec![]);
+        let gate = evaluate_gate(&rep, None, None);
+        let out = render_agent(&rep, &gate);
+        assert!(out.starts_with("GATE: pass\n"));
+        assert!(out.contains("SUMMARY: 0 findings · "));
+        assert!(out.contains("no findings — clean"));
+        assert!(!out.contains("FINDINGS:"));
+        assert!(!out.contains("NEXT ACTIONS:"));
+    }
+
+    /// One dense finding line: `sev id file:line[:col] — message [fixable] gdv1:`
+    /// with low-confidence annotated and the fingerprint verbatim.
+    #[test]
+    fn agent_finding_line_carries_position_message_and_fingerprint() {
+        let rep = fingerprinted(vec![finding(Severity::High, Confidence::Low)]);
+        let gate = evaluate_gate(&rep, None, None);
+        let out = render_agent(&rep, &gate);
+        // severity word · id · file:line (column None ⇒ file:line) · message
+        assert!(out.contains("high real/nonexistent-package requirements.txt:4 — Package"));
+        assert!(out.contains("(confidence: low)"));
+        let fp = rep.findings[0].fingerprint.clone().unwrap();
+        assert!(out.contains(&fp) && fp.starts_with("gdv1:"));
+        // not fixable ⇒ no [fixable] marker
+        assert!(!out.contains("[fixable]"));
+    }
+
+    /// `[fixable]` appears only for fixable findings; the remediation feeds the
+    /// NEXT ACTIONS list when there is no suggestion.
+    #[test]
+    fn agent_marks_fixable_and_lists_remediation() {
+        let mut f = finding(Severity::Medium, Confidence::High);
+        f.fixable = true;
+        f.suggestion = None;
+        f.remediation = Some("run: getdev env --write".into());
+        let rep = fingerprinted(vec![f]);
+        let gate = evaluate_gate(&rep, None, None);
+        let out = render_agent(&rep, &gate);
+        assert!(out.contains(" [fixable] gdv1:"));
+        assert!(out.contains("- run: getdev env --write"));
+    }
+
+    /// NEXT ACTIONS dedupes an identical suggestion to one line and orders
+    /// worst-severity-first (the critical carrier precedes the high's action).
+    #[test]
+    fn agent_next_actions_dedupe_and_worst_first() {
+        let mut a = finding(Severity::Low, Confidence::High);
+        a.suggestion = Some("shared action".into());
+        let mut b = finding(Severity::Critical, Confidence::High);
+        b.suggestion = Some("shared action".into());
+        let mut c = finding(Severity::High, Confidence::High);
+        c.suggestion = Some("unique action".into());
+        let rep = fingerprinted(vec![a, b, c]);
+        let gate = evaluate_gate(&rep, None, None);
+        let out = render_agent(&rep, &gate);
+        assert_eq!(out.matches("- shared action").count(), 1, "deduped to one");
+        let shared = out.find("- shared action").unwrap();
+        let unique = out.find("- unique action").unwrap();
+        assert!(
+            shared < unique,
+            "worst-severity carrier's action comes first"
+        );
+    }
+
+    /// NEXT ACTIONS caps at `NEXT_ACTIONS_CAP` with a trailing `… (M more)` line.
+    #[test]
+    fn agent_next_actions_caps_with_more_line() {
+        let findings = (0..NEXT_ACTIONS_CAP + 3)
+            .map(|i| {
+                let mut f = finding(Severity::Medium, Confidence::High);
+                f.suggestion = Some(format!("action {i:02}"));
+                f
+            })
+            .collect::<Vec<_>>();
+        let rep = fingerprinted(findings);
+        let gate = evaluate_gate(&rep, None, None);
+        let out = render_agent(&rep, &gate);
+        let action_lines = out.lines().filter(|l| l.starts_with("- action ")).count();
+        assert_eq!(action_lines, NEXT_ACTIONS_CAP);
+        assert!(out.contains("… (3 more)"));
+    }
+
+    /// D-08 (Invariant 2 on the new surface): two findings whose seeds are
+    /// distinct raw secrets — the agent output contains NEITHER raw secret while
+    /// carrying BOTH distinct `gdv1:` fingerprints.
+    #[test]
+    fn agent_never_leaks_a_secret_but_carries_fingerprints() {
+        // Build the raw secrets from pieces so this test source is not itself the
+        // leak the assertion checks for.
+        let secret_a = format!("sk_live_{}{}", "AAAA", "SECRETBODYONE1234");
+        let secret_b = format!("sk_live_{}{}", "BBBB", "SECRETBODYTWO5678");
+        let mut fa = finding(Severity::Critical, Confidence::High);
+        fa.id = "env/hardcoded-secret".into();
+        fa.file = "src/config.ts".into();
+        fa.line = Some(5);
+        fa.column = Some(10);
+        fa.message = "stripe secret assigned to 'A' (sk_live_…1234)".into();
+        fa.suggestion = None;
+        fa.remediation = Some("extract to .env".into());
+        fa.seed = crate::fingerprint::FingerprintSeed {
+            node_kind: "secret_literal",
+            matched_text: secret_a.clone(),
+        };
+        let mut fb = fa.clone();
+        fb.column = Some(40);
+        fb.message = "stripe secret assigned to 'B' (sk_live_…5678)".into();
+        fb.seed = crate::fingerprint::FingerprintSeed {
+            node_kind: "secret_literal",
+            matched_text: secret_b.clone(),
+        };
+        let rep = fingerprinted(vec![fa, fb]);
+        let fp_a = rep.findings[0].fingerprint.clone().unwrap();
+        let fp_b = rep.findings[1].fingerprint.clone().unwrap();
+        assert_ne!(fp_a, fp_b, "distinct secrets ⇒ distinct fingerprints");
+        let gate = evaluate_gate(&rep, None, None);
+        let out = render_agent(&rep, &gate);
+        assert!(!out.contains(&secret_a), "raw secret A leaked");
+        assert!(!out.contains(&secret_b), "raw secret B leaked");
+        assert!(!out.contains("SECRETBODYONE"), "secret A body leaked");
+        assert!(!out.contains("SECRETBODYTWO"), "secret B body leaked");
+        assert!(out.contains(&fp_a), "fingerprint A must be present");
+        assert!(out.contains(&fp_b), "fingerprint B must be present");
+    }
+
+    /// D-09: the agent render is strictly smaller than the JSON render for a
+    /// representative multi-finding report — a real byte measurement.
+    #[test]
+    fn agent_is_smaller_than_json() {
+        let findings = (0..8)
+            .map(|i| {
+                let sev = if i % 2 == 0 {
+                    Severity::High
+                } else {
+                    Severity::Medium
+                };
+                let mut f = finding(sev, Confidence::High);
+                f.file = format!("src/file{i}.ts");
+                f.remediation = Some(format!("fix issue {i}"));
+                f
+            })
+            .collect::<Vec<_>>();
+        let rep = fingerprinted(findings);
+        let gate = evaluate_gate(&rep, None, None);
+        let agent = render_agent(&rep, &gate);
+        let json = render_json(&rep).unwrap();
+        assert!(
+            agent.len() < json.len(),
+            "agent {} bytes must be < json {} bytes",
+            agent.len(),
+            json.len()
+        );
+    }
+
+    /// The GATE line renders the tripped-gate reason fragments (D-05), and the
+    /// SUMMARY carries the score fragment when `check` set a score.
+    #[test]
+    fn agent_gate_line_shows_tripped_reasons() {
+        let mut rep = fingerprinted(vec![finding(Severity::High, Confidence::High)]);
+        rep.score = Some(40);
+        let gate = evaluate_gate(&rep, Some(Severity::High), Some(80));
+        let out = render_agent(&rep, &gate);
+        let first = out.lines().next().unwrap();
+        assert!(first.starts_with("GATE: fail"));
+        assert!(first.contains("score 40/100 < min 80"));
+        assert!(first.contains("high+ findings ≥ high"));
+        assert!(
+            out.contains("· score 40/100\n"),
+            "SUMMARY carries the score"
+        );
+    }
+
+    /// Deterministic: two renders of the same report are byte-identical.
+    #[test]
+    fn agent_output_is_deterministic() {
+        let rep = fingerprinted(vec![
+            finding(Severity::Critical, Confidence::High),
+            finding(Severity::Low, Confidence::High),
+        ]);
+        let gate = evaluate_gate(&rep, None, None);
+        assert_eq!(render_agent(&rep, &gate), render_agent(&rep, &gate));
     }
 }
