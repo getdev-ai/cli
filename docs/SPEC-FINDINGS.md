@@ -183,6 +183,35 @@ keys/braces/quotes/pretty-print indentation). `len(render_agent) < len(render_js
 reference corpus is a **tested fact** (a real byte/char comparison, not eyeballed); byte length is
 the token-count proxy for this ASCII-dominant output.
 
+## `real/nonexistent-api` — installed-surface / degrade-not-fabricate contract
+
+`real/nonexistent-api` claims that an imported member does not exist on the imported package. That
+claim is only as trustworthy as getdev's knowledge of the package's real export surface, so the
+finding's severity/confidence are contractually tied to how that surface was resolved:
+
+- **Source is the installed surface, never a list.** The export surface is resolved by reading the
+  package **as installed** — from `node_modules` (`.d.ts`/`.d.mts`/`.d.cts` type declarations) or
+  `site-packages` — directly off disk. It is **never** a static/bundled export list and **never** a
+  registry lookup (the registry client only answers package *existence* + typosquat, never surface).
+  A finding therefore reflects the version the project actually installed.
+- **High is licensed only by a trusted, fully-resolved surface.** A high-severity / high-confidence
+  "member does not exist" claim is permitted **only** when the surface is fully resolved from a
+  **trusted** types entry point — the package's `package.json` `types`/`typings` field or the
+  `exports` map's `types` condition. A trusted entry means getdev enumerated the surface the package
+  itself advertises.
+- **Guessed or incomplete surfaces degrade — they never fabricate a miss.** When no trusted entry
+  is found (only an alphabetical-first `.d.ts` guess) or the surface is otherwise incomplete
+  (unresolvable barrel `export *` chains, dynamic/computed exports, an unlocatable entry), the
+  surface is treated as **not trustworthy**: the finding **degrades to `info` severity / low
+  confidence** rather than asserting the member is absent. getdev never emits a `high` "does not
+  exist" claim from a guessed entry point. A genuinely nonexistent member of a correctly-located,
+  fully-resolved surface still fires `high` — recall is preserved; only guesses are downgraded.
+
+**Invariant 2 reaffirmed (unaffected by this contract).** This installed-surface framing changes
+only `real/nonexistent-api` severity/confidence semantics — it does not read, store, or render any
+secret value, and it leaves the secret-masking guarantee (Invariant 2 below) and the `gdv1:`
+identity-seed redaction entirely intact.
+
 ## Invariants
 
 1. **One schema for everything.** No analyzer emits any other shape; renderers, Ship Score,
