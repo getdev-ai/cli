@@ -125,3 +125,13 @@ Settled technical decisions in lightweight ADR form. Check here before proposing
 **Context:** The bare `getdev` GitHub name is held by an unrelated dormant account, and the getdev.ai website lives in its own private repo. Doubling the brand in the slug (`getdev-ai/getdev-cli`) reads poorly in links.
 
 **Decision:** The CLI lives under the `getdev-ai` org (matching the domain, like `getsentry`/`astral-sh`) as `getdev-ai/cli` — the GitHub-CLI pattern (`cli/cli` → `gh`). Everything users *type* stays `getdev`: binary, Homebrew formula, npm package, crates.io crate, release artifacts. Formula/package names must match the command, so they never take the short repo form. Vacated slugs (`pzelenin/getdev-cli`) are never reused — reuse would destroy GitHub's redirects.
+
+## 16. `getdev-mcp` graduates into the workspace, stays hand-rolled
+
+**Date:** 2026-07-23 · **Status:** settled
+
+**Context:** The MCP server (getdev as tools for AI agents) shipped as a standalone preview under `integrations/mcp/` with its own `[workspace]` — decoupled from the cargo-dist release pipeline, so users had to `cargo build` it from source. v0.2 (Phase 12, MCP-01) makes it a first-class release artifact.
+
+**Decision:** Move it to `crates/getdev-mcp/` as a workspace member, shipped **prebuilt** via cargo-dist per-package config: `[package.metadata.dist] dist = true` (cargo-dist's documented override that forces the binary into the prebuilt release artifacts) while `publish = false` stays (**never** published to crates.io), and archive-only `installers = []` (no per-app npm/homebrew/shell/powershell installers — only the `getdev` CLI mints those). It inherits the workspace lints (`unsafe_code = "forbid"`, `unwrap_used`/`expect_used = "deny"`) via `[lints] workspace = true`. It stays a **blocking stdio JSON-RPC loop** with `serde`/`serde_json` only — **`rmcp`/tokio are NOT adopted** (they are hard-tokio-bound; adopting them would breach DEC-01's no-async-runtime rule). It makes no network calls of its own — every tool shells out to the installed `getdev` binary, which owns the (already egress-confined, DEC-05) network behavior.
+
+**Consequence:** One more prebuilt archive rides in the **same** GitHub Release (no crates.io publish, no dedicated installer); `network_egress.rs` auto-covers `crates/getdev-mcp/src` (a new network symbol there fails CI) and `cargo deny check bans` gates the crate against any async/HTTP/LLM dependency. Phase 17 (MCP-02) bundles that archive into the Claude-Code plugin installer.

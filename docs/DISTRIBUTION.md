@@ -17,6 +17,7 @@ published from a single tagged release by `cargo-dist` + GitHub Actions
 | crates.io | `cargo install getdev` | `cargo publish` step in release workflow | v0.1 launch |
 | cargo-binstall | `cargo binstall getdev` | free — reads cargo-dist metadata from GitHub Releases | automatic |
 | self-update | `getdev update` | built-in updater pulling from GitHub Releases (signature-checked) | v0.1 |
+| **getdev-mcp** (companion) | download the `getdev-mcp-<target>` archive from the release | cargo-dist **prebuilt archive-only** (`[package.metadata.dist] dist = true`, `installers = []`), same tagged release; **no** crates.io publish, **no** dedicated installer | v0.2 (Phase 12) |
 | GitHub Action | `uses: getdev-ai/action@v1` | thin wrapper repo installing the binary + running `check` | v0.2 |
 | winget / MSI | — | explicitly out of scope (scoop suffices for the audience) | — |
 
@@ -117,6 +118,24 @@ The binary updates itself from GitHub Releases: check latest → download platfo
 notice) and an update channel setting in `~/.getdev/config.toml`. This is one of only three
 permitted network destinations (npm registry, PyPI, GitHub Releases) — keep it that way.
 
+### getdev-mcp (companion artifact)
+
+`getdev-mcp` (the [MCP server](../crates/getdev-mcp/README.md) exposing getdev as tools for AI
+agents) rides in the **same** tagged release as a **prebuilt, archive-only** companion — so an
+agent user never needs a Rust toolchain to `cargo build` it (DEC-16).
+
+- **Prebuilt, not published.** Its `crates/getdev-mcp/Cargo.toml` carries
+  `[package.metadata.dist] dist = true` (cargo-dist's documented override that forces the binary
+  into the release artifacts) while keeping `publish = false` — it is **never** pushed to crates.io.
+- **Archive-only.** `installers = []` for the crate, so cargo-dist mints **no** npm/homebrew/
+  shell/powershell installer for it (only the `getdev` CLI gets those). It ships as the plain
+  `getdev-mcp-<target>` archive alongside the CLI archives; Phase 17 (MCP-02) then bundles it into
+  the Claude-Code plugin installer.
+- **No new network destination.** getdev-mcp makes **no network calls of its own** — every tool
+  shells out to the installed `getdev` binary, so the three-destination allowlist above (npm
+  registry, PyPI, GitHub Releases) is unchanged and continues to hold. Its network-free source is
+  proven at the symbol level by `crates/getdev-cli/tests/network_egress.rs`.
+
 ## Name reservations (do before anything is public)
 
 - [x] npm: `getdev` — reserved 2026-07-09 (placeholder 0.0.1)
@@ -154,3 +173,7 @@ destroys GitHub's redirect.
 Every "release"-status target is exercised by the release smoke test (install → `getdev
 doctor` → `getdev check` on a corpus project) before the GitHub Release is undrafted (which
 is what makes `getdev.ai/install.sh` resolve the new version — see the redirect note above).
+
+The **`getdev-mcp`** companion archive (v0.2+, prebuilt archive-only — see its channel row
+above) is built for the same "release"-status targets in the same release, with no dedicated
+installer of its own.
