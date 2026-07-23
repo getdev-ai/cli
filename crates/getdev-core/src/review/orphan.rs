@@ -303,6 +303,7 @@ mod tests {
     fn rel_import(file: &str, module: &str) -> RawImport {
         RawImport {
             module: module.to_owned(),
+            raw_spec: module.to_owned(),
             is_relative: true,
             file: file.to_owned(),
             line: 1,
@@ -411,6 +412,77 @@ mod tests {
         );
         // escaping the project root is discarded (T-06-12)
         assert_eq!(resolve_js("index.js", "../../etc/passwd"), None);
+    }
+
+    /// PREC-02/D-03: an alias-imported file is in the referenced set, so the
+    /// orphan detector does not flag it. `relative_import_targets` emits the
+    /// alias-resolved target as a root-anchored synthetic specifier
+    /// (`__alias__` sentinel filename) — this test proves that synthetic shape
+    /// expands to the same candidate paths a relative import would.
+    #[test]
+    fn alias_resolved_target_marks_file_referenced() {
+        // Emulates what `relative_import_targets` pushes for
+        // `import Footer from "@/components/Footer"` with `@/* -> ./src/*`:
+        // a root-anchored specifier `src/components/Footer`.
+        let referenced = referenced_paths(&[rel_import("__alias__", "src/components/Footer")]);
+        assert!(
+            referenced.contains("src/components/Footer.tsx"),
+            "alias target must expand to its .tsx candidate: {referenced:?}"
+        );
+        let files = [review_file("src/components/Footer.tsx", true)];
+        assert!(
+            detect_with_referenced(&referenced, &files).is_empty(),
+            "an alias-referenced new file must not be flagged orphan (D-03)"
+        );
+    }
+
+    /// PREC-02/D-03 end-to-end at the deps seam: a real temp-dir project with a
+    /// tsconfig `@/*` alias and an `@/components/Footer` import marks
+    /// `src/components/Footer.tsx` referenced, so `detect` produces zero
+    /// findings on it (the Seava §3.7 Footer FP shape).
+    #[test]
+    fn alias_import_repairs_orphan_graph_end_to_end() {
+        let dir = std::env::temp_dir().join(format!(
+            "getdev-orphan-alias-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/components")).unwrap();
+        std::fs::write(
+            dir.join("tsconfig.json"),
+            r#"{ "compilerOptions": { "paths": { "@/*": ["./src/*"] } } }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("src/Pricing.tsx"),
+            "import Footer from \"@/components/Footer\";\nexport const Pricing = () => Footer;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("src/components/Footer.tsx"),
+            "export const Footer = 1;\n",
+        )
+        .unwrap();
+
+        let (imports, _skipped) = relative_import_targets(&dir);
+        let referenced = referenced_paths(&imports);
+        let files = [review_file("src/components/Footer.tsx", true)];
+        assert!(
+            detect_with_referenced(&referenced, &files).is_empty(),
+            "Footer imported via @/components/Footer must not be flagged orphan; referenced={referenced:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Guard: a plain relative import still marks its target referenced (no
+    /// regression from the alias extension).
+    #[test]
+    fn relative_import_still_marks_referenced() {
+        let referenced = referenced_paths(&[rel_import("src/index.js", "./sibling")]);
+        assert!(referenced.contains("src/sibling.js"));
+        let files = [review_file("src/sibling.js", true)];
+        assert!(detect_with_referenced(&referenced, &files).is_empty());
     }
 
     #[test]

@@ -8,10 +8,13 @@
 //! Open Question 2: `real`'s checks are a programmatic core-analyzer
 //! category, like `core::secrets`, not a YAML matcher pack).
 
+mod aliases;
 mod imports_js;
 mod imports_py;
 mod manifest_js;
 mod manifest_py;
+
+use aliases::AliasResolver;
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
@@ -206,7 +209,14 @@ pub struct DependencyGraph {
 /// `deps` module; [`ImportRef`] is the public, classified shape.
 #[derive(Debug, Clone)]
 pub(crate) struct RawImport {
+    /// The lookup key: for a bare npm import this is the package name with any
+    /// subpath stripped (`@scope/name/sub` -> `@scope/name`); for a relative
+    /// import it is the full specifier as written.
     pub module: String,
+    /// The ORIGINAL specifier exactly as written in source (`@/components/Foo`,
+    /// `lodash/fp`, `./sibling`) — preserved for alias resolution, which needs
+    /// the full path the bare-`module` reduction discards (PREC-02/D-03).
+    pub raw_spec: String,
     pub is_relative: bool,
     pub file: String,
     pub line: u32,
@@ -285,6 +295,10 @@ pub fn build_graph_with_context(
     skipped.extend(pypi_skipped);
 
     let locals = local_module_names(root);
+    // PREC-02: one AliasResolver built from `root`, consulted at the classify
+    // seam BEFORE the Phantom fallthrough so an aliased local import
+    // (`@/components/Foo`) classifies Local, not a hallucinated npm package.
+    let alias_resolver = AliasResolver::build(root);
 
     let mut imports = Vec::with_capacity(js_raw.len() + py_raw.len());
     for raw in js_raw {
@@ -297,6 +311,7 @@ pub fn build_graph_with_context(
             &declared_key,
             &node_builtins,
             &locals,
+            &alias_resolver,
         );
         imports.push(ImportRef {
             module: raw.module,
@@ -340,6 +355,7 @@ pub fn build_graph_with_context(
             &declared_key,
             &python_stdlib,
             &locals,
+            &alias_resolver,
         );
         imports.push(ImportRef {
             module: raw.module,
@@ -389,6 +405,7 @@ fn classify(
     declared_key: &str,
     builtins: &HashSet<String>,
     locals: &HashSet<String>,
+    aliases: &AliasResolver,
 ) -> ImportResolution {
     if raw.is_relative {
         return ImportResolution::Local;
@@ -398,6 +415,15 @@ fn classify(
     }
     if declared.contains(declared_key) {
         return ImportResolution::Declared;
+    }
+    // PREC-02: a TS/Vite-aliased import (`@/components/Foo`, `@shared/schema`,
+    // or a `baseUrl`-relative bare specifier) is a local module, not a
+    // hallucinated npm package — resolved BEFORE the Phantom fallthrough. The
+    // resolver only matches DECLARED alias prefixes, so a genuine bare phantom
+    // import (`totally-fake-pkg`) never matches and still classifies Phantom
+    // (recall preserved).
+    if aliases.resolves(&raw.raw_spec) {
+        return ImportResolution::Local;
     }
     if locals.contains(&raw.module) {
         return ImportResolution::Local;
@@ -495,12 +521,36 @@ pub(crate) fn relative_import_targets(root: &Path) -> (Vec<RawImport>, Vec<ScanE
         Ok(ctx) => ctx,
         Err(err) => return (Vec::new(), vec![err]),
     };
+    // PREC-02/D-03: the same AliasResolver `classify` uses also repairs the
+    // review orphan/reference graph — an `import Foo from "@/components/Foo"`
+    // must mark `components/Foo` referenced so orphan-file/dead-code don't fire
+    // on it. Built once from `root` and reused here (not re-parsed).
+    let alias_resolver = AliasResolver::build(root);
+    let js_imports = imports_js::collect_imports(&ctx);
     let mut imports = Vec::new();
-    imports.extend(
-        imports_js::collect_imports(&ctx)
-            .into_iter()
-            .filter(|r| r.is_relative),
-    );
+    for raw in js_imports {
+        if raw.is_relative {
+            imports.push(raw);
+            continue;
+        }
+        // A non-relative JS import that resolves through an alias contributes
+        // its project-relative target base(s) to the referenced set. Each base
+        // is emitted as a synthetic root-anchored specifier so the existing
+        // `orphan::resolve_js` candidate expansion (module-resolution suffixes)
+        // marks the target file referenced exactly like a relative import.
+        for base in alias_resolver.referenced_bases(&raw.raw_spec) {
+            imports.push(RawImport {
+                module: base.clone(),
+                raw_spec: base,
+                is_relative: true,
+                // a bare sentinel filename at the project root: `resolve_js`
+                // pops the importer's filename to its directory, so a
+                // slash-free name reduces the base directory to the root.
+                file: "__alias__".to_owned(),
+                line: raw.line,
+            });
+        }
+    }
     imports.extend(
         imports_py::collect_imports(&ctx)
             .into_iter()

@@ -152,6 +152,7 @@ fn imports_in_tree(file: &ScannedFile, root: &Path, query: &Query) -> Vec<RawImp
             let pos = capture.node.start_position();
             results.push(RawImport {
                 module,
+                raw_spec: spec,
                 is_relative,
                 file: relative_display(&file.abs, root),
                 line: u32::try_from(pos.row).unwrap_or(u32::MAX).saturating_add(1),

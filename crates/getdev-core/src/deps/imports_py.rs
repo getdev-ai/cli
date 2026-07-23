@@ -134,6 +134,7 @@ fn imports_in_tree(file: &ScannedFile, root: &Path, query: &Query) -> Vec<RawImp
                 }
                 results.push(RawImport {
                     module,
+                    raw_spec: raw.to_owned(),
                     is_relative: false,
                     file: file_display,
                     line,
@@ -141,6 +142,7 @@ fn imports_in_tree(file: &ScannedFile, root: &Path, query: &Query) -> Vec<RawImp
             } else if Some(capture.index) == relative_idx {
                 results.push(RawImport {
                     module: raw.to_owned(),
+                    raw_spec: raw.to_owned(),
                     is_relative: true,
                     file: file_display,
                     line,
