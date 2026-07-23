@@ -94,6 +94,30 @@ fn run_check_agent(dir: &Path, cache_dir: &Path, extra: &[&str]) -> (String, i32
     (stdout, code)
 }
 
+/// Run `getdev check --offline --json` over `dir` (cache seeded at
+/// `cache_dir`), returning stdout, stderr, and the exit code. Extra args are
+/// appended — used by the Task-3 exit-code/exclusivity/determinism suite.
+fn run_check_json(dir: &Path, cache_dir: &Path, extra: &[&str]) -> (String, String, i32) {
+    let mut cmd = getdev();
+    cmd.env("GETDEV_OFFLINE", "1")
+        .env("GETDEV_CACHE_DIR", cache_dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .arg("check")
+        .arg("--offline")
+        .arg("--json")
+        .arg("--path")
+        .arg(dir);
+    for a in extra {
+        cmd.arg(a);
+    }
+    let output = cmd.assert().get_output().clone();
+    let code = output.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    (stdout, stderr, code)
+}
+
 /// SC-2 persisted round-trip: `--update-baseline` writes the file, a later
 /// `--baseline` suppresses the previously-seen finding on unchanged content.
 #[test]
@@ -222,4 +246,165 @@ fn since_snapshot_surfaces_only_newly_introduced_findings_and_leaks_no_temp_dir(
 
     std::fs::remove_dir_all(&dir).ok();
     std::fs::remove_dir_all(&cache_dir).ok();
+}
+
+/// D-04: an explicit `--baseline` against a missing `.getdev-baseline` file is
+/// a config error (exit 3), and the message names the file and points the
+/// user at `--update-baseline` (docs/SPEC-CONFIG.md "the message names the
+/// file and points at `--update-baseline`").
+#[test]
+fn explicit_baseline_against_a_missing_file_is_exit_3_naming_the_file_and_update_baseline() {
+    let dir = tmp_dir("missing-baseline");
+    let cache_dir = dir.join("cache");
+    std::fs::write(dir.join("app.js"), "console.log(\"hi\");\n").unwrap();
+
+    let baseline_path = dir.join(".getdev-baseline");
+    assert!(!baseline_path.exists(), "precondition: no baseline file");
+
+    let mut cmd = getdev();
+    let output = cmd
+        .env("GETDEV_OFFLINE", "1")
+        .env("GETDEV_CACHE_DIR", &cache_dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .arg("check")
+        .arg("--offline")
+        .arg("--baseline")
+        .arg("--path")
+        .arg(&dir)
+        .assert()
+        .get_output()
+        .clone();
+    let code = output.status.code().unwrap_or(-1);
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert_eq!(
+        code, 3,
+        "--baseline against a missing file must be a config error (exit 3), got {code}, stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(".getdev-baseline"),
+        "the error must name the baseline file, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("--update-baseline"),
+        "the error must point at --update-baseline, got:\n{stderr}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// D-01: a `.getdev-baseline` file with a non-`gdv1:` line is rejected as
+/// malformed — exit 3, mirroring a malformed `.getdev.toml`.
+#[test]
+fn malformed_baseline_file_is_exit_3() {
+    let dir = tmp_dir("malformed-baseline");
+    let cache_dir = dir.join("cache");
+    std::fs::write(dir.join("app.js"), "console.log(\"hi\");\n").unwrap();
+    std::fs::write(
+        dir.join(".getdev-baseline"),
+        "# getdev baseline v1\nnot-a-fingerprint\n",
+    )
+    .unwrap();
+
+    let mut cmd = getdev();
+    let output = cmd
+        .env("GETDEV_OFFLINE", "1")
+        .env("GETDEV_CACHE_DIR", &cache_dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .arg("check")
+        .arg("--offline")
+        .arg("--baseline")
+        .arg("--path")
+        .arg(&dir)
+        .assert()
+        .get_output()
+        .clone();
+    let code = output.status.code().unwrap_or(-1);
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert_eq!(
+        code, 3,
+        "a malformed .getdev-baseline must be a config error (exit 3), got {code}, stderr:\n{stderr}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// D-04 exclusivity: `--since` + `--baseline` in one invocation is a clap
+/// usage error (exit 2), mirroring `cli_global_flags.rs`'s
+/// `quiet_and_verbose_together_is_rejected_with_exact_clap_usage_exit_code`.
+#[test]
+fn since_and_baseline_together_is_a_clap_conflict_exit_2() {
+    let dir = tmp_dir("since-baseline-conflict");
+    let assert = getdev()
+        .env("GETDEV_OFFLINE", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .arg("check")
+        .arg("--offline")
+        .arg("--since")
+        .arg("1")
+        .arg("--baseline")
+        .arg("--path")
+        .arg(&dir)
+        .assert()
+        .failure();
+    let code = assert.get_output().status.code().unwrap();
+    assert_eq!(
+        code, 2,
+        "--since + --baseline must be a clap usage-error conflict (exit 2), got {code}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// D-04 exclusivity: `--since` + `--update-baseline` in one invocation is
+/// also a clap usage error (exit 2) — a snapshot baseline is ephemeral and is
+/// never a source for the persisted file.
+#[test]
+fn since_and_update_baseline_together_is_a_clap_conflict_exit_2() {
+    let dir = tmp_dir("since-update-baseline-conflict");
+    let assert = getdev()
+        .env("GETDEV_OFFLINE", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .arg("check")
+        .arg("--offline")
+        .arg("--since")
+        .arg("1")
+        .arg("--update-baseline")
+        .arg("--path")
+        .arg(&dir)
+        .assert()
+        .failure();
+    let code = assert.get_output().status.code().unwrap();
+    assert_eq!(
+        code, 2,
+        "--since + --update-baseline must be a clap usage-error conflict (exit 2), got {code}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// SC-3/determinism: a plain `check --json` with NO baseline flags omits the
+/// `baseline` key entirely (additive/optional, docs/SPEC-FINDINGS.md) — the
+/// default `--json` shape is byte-unchanged by this phase.
+#[test]
+fn plain_json_with_no_baseline_flags_omits_the_baseline_key() {
+    let dir = tmp_dir("no-baseline-json");
+    let cache_dir = dir.join("cache");
+    std::fs::write(
+        dir.join("app.js"),
+        "const stripeKey = \"sk_live_ABCDEFGHIJKLMNOP01\";\n",
+    )
+    .unwrap();
+
+    let (stdout, _stderr, code) = run_check_json(&dir, &cache_dir, &[]);
+    assert_eq!(code, 0, "no --fail-on must exit 0");
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("check --json must emit valid JSON");
+    assert!(
+        json.get("baseline").is_none(),
+        "a run with no baseline flags must omit the `baseline` key entirely, got:\n{stdout}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
 }
