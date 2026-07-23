@@ -1,25 +1,32 @@
-//! `getdev init` — interactive first-run setup. Mirrors `commands::env`/
-//! `commands::ship`'s `plan → mutate::apply(writes, hook) → report` shape: it
-//! builds a batch of [`PlannedWrite::WriteFile`]s and hands them to the ONE
-//! audited [`getdev_core::mutate::apply`] path (atomic write → rollback), with
-//! the multi-file [`AutoSnapHook`] firing before any mutation.
+//! `getdev init` — non-interactive first-run setup (**zero prompts, ever**).
+//! Mirrors `commands::env`/`commands::ship`'s `plan → mutate::apply(writes,
+//! hook) → report` shape: it builds a batch of [`PlannedWrite::WriteFile`]s and
+//! hands them to the ONE audited [`getdev_core::mutate::apply`] path (atomic
+//! write → rollback), with the multi-file [`AutoSnapHook`] firing before any
+//! mutation.
 //!
-//! It does four things (docs/SPEC-COMMANDS.md `getdev init`):
-//!   1. writes `.getdev.toml` (detected stack + defaults),
-//!   2. offers a `.git/hooks/pre-commit` hook (`getdev check --quiet --fail-on
+//! Plain `getdev init` writes `.getdev.toml` (detected stack + defaults, only if
+//! absent) and prints a one-line hint naming the optional extras. `getdev init
+//! --all` (with `--yes` as a back-compat alias) ALSO installs, deterministically
+//! and with no prompts (docs/SPEC-COMMANDS.md `getdev init`):
+//!   1. a `.git/hooks/pre-commit` hook (`getdev check --quiet --fail-on
 //!      critical`),
-//!   3. offers an agent-context managed block in any present
-//!      `CLAUDE.md`/`AGENTS.md`/`.cursorrules`,
-//!   4. offers a `.git/hooks/post-checkout` auto-snap hook (`getdev snap`).
+//!   2. an agent-context managed block in any PRESENT
+//!      `CLAUDE.md`/`AGENTS.md`/`.cursorrules` (never creates one),
+//!   3. a `.git/hooks/post-checkout` auto-snap hook (`getdev snap`).
+//!
+//! **Why no prompts (B-07):** a prompt after `getdev init` breaks CI/pipes and
+//! determinism, and a blocking `read_line` renders as a blind cursor with no
+//! exit in embedded/agent terminals — the exact field failure this command was
+//! rewritten to remove. The welcome banner also moved OUT of `init`: it is now a
+//! one-time first-run greeting shown by `main` on the first getdev invocation of
+//! any command (a best-effort cache-dir marker), not by `init`.
 //!
 //! **Never-clobber (contract):** init only CREATES new files or UPSERTS a
 //! marker-delimited managed block. A pre-existing `.getdev.toml` or hook is
 //! skipped with a message — another tool's setup is never overwritten. The
 //! managed-block upsert is idempotent: re-running init leaves user content
 //! outside the markers byte-identical.
-//!
-//! **`--yes`** bypasses every `dialoguer` prompt with documented defaults
-//! (yes to each offer) — CI/non-interactive safe.
 //!
 //! **Executable bit:** `mutate`'s `atomic_write` hardens every new file to
 //! `0600` (IN-07, deliberately kept for secret writes). A non-executable git
@@ -49,40 +56,25 @@ const AGENT_FILES: [&str; 3] = ["CLAUDE.md", "AGENTS.md", ".cursorrules"];
 
 pub struct InitArgs {
     pub path: PathBuf,
-    /// Bypass every interactive prompt, taking the documented default (yes) for
-    /// each offer — non-interactive/CI-safe (docs/SPEC-COMMANDS.md).
-    pub yes: bool,
+    /// Install the optional extras too (pre-commit hook, agent-context managed
+    /// block, auto-snap post-checkout hook) in addition to writing
+    /// `.getdev.toml`. Off by default: plain `init` writes only the config and
+    /// prints a hint. No prompting either way — `init` is fully non-interactive
+    /// (docs/SPEC-COMMANDS.md `getdev init`; B-07). Clap exposes `--yes` as a
+    /// back-compat alias for this flag.
+    pub all: bool,
     /// Resolved config — supplies the `[snap]` knobs backing the auto-snap hook
     /// that fires before a multi-file mutation.
     pub cfg: Config,
-    /// Suppress the per-step status chatter AND the welcome banner (global flag).
+    /// Suppress the per-step status chatter and the extras hint (global flag).
     pub quiet: bool,
-    /// Disable ANSI colors in the welcome banner (global flag; `NO_COLOR` and a
-    /// non-tty stdout are honored too, via `ColorMode::resolve`).
-    pub no_color: bool,
-    /// Machine-readable mode: suppress the decorative welcome banner entirely
-    /// (global flag). `init` has no JSON payload of its own — this only gates
-    /// the banner so a scripted `getdev init --json` stays free of art.
+    /// Machine-readable mode: `init` has no JSON payload of its own — this only
+    /// suppresses the summary/hint chatter so a scripted `getdev init --json`
+    /// stays quiet (global flag).
     pub json: bool,
 }
 
 pub fn run(args: &InitArgs) -> anyhow::Result<u8> {
-    // First-run welcome (decorative only): shown once at the very top of
-    // `getdev init`, before the interactive offers. Suppressed under `--quiet`
-    // and `--json`; rendered plain (no ANSI) under `--no-color`/`NO_COLOR`/a
-    // non-tty stdout. It carries NO call-to-action — the tagline restates the
-    // product promise only (CLAUDE.md standing rules: no telemetry/CTA).
-    if !args.quiet && !args.json {
-        use std::io::IsTerminal as _;
-        let color =
-            getdev_core::report::ColorMode::resolve(args.no_color, std::io::stdout().is_terminal());
-        print!(
-            "{}",
-            getdev_core::report::render_welcome_banner(env!("CARGO_PKG_VERSION"), color)
-        );
-        println!();
-    }
-
     // Parse-once stack detection, reusing ship::detect_stack over a shared
     // ScanContext-fed dependency graph (07-05) — no forked detector.
     let ctx = ScanContext::build(&args.path)?;
@@ -117,9 +109,9 @@ pub fn run(args: &InitArgs) -> anyhow::Result<u8> {
     let git_dir = args.path.join(".git");
     let is_git_repo = git_dir.is_dir();
 
-    // --- 2. pre-commit hook (offered) ----------------------------------------
+    // --- 2. pre-commit hook (--all only) -------------------------------------
     if is_git_repo {
-        if offer("install a pre-commit hook (getdev check)?", args.yes)? {
+        if args.all {
             let hook_path = git_dir.join("hooks").join("pre-commit");
             if hook_path.exists() {
                 notes
@@ -138,8 +130,8 @@ pub fn run(args: &InitArgs) -> anyhow::Result<u8> {
         notes.push("not a git repository — skipping git hook setup".to_owned());
     }
 
-    // --- 3. agent-context managed block (offered) ----------------------------
-    if offer("add a getdev managed block to agent files?", args.yes)? {
+    // --- 3. agent-context managed block (--all only) -------------------------
+    if args.all {
         for name in AGENT_FILES {
             let agent_path = args.path.join(name);
             // Only append to an agent file that already exists — init never
@@ -173,8 +165,8 @@ pub fn run(args: &InitArgs) -> anyhow::Result<u8> {
         }
     }
 
-    // --- 4. auto-snap post-checkout hook (offered) ---------------------------
-    if is_git_repo && offer("install an auto-snap post-checkout hook?", args.yes)? {
+    // --- 4. auto-snap post-checkout hook (--all only) ------------------------
+    if is_git_repo && args.all {
         let hook_path = git_dir.join("hooks").join("post-checkout");
         if hook_path.exists() {
             notes.push(".git/hooks/post-checkout already exists — leaving it untouched".to_owned());
@@ -220,49 +212,24 @@ pub fn run(args: &InitArgs) -> anyhow::Result<u8> {
         }
     }
 
-    if !args.quiet {
+    // Summary + (plain `init` only) the one-line extras hint. Non-interactive:
+    // there is never a prompt here — the hint just names what `--all` would add
+    // and how to install it (docs/SPEC-COMMANDS.md `getdev init`).
+    if !args.quiet && !args.json {
         for note in &notes {
             println!("{note}");
+        }
+        if !args.all {
+            println!();
+            println!(
+                "optional: pre-commit hook · agent-context block · auto-snap hook — run `getdev init --all` to install"
+            );
         }
         println!();
         println!("getdev is set up — run `getdev check` to see your Ship Score");
     }
 
     Ok(0)
-}
-
-/// Offer a yes/no step: `--yes` takes the documented default (yes) and bypasses
-/// the prompt entirely (CI-safe); otherwise ask a plain line-based `[Y/n]`
-/// question on stdout. Deliberately NOT a raw-mode prompt library: raw mode
-/// hides the cursor, swallows unechoed keystrokes, and renders to stderr —
-/// when any of that misfires the user sees a blank line that eats typing and
-/// concludes the program hung (observed in the field on v0.1.2, which used
-/// `dialoguer`). A flushed stdout prompt + `read_line` echoes what the user
-/// types, accepts Enter for the default, and behaves identically in every
-/// terminal. Non-TTY stdin/stdout without `--yes` skips the offer (answer
-/// no) instead of blocking on input that can never arrive; EOF (ctrl-d)
-/// likewise answers no.
-fn offer(prompt: &str, yes: bool) -> anyhow::Result<bool> {
-    use std::io::{IsTerminal as _, Write as _};
-    if yes {
-        return Ok(true);
-    }
-    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
-        println!("{prompt} — skipped (non-interactive; pass --yes to accept offers)");
-        return Ok(false);
-    }
-    let mut stdout = std::io::stdout();
-    write!(stdout, "{prompt} [Y/n]: ")?;
-    stdout.flush()?;
-    let mut line = String::new();
-    if std::io::stdin().read_line(&mut line)? == 0 {
-        println!();
-        return Ok(false);
-    }
-    Ok(matches!(
-        line.trim().to_ascii_lowercase().as_str(),
-        "" | "y" | "yes"
-    ))
 }
 
 /// The result of an [`upsert_managed_block`] transform.

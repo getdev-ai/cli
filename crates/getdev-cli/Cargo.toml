@@ -26,9 +26,6 @@ anyhow = { workspace = true }
 # decodes the `.sig`, p256 verifies the detached ECDSA-P256 signature.
 base64 = "0.22.1"
 clap = { workspace = true }
-# Interactive prompts for `getdev init`'s offer-steps (Confirm only). Default
-# features (editor/password/zeroize/tempfile) are unused here, so trim them —
-# `Confirm` lives in the base crate. Legitimacy verdict OK (07-RESEARCH).
 getdev-core = { workspace = true }
 getdev-gitx = { workspace = true }
 getdev-grammars = { workspace = true }

@@ -206,15 +206,17 @@ enum Command {
         /// Snapshot id to restore (default: the most recent manual snapshot)
         id: Option<u32>,
     },
-    /// Interactive first-run setup: write `.getdev.toml` (detected stack +
-    /// defaults) and offer a pre-commit hook, an agent-context managed block,
-    /// and an auto-snap post-checkout hook. Only creates new files or upserts
-    /// managed blocks — never clobbers pre-existing content. `--yes` bypasses
-    /// every prompt with documented defaults (docs/SPEC-COMMANDS.md `init`).
+    /// Non-interactive first-run setup (zero prompts): write `.getdev.toml`
+    /// (detected stack + defaults, only if absent) and print a hint listing the
+    /// optional extras. `--all` ALSO installs a pre-commit hook, an
+    /// agent-context managed block (into an existing agent file only), and an
+    /// auto-snap post-checkout hook — deterministically, never clobbering
+    /// pre-existing content (docs/SPEC-COMMANDS.md `init`; B-07).
     Init {
-        /// Accept every offer's default (yes) without prompting — CI-safe
-        #[arg(long)]
-        yes: bool,
+        /// Also install the optional extras (pre-commit hook, agent-context
+        /// block, auto-snap hook). `--yes` is a back-compat alias
+        #[arg(long, alias = "yes")]
+        all: bool,
     },
     /// Self-diagnostics: toolchain, git availability, grammar integrity
     Doctor,
@@ -296,6 +298,12 @@ fn main() -> std::process::ExitCode {
 /// doc-comment for why this stays explicit rather than becoming hidden
 /// global state.
 fn run(cli: Cli) -> anyhow::Result<u8> {
+    // One-time first-run welcome (best-effort): the decorative banner shows once,
+    // on the first getdev invocation of ANY command, then never again. It NEVER
+    // fails or delays a command — see `maybe_first_run_welcome`. Runs before the
+    // doctor early-return so it covers every command uniformly.
+    maybe_first_run_welcome(cli.global.quiet, cli.global.json, cli.global.no_color);
+
     // B3: doctor must survive a malformed config — it exists specifically to
     // diagnose things like a broken `.getdev.toml`, so a `ConfigError` here
     // must never kill the process before doctor's own checks even run.
@@ -518,12 +526,11 @@ fn run(cli: Cli) -> anyhow::Result<u8> {
             keep: cfg.snap.keep,
             id,
         }),
-        Command::Init { yes } => commands::init::run(&commands::init::InitArgs {
+        Command::Init { all } => commands::init::run(&commands::init::InitArgs {
             path,
-            yes,
+            all,
             cfg: cfg.clone(),
             quiet,
-            no_color,
             json,
         }),
         Command::Doctor => {
@@ -546,6 +553,43 @@ fn run(cli: Cli) -> anyhow::Result<u8> {
             cfg: cfg.update.clone(),
         }),
     }
+}
+
+/// Best-effort one-time first-run welcome. Prints the decorative welcome banner
+/// EXACTLY once — guarded by a `.welcomed` marker in getdev's cache dir (the
+/// same dir the registry cache uses, `GETDEV_CACHE_DIR`-overridable for tests) —
+/// and only when stdout is a TTY and output is not suppressed (`--quiet`/
+/// `--json`), honoring `--no-color`/`NO_COLOR` via `ColorMode::resolve`.
+///
+/// **Never fails or delays a command (B-07 spirit):** every filesystem step is
+/// wrapped so an unreadable/unwritable cache dir simply means the banner may
+/// show again later — it can never surface an error or block a command. If the
+/// marker cannot be written, the banner has still been shown; the only cost is a
+/// possible repeat on the next run.
+fn maybe_first_run_welcome(quiet: bool, json: bool, no_color: bool) {
+    use std::io::IsTerminal as _;
+    // Decorative-only: nothing to show under --quiet/--json or when piped.
+    if quiet || json || !std::io::stdout().is_terminal() {
+        return;
+    }
+    let marker = getdev_registry::cache::cache_dir().join(".welcomed");
+    // Already welcomed — a best-effort existence check; a read error (treated as
+    // "absent") at worst re-shows the banner, never breaks the command.
+    if marker.exists() {
+        return;
+    }
+    let color = getdev_core::report::ColorMode::resolve(no_color, true);
+    print!(
+        "{}",
+        getdev_core::report::render_welcome_banner(env!("CARGO_PKG_VERSION"), color)
+    );
+    println!();
+    // Record the marker so the banner never shows again — swallow every IO error
+    // (dir create + touch). A failure here is invisible to the user by design.
+    if let Some(parent) = marker.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&marker, b"");
 }
 
 /// Map a `getdev-gitx` changed file onto `core::review`'s own input type. This
