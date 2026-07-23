@@ -84,9 +84,12 @@ fn mixed_repo(tag: &str) -> PathBuf {
     write(&dir, "untracked.txt", "untracked content\n");
     write(&dir, "ignored.txt", "ignored content\n");
     write(&dir, "secret/leak.txt", "sensitive\n");
-    assert!(git(&dir, &["add", "tracked.txt", "src/nested.txt", ".gitignore"])
-        .status
-        .success());
+    assert!(git(
+        &dir,
+        &["add", "tracked.txt", "src/nested.txt", ".gitignore"]
+    )
+    .status
+    .success());
     assert!(git(&dir, &["commit", "-q", "-m", "initial"])
         .status
         .success());
@@ -201,14 +204,22 @@ fn materialize_never_mutates_the_source_repo() {
 
     let head_before = std::fs::read(dir.join(".git/HEAD")).unwrap();
     let status_before = git(&dir, &["status", "--porcelain"]).stdout;
-    let refs_before = git(&dir, &["for-each-ref", "--format=%(refname)", "refs/getdev"]).stdout;
+    let refs_before = git(
+        &dir,
+        &["for-each-ref", "--format=%(refname)", "refs/getdev"],
+    )
+    .stdout;
 
     let dest = fresh_dest("readonly");
     materialize(&dir, snap.id, &dest).unwrap();
 
     let head_after = std::fs::read(dir.join(".git/HEAD")).unwrap();
     let status_after = git(&dir, &["status", "--porcelain"]).stdout;
-    let refs_after = git(&dir, &["for-each-ref", "--format=%(refname)", "refs/getdev"]).stdout;
+    let refs_after = git(
+        &dir,
+        &["for-each-ref", "--format=%(refname)", "refs/getdev"],
+    )
+    .stdout;
 
     assert_eq!(head_before, head_after, "HEAD must not change");
     assert_eq!(

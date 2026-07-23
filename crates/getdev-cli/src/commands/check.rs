@@ -52,13 +52,52 @@ pub(crate) enum BaselineMode {
     /// The persisted `.getdev-baseline` file. `update` = also rewrite it from
     /// the current run's fingerprints (`--update-baseline`, D-09 auto-prune).
     Persisted { update: bool },
-    /// Ephemeral snapshot baseline (`--since <snap-id>`) — reconstructed from a
-    /// `refs/getdev/` snap. A functionality stub in 14-01: the enum/seam/flag
-    /// are the final shape; 14-02 wires the materialize→collect recompute.
-    Since {
-        #[allow(dead_code)]
-        snap_id: u32,
-    },
+    /// Ephemeral snapshot baseline (`--since <snap-id>`) — reconstructed by
+    /// materializing a `refs/getdev/` snap and recomputing its finding-set over
+    /// the SAME `collect()` pipeline, forced offline (D-06).
+    Since { snap_id: u32 },
+}
+
+/// An absolute, per-call-unique temp directory for a `--since` materialize,
+/// removed on drop so no dir leaks across repeated `--since` runs (T-14-04 —
+/// LOOP-03's loop-heavy use case makes a slow leak real). Mirrors gitx's
+/// `TempIndex` RAII shape and `temp_index_path`'s pid+nanos+atomic-seq
+/// absolute-path uniqueness (snap.rs:144-157). Cleanup fires on EVERY return
+/// path out of the `--since` arm, including `?`-early-returns.
+struct TempDest {
+    path: PathBuf,
+}
+
+impl TempDest {
+    fn new() -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        // pid disambiguates across processes; the atomic seq across concurrent
+        // calls within this process (the coarse clock can repeat); nanos spreads
+        // across runs for readability.
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            ".getdev-since-dest.{}.{nanos}.{seq}",
+            std::process::id()
+        ));
+        TempDest { path }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempDest {
+    fn drop(&mut self) {
+        // A materialize populates this dir; remove the whole tree. A never-created
+        // dir (empty-tree snapshot) or an already-gone dir is fine.
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
 }
 
 /// Resolve the raw `check` baseline flags (+ `[baseline].auto`) into a
@@ -330,11 +369,32 @@ pub(crate) fn collect(
             }
             (outcome.kept.clone(), Some(outcome))
         }
-        BaselineMode::Since { .. } => {
-            // The enum/seam/flag are the final shape; the snapshot recompute is
-            // wired in 14-02. Until then `--since` is an explicit execution error
-            // rather than a silent no-op.
-            anyhow::bail!("--since is not yet wired");
+        BaselineMode::Since { snap_id } => {
+            // Ephemeral snap-anchored baseline (D-06): materialize the snapshot's
+            // tree into a unique temp dir, recompute the finding-set over it with
+            // the SAME `collect()` pipeline, and take the resulting `gdv1:`
+            // fingerprint SET as the baseline. The recompute is FORCED offline
+            // (deterministic, no network, no cache pollution) regardless of the
+            // outer run's `--offline`, and passes `BaselineMode::None` so it never
+            // recurses into a baseline. Only the fingerprint set is consumed — the
+            // baseline run's report (its temp-dir-relative `file` paths) is
+            // discarded, so no path rewrite is needed; fingerprint
+            // temp-dir-invariance (RESEARCH Focus Area 2) makes the diff
+            // apples-to-apples. The caller's already-resolved `cfg` is reused (NOT
+            // re-resolved from the temp dir — Pitfall 3). A bad snap-id / non-repo
+            // propagates as a `GitxError` → exit 2 (D-04: an execution error, not
+            // a config error). The temp dir is RAII-cleaned on every return path.
+            let dest = TempDest::new();
+            getdev_gitx::snap::materialize(path, *snap_id, dest.path())?;
+            let baseline_run = collect(dest.path(), cfg, true, &BaselineMode::None, progress)?;
+            let baseline_set: BTreeSet<String> = baseline_run
+                .report
+                .findings
+                .iter()
+                .filter_map(|f| f.fingerprint.clone())
+                .collect();
+            let outcome = baseline::filter_by_baseline(findings, &baseline_set);
+            (outcome.kept.clone(), Some(outcome))
         }
     };
 
