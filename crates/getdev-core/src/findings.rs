@@ -244,6 +244,27 @@ pub struct SkippedEntry {
     pub reason: String,
 }
 
+/// The `--json` view of an active baseline (LOOP-03, D-08) — additive,
+/// optional envelope field mirroring [`AppliedInfo`]/[`SkippedEntry`]:
+/// omitted entirely (not `null`) unless a baseline actually suppressed this
+/// run (`--baseline`/`--update-baseline`/`--since`, or `[baseline].auto` with
+/// the file present), so a plain `check --json` with no baseline flags stays
+/// byte-unchanged. See docs/SPEC-FINDINGS.md §"Envelope fields" `baseline` row.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BaselineEnvelope {
+    /// `"persisted"` or `"since"`.
+    pub mode: String,
+    /// The resolved `.getdev-baseline` path — present for `persisted` mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    /// The `--since` snapshot id — present for `since` mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snap: Option<u32>,
+    /// Count of findings removed by the baseline this run — mirrors the `-v`
+    /// "N finding(s) suppressed by baseline" line (never silent, SC-3).
+    pub suppressed: usize,
+}
+
 /// The top-level report envelope — serializing this IS the `--json` output.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FindingsReport {
@@ -263,6 +284,9 @@ pub struct FindingsReport {
     /// F4 audit fix: additive, optional — see [`SkippedEntry`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<SkippedEntry>,
+    /// LOOP-03, D-08: additive, optional — see [`BaselineEnvelope`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub baseline: Option<BaselineEnvelope>,
 }
 
 impl FindingsReport {
@@ -298,6 +322,7 @@ impl FindingsReport {
             findings,
             applied: None,
             skipped: Vec::new(),
+            baseline: None,
         }
     }
 }

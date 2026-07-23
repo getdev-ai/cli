@@ -426,6 +426,32 @@ pub(crate) fn collect(
     // command that ever sets a Ship Score (every other leaves it `None`).
     report.score = Some(report::ship_score(&report.summary));
 
+    // LOOP-03/D-08: the `--json` `baseline` block, additive/optional — omitted
+    // entirely unless a baseline was active this run (docs/SPEC-FINDINGS.md
+    // `baseline` envelope row). `mode`/`file`/`snap` mirror the `-v` render
+    // above; `suppressed` is the count the baseline removed. Matched jointly
+    // with `baseline_mode` (never an `unreachable!`/panic) so a `None` outcome
+    // — no baseline active — always yields `None`, regardless of mode.
+    report.baseline = match (baseline_mode, baseline_result.as_ref()) {
+        (BaselineMode::Persisted { .. }, Some(outcome)) => {
+            Some(getdev_core::findings::BaselineEnvelope {
+                mode: "persisted".to_owned(),
+                file: Some(display_path(&path.join(&cfg.baseline.file))),
+                snap: None,
+                suppressed: outcome.suppressed.len(),
+            })
+        }
+        (BaselineMode::Since { snap_id }, Some(outcome)) => {
+            Some(getdev_core::findings::BaselineEnvelope {
+                mode: "since".to_owned(),
+                file: None,
+                snap: Some(*snap_id),
+                suppressed: outcome.suppressed.len(),
+            })
+        }
+        _ => None,
+    };
+
     Ok(Collected {
         report,
         suppressed: filter_outcome.suppressed,
