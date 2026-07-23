@@ -59,7 +59,10 @@ impl std::fmt::Debug for FingerprintSeed {
 /// identical code hash identically (D-07): CRLF→LF, lone `\r`→`\n`, and trim
 /// trailing whitespace inside the span.
 fn normalize_matched_text(raw: &str) -> String {
-    raw.replace("\r\n", "\n").replace('\r', "\n").trim_end().to_owned()
+    raw.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .trim_end()
+        .to_owned()
 }
 
 /// The base `gdv1:` digest for a finding: the 32-hex (128-bit) SHA-256 truncation
@@ -175,8 +178,7 @@ mod tests {
 
     /// Assign fingerprints to a one-element slice and return the resulting token.
     fn fp_of(mut finding: Finding) -> String {
-        let mut slice = std::slice::from_mut(&mut finding);
-        assign_fingerprints(&mut slice);
+        assign_fingerprints(std::slice::from_mut(&mut finding));
         finding.fingerprint.clone().unwrap()
     }
 
@@ -245,9 +247,10 @@ mod tests {
         );
     }
 
-    /// D-14 #3 (proptest): N byte-identical-seed siblings receive `#0..#{N-1}`
-    /// in ascending (line, column) order, and the base digest before `#` is
-    /// identical for all N.
+    // D-14 #3 (proptest): N byte-identical-seed siblings receive `#0..#{N-1}`
+    // in ascending (line, column) order, and the base digest before `#` is
+    // identical for all N. (Plain `//` — rustdoc cannot attach a doc comment to
+    // a macro invocation.)
     proptest! {
         #[test]
         fn occurrence_index_prop(mut lines in prop::collection::vec(1u32..10_000, 2..12)) {
@@ -326,7 +329,11 @@ mod tests {
         // Purity: two independent calls on equal inputs give equal digests.
         let one = seed_finding("real/pkg", "a/b.ts", Some(1), Some(1), "id", "left-pad");
         let two = seed_finding("real/pkg", "a/b.ts", Some(9), Some(9), "id", "left-pad");
-        assert_eq!(fp_of(one), fp_of(two), "pure fn of (id, file, node_kind, text)");
+        assert_eq!(
+            fp_of(one),
+            fp_of(two),
+            "pure fn of (id, file, node_kind, text)"
+        );
     }
 
     /// D-14 #5 / D-05: two co-located findings with distinct raw secret seeds —
@@ -362,14 +369,23 @@ mod tests {
 
         let fp_a = findings[0].fingerprint.clone().unwrap();
         let fp_b = findings[1].fingerprint.clone().unwrap();
-        assert!(fp_a.starts_with("gdv1:"), "fingerprint must be a gdv1: token");
-        assert!(fp_b.starts_with("gdv1:"), "fingerprint must be a gdv1: token");
+        assert!(
+            fp_a.starts_with("gdv1:"),
+            "fingerprint must be a gdv1: token"
+        );
+        assert!(
+            fp_b.starts_with("gdv1:"),
+            "fingerprint must be a gdv1: token"
+        );
         assert_ne!(fp_a, fp_b, "distinct secrets → distinct fingerprints");
 
         // The redacting Debug hides the secret.
         let dbg = format!("{:?}", findings[0].seed);
         assert!(dbg.contains("«redacted»"), "Debug must redact matched_text");
-        assert!(!dbg.contains("SECRETBODYONE"), "Debug must not leak the secret");
+        assert!(
+            !dbg.contains("SECRETBODYONE"),
+            "Debug must not leak the secret"
+        );
 
         // Serialize the full report — the seed field is #[serde(skip)], so no
         // raw secret substring may appear, but both fingerprints must.
@@ -384,8 +400,14 @@ mod tests {
         let json = serde_json::to_string(&report).unwrap();
         assert!(!json.contains(&secret_a), "raw secret A leaked into JSON");
         assert!(!json.contains(&secret_b), "raw secret B leaked into JSON");
-        assert!(!json.contains("SECRETBODYONE"), "secret A body leaked into JSON");
-        assert!(!json.contains("SECRETBODYTWO"), "secret B body leaked into JSON");
+        assert!(
+            !json.contains("SECRETBODYONE"),
+            "secret A body leaked into JSON"
+        );
+        assert!(
+            !json.contains("SECRETBODYTWO"),
+            "secret B body leaked into JSON"
+        );
         assert!(json.contains(&fp_a), "fingerprint A must be on the wire");
         assert!(json.contains(&fp_b), "fingerprint B must be on the wire");
     }

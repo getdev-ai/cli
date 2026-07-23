@@ -103,6 +103,11 @@ pub fn run(args: &AuditArgs) -> anyhow::Result<u8> {
     let mut cfg = args.cfg.clone();
     cfg.ignore.rules.extend(args.ignore.iter().cloned());
 
+    // D-10 batch pass: assign the shift-stable `gdv1:` identity to every finding
+    // over the finalized, fixed-order list BEFORE suppression reads it. This is
+    // the tracer wire hookup — the other five commands fan out in plan 11-05.
+    getdev_core::fingerprint::assign_fingerprints(&mut findings);
+
     let filter_outcome = suppress::filter_findings(findings, &cfg);
     findings = filter_outcome.kept;
     // Belt-and-braces with the analyzer's own floor (the analyzer already

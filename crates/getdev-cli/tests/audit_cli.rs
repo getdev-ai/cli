@@ -480,6 +480,60 @@ fn plain_run_succeeds_offline_with_no_registry_seeding_needed() {
     assert_eq!(report["schema_version"], "1");
 }
 
+/// Test 8 (11-02 tracer wire proof): `getdev audit --json` populates
+/// `Finding.fingerprint` end-to-end with a `gdv1:` token through the
+/// hardcoded-secret layer, and the raw secret value NEVER appears anywhere in
+/// the JSON output (D-05 — the secret is the identity seed, hashed only, and is
+/// `#[serde(skip)]` + redacting-`Debug` protected). The secret is assembled
+/// from concatenated pieces so the absence assertion is not self-defeating (no
+/// literal secret token in this test source to match against).
+#[test]
+fn audit_json_populates_gdv1_fingerprint_without_leaking_the_secret() {
+    let dir = tmp_dir("gdv1-wire");
+    // Stripe-live-shaped secret built from pieces — the embedded pack's secret
+    // rule fires on the `sk_live_` prefix, and the masked preview only ever
+    // shows `sk_live_…<last4>`, never this full body.
+    let secret = format!("sk_live_{}{}", "FAKEFAKE", "MIDDLEBODY0123456789");
+    std::fs::write(
+        dir.join("app.js"),
+        format!("const apiKey = \"{secret}\";\n"),
+    )
+    .unwrap();
+
+    let assert = getdev()
+        .arg("audit")
+        .arg("--json")
+        .arg("--path")
+        .arg(&dir)
+        .timeout(std::time::Duration::from_secs(10))
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    let report: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|err| panic!("stdout was not valid JSON ({err}): {stdout}"));
+    let findings = report["findings"].as_array().unwrap();
+
+    // (a) at least one finding carries a populated `gdv1:` fingerprint.
+    assert!(
+        findings.iter().any(|f| f["fingerprint"]
+            .as_str()
+            .is_some_and(|fp| fp.starts_with("gdv1:"))),
+        "expected a gdv1:-prefixed fingerprint on the secret finding, got: {stdout}"
+    );
+
+    // (b) the raw secret value — and its distinctive middle body — never appear
+    // anywhere in the serialized output (D-05 wire proof).
+    assert!(
+        !stdout.contains(&secret),
+        "raw secret value leaked into --json output"
+    );
+    assert!(
+        !stdout.contains("MIDDLEBODY0123456789"),
+        "the secret body leaked into --json output"
+    );
+}
+
 /// `getdev audit --help` exposes exactly the three sanctioned flags (plus
 /// inherited globals) — no audit-specific flag beyond
 /// `--severity`/`--ignore`/`--rules` (CLAUDE.md rule 6 / docs/PLAN.md §2.3).
