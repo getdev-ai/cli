@@ -228,7 +228,7 @@ fn process_lang_file(
         if has_ast_for_lang {
             if let Some(query) = ctx.pack.query_cache.get(lang, &rule.id) {
                 for node in run_ast_matcher(query, root_node, bytes) {
-                    findings.push(ast_hit_to_finding(rule, node, rel));
+                    findings.push(ast_hit_to_finding(rule, node, bytes, rel));
                 }
             }
         }
@@ -386,7 +386,7 @@ fn heuristic_detail(rule: &Rule) -> Option<String> {
     is_heuristic(rule).then(|| rule.description.clone())
 }
 
-fn ast_hit_to_finding(rule: &Rule, node: Node<'_>, file: &str) -> Finding {
+fn ast_hit_to_finding(rule: &Rule, node: Node<'_>, source: &[u8], file: &str) -> Finding {
     let pos = node.start_position();
     let end_pos = node.end_position();
     Finding {
@@ -412,8 +412,14 @@ fn ast_hit_to_finding(rule: &Rule, node: Node<'_>, file: &str) -> Finding {
         remediation: Some(rule.remediation.clone()),
         fixable: false,
         refs: rule.refs.clone(),
-        // Tracer stub (11-02): real AST seed lands in plan 11-05.
-        seed: crate::fingerprint::FingerprintSeed::default(),
+        // D-01/D-11 (Shape 1, real node): anchor on the matched node's kind +
+        // its source text, captured inside the parse-once pass (no re-parse —
+        // CLAUDE.md rule 5). `.unwrap_or_default()` keeps clippy clean and, for
+        // the impossible non-UTF-8 span, degrades to the empty seed.
+        seed: crate::fingerprint::FingerprintSeed {
+            node_kind: node.kind(),
+            matched_text: node.utf8_text(source).unwrap_or_default().to_owned(),
+        },
         fingerprint: None,
     }
 }
@@ -436,8 +442,13 @@ fn text_hit_to_finding(rule: &Rule, file: &str) -> Finding {
         remediation: Some(rule.remediation.clone()),
         fixable: false,
         refs: rule.refs.clone(),
-        // Tracer stub (11-02): D-02 message-fallback seed lands in plan 11-05.
-        seed: crate::fingerprint::FingerprintSeed::default(),
+        // D-02 (Shape 3, no node/span): whole-file text-regex hits have no
+        // anchor node, so the rule message is the stable fallback seed. The
+        // batch pass normalizes matched_text centrally.
+        seed: crate::fingerprint::FingerprintSeed {
+            node_kind: "message_fallback",
+            matched_text: rule.message.clone(),
+        },
         fingerprint: None,
     }
 }

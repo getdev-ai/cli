@@ -129,7 +129,12 @@ pub fn nonexistent_package_finding(input: &PackageVerdictInput) -> Option<Findin
         ),
         fixable: false,
         refs: vec!["https://getdev.ai/rules/real/nonexistent-package".to_owned()],
-        seed: crate::fingerprint::FingerprintSeed::default(),
+        // D-01/D-11: the discriminating content is the package name — two
+        // distinct nonexistent packages in one manifest differentiate.
+        seed: crate::fingerprint::FingerprintSeed {
+            node_kind: "package_name",
+            matched_text: input.name.clone(),
+        },
         fingerprint: None,
     })
 }
@@ -165,7 +170,11 @@ pub fn typosquat_finding(input: &PackageVerdictInput) -> Option<Finding> {
         )),
         fixable: false,
         refs: vec!["https://getdev.ai/rules/real/typosquat-suspect".to_owned()],
-        seed: crate::fingerprint::FingerprintSeed::default(),
+        // D-01/D-11: seed on the suspect package name (the discriminating span).
+        seed: crate::fingerprint::FingerprintSeed {
+            node_kind: "package_name",
+            matched_text: input.name.clone(),
+        },
         fingerprint: None,
     })
 }
@@ -203,7 +212,11 @@ pub fn phantom_import_finding(import_ref: &ImportRef) -> Option<Finding> {
         )),
         fixable: false,
         refs: vec!["https://getdev.ai/rules/real/phantom-import".to_owned()],
-        seed: crate::fingerprint::FingerprintSeed::default(),
+        // D-01/D-11: seed on the imported module specifier.
+        seed: crate::fingerprint::FingerprintSeed {
+            node_kind: "import_specifier",
+            matched_text: import_ref.module.clone(),
+        },
         fingerprint: None,
     })
 }
@@ -240,7 +253,11 @@ pub fn unknown_model_finding(
         ),
         fixable: false,
         refs: vec!["https://getdev.ai/rules/real/unknown-model-string".to_owned()],
-        seed: crate::fingerprint::FingerprintSeed::default(),
+        // D-01/D-11: seed on the unrecognized model literal.
+        seed: crate::fingerprint::FingerprintSeed {
+            node_kind: "model_string",
+            matched_text: model_verdict.literal.clone(),
+        },
         fingerprint: None,
     }
 }
@@ -302,6 +319,15 @@ fn api_finding(result: &ApiResult) -> Finding {
             ),
         )
     };
+    // D-01/D-11: seed on `package.member` where a member exists, else the
+    // package alone — never emit a trailing `.` (mirrors the A3 dangling-dot
+    // fix above so the aggregated NotInstalled/Unreadable rollup is one stable
+    // identity rather than `package.` colliding differently).
+    let seed_text = if result.member.is_empty() {
+        result.package.clone()
+    } else {
+        format!("{}.{}", result.package, result.member)
+    };
     Finding {
         id: id.to_owned(),
         command: "real".to_owned(),
@@ -317,7 +343,10 @@ fn api_finding(result: &ApiResult) -> Finding {
         remediation: Some(remediation),
         fixable: false,
         refs: vec![format!("https://getdev.ai/rules/{id}")],
-        seed: crate::fingerprint::FingerprintSeed::default(),
+        seed: crate::fingerprint::FingerprintSeed {
+            node_kind: "api_member",
+            matched_text: seed_text,
+        },
         fingerprint: None,
     }
 }
@@ -325,6 +354,13 @@ fn api_finding(result: &ApiResult) -> Finding {
 /// An explicit info finding for an unsupported stack (REQ-language-support,
 /// docs/ARCHITECTURE.md §3.3) — never a silent, empty partial result.
 pub fn unsupported_stack_finding(stack_hint: &StackHint) -> Finding {
+    // Project-level finding (`line: None`) — no node to anchor on, so use the
+    // D-02 message fallback. The message is the discriminating content; clone
+    // it before it is moved into the `message` field.
+    let message = format!(
+        "'{}' stack not yet supported for deep analysis",
+        stack_hint.detected
+    );
     Finding {
         id: "real/unsupported-stack".to_owned(),
         command: "real".to_owned(),
@@ -334,10 +370,7 @@ pub fn unsupported_stack_finding(stack_hint: &StackHint) -> Finding {
         line: None,
         column: None,
         end_line: None,
-        message: format!(
-            "'{}' stack not yet supported for deep analysis",
-            stack_hint.detected
-        ),
+        message: message.clone(),
         detail: Some(
             "getdev real currently analyzes JavaScript/TypeScript and Python projects only; \
              this project's dominant language was not recognized (docs/ARCHITECTURE.md \
@@ -348,7 +381,10 @@ pub fn unsupported_stack_finding(stack_hint: &StackHint) -> Finding {
         remediation: None,
         fixable: false,
         refs: vec!["https://getdev.ai/rules/real/unsupported-stack".to_owned()],
-        seed: crate::fingerprint::FingerprintSeed::default(),
+        seed: crate::fingerprint::FingerprintSeed {
+            node_kind: "message_fallback",
+            matched_text: message,
+        },
         fingerprint: None,
     }
 }
