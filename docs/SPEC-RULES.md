@@ -84,6 +84,68 @@ A `--rules <dir>` user pack is merged with the embedded pack at load time (`core
 
 Every rule ships with a measured FP rate on the sentinel corpus (10 real OSS repos, `docs/PLAN.md` §9.1). A rule exceeding **5 % FP** on the sentinels is demoted to `low`/`info` severity or `confidence: low` until improved. Heuristic rules must surface their reasoning in the finding's `detail` field.
 
+## Rule-specific framing (normative)
+
+Two `audit` rules carry framing constraints that are contractual — the rule YAML
+(`audit/sql-string-concat.yaml`) and the programmatic secret classifier (`core::secrets`, which
+`audit/hardcoded-secret` wraps via its `secret: true` matcher) MUST implement exactly what is
+written here. These constraints exist because getdev is **deterministic and does no dataflow/taint
+analysis** (docs/DECISIONS.md): a finding must claim only what a static, single-pass AST match can
+honestly support, and its severity must be proportionate to that certainty.
+
+### `audit/sql-string-concat`
+
+- **Severity is `medium`, not `high`.** Because the core does no taint tracking, getdev cannot know
+  whether the interpolated value is attacker-controlled — it can only observe the *shape* (a string
+  built by `+`/`%`/template-literal interpolation passed to `.execute(...)`/`.query(...)`/
+  `.executemany(...)`). The finding flags a shape worth reviewing, not a proven vulnerability, so it
+  is `medium`.
+- **Message is proportionate.** The message is `"string-interpolated SQL — review for injection"`
+  (an invitation to review), NOT an `"SQL injection risk"` / `"SQL injection"` alarm that overclaims
+  a certainty the deterministic engine does not have.
+- **Parameterized-ORM tagged-template exemption.** A parameterized ORM tagged template — Drizzle's
+  ``sql`…` `` and equivalent `sql`-tagged (or ORM-tag) templates — is a *safe*, parameterized
+  construct, not raw interpolation. When such a tagged-template value is the argument (e.g.
+  ``db.execute(sql`… ${x} …`)``), the rule does **not** fire. Genuine raw interpolation
+  (``db.execute(`… ${table} …`)`` with no parameterizing tag) still fires: recall is preserved,
+  only the ORM-safe shape is exempted. This exemption ships as a **Drizzle `sql`-tag negative
+  fixture** counted toward the ≥ 3 negatives.
+
+### `audit/hardcoded-secret` — value-shape over variable-name
+
+The rule wraps `core::secrets`'s two-layer classifier; its false-positive posture is governed by
+**value shape, weighted over the variable name**:
+
+- **Known provider key formats always fire.** A value matching a vendor key format (Stripe `sk_…`,
+  AWS `AKIA…`, GitHub `ghp_…`, Anthropic, OpenAI, a PEM private-key block, the `secrets.yaml` pack,
+  etc.) is a live-secret match on the value alone and always flags — regardless of the identifier
+  name or the file it lives in. Recall is preserved: a genuinely planted provider-format key still
+  flags.
+- **The generic entropy fallback is value-gated.** Absent a provider-format match, a
+  secret-suggesting *identifier name* is **necessary but no longer sufficient**: the value must
+  *also* look like an opaque credential (a high-entropy, mixed-case-and-digit / base64 / hex random
+  body) AND must not match a known non-secret value shape. The entropy fallback does **not** fire on:
+  - **URL / connection-string values** — a plain `http(s)://…` or DSN value is deployment config,
+    not a hardcoded secret (a *credentialed* URL still flags via the existing URL-classification
+    path when `env --include-urls` is on).
+  - **Filesystem-path / filename values** — a value ending in a common file extension
+    (`.pdf`/`.json`/`.png`/`.csv`/…) or containing path separators is a filename/path, not a
+    credential.
+  - **Identifier-shaped slug / enum values** — a single lowercase `snake_case`/`kebab_case` token
+    (no mixed-case-and-digit high-entropy signature) is a taxonomy slug or enum constant, not a
+    random secret (e.g. `key: "yacht_management_guardianage"`).
+- **Test-file suppression of the fallback.** In `*.test.*` / `*.spec.*` / `**/tests/**` files the
+  entropy fallback is suppressed (mirroring the `EXEMPT_PATH_GLOBS` convention the `review`
+  detectors use), because test scaffolding is dense with credential-*shaped* fixture strings. This
+  gate is on the **entropy fallback only** — a genuinely planted **provider-format** key inside a
+  test file still fires. Recall is preserved.
+
+Both reframes only ever *remove* false-positive findings or lower an overclaimed severity — never
+change how a still-firing finding is rendered, and never touch secret masking (SPEC-FINDINGS
+Invariant 2). Each rejected non-secret value class above is registered as a **negative fixture**
+under the ≥ 3-negative floor; heuristic reasoning is surfaced in the finding's `detail` field per
+the FP policy above.
+
 ## Adding a rule (checklist)
 
 1. Write the YAML in the correct pack directory (`crates/getdev-core/rules/<command>/<name>.yaml`).
