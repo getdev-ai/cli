@@ -1,0 +1,1 @@
+{ "true": [ { "id": "audit/sql-string-concat", "file": "src/index.ts" } ] }

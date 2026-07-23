@@ -1,0 +1,1 @@
+{ "true": [ { "id": "env/hardcoded-secret", "file": "src/secretConfig.ts" } ] }
