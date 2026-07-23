@@ -408,3 +408,119 @@ fn plain_json_with_no_baseline_flags_omits_the_baseline_key() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// Count `findings[].id` entries starting with `review/` in a `check --json`
+/// stdout body.
+fn count_review_findings(json_stdout: &str) -> usize {
+    let json: serde_json::Value =
+        serde_json::from_str(json_stdout).expect("check --json must emit valid JSON");
+    json["findings"]
+        .as_array()
+        .expect("findings must be an array")
+        .iter()
+        .filter(|f| f["id"].as_str().is_some_and(|id| id.starts_with("review/")))
+        .count()
+}
+
+/// The phase's raison d'etre (SC-1/SC-2 applied to the real FP class):
+/// `review/*` "Introduced X" rules fire whole-repo without a diff — an
+/// unbaselined `check` reports many of them, and the SAME `check --baseline`
+/// (after `--update-baseline`) over UNCHANGED content reports ZERO. Two
+/// unreferenced source files are a deterministic `review/orphan-file`
+/// generator (no relative import anywhere targets them, and neither path
+/// matches an entry-point/test/config exemption glob).
+#[test]
+fn whole_repo_noise_review_findings_are_suppressed_to_zero_by_the_baseline() {
+    let dir = tmp_dir("whole-repo-noise");
+    let cache_dir = dir.join("cache");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    // Neither file is imported anywhere, and neither path matches an
+    // EXEMPT_PATH_GLOBS entry (index/main/app/server/*.config./scripts/**/
+    // tests) — both fire `review/orphan-file` under `check`'s whole-repo
+    // (`review --all`) scan, which treats every file as "introduced"
+    // (is_new_file = true, review/mod.rs::review_file_from_scanned).
+    std::fs::write(
+        dir.join("src/orphan-helper-one.js"),
+        "export function helperOne() {\n  return 1;\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/orphan-helper-two.js"),
+        "export function helperTwo() {\n  return 2;\n}\n",
+    )
+    .unwrap();
+
+    // 1) Unbaselined: many review/* "Introduced ..." findings (N >= 2).
+    let (before, _stderr, code) = run_check_json(&dir, &cache_dir, &[]);
+    assert_eq!(code, 0, "no --fail-on must exit 0");
+    let unbaselined_review_count = count_review_findings(&before);
+    assert!(
+        unbaselined_review_count >= 2,
+        "an unbaselined whole-repo check must report >= 2 review/* findings, got {unbaselined_review_count}:\n{before}"
+    );
+
+    // 2) `--update-baseline` writes the fingerprints of the current run.
+    let (_during, _stderr, code) = run_check_json(&dir, &cache_dir, &["--update-baseline"]);
+    assert_eq!(code, 0, "--update-baseline must exit 0");
+    assert!(
+        dir.join(".getdev-baseline").exists(),
+        "--update-baseline must write the .getdev-baseline file"
+    );
+
+    // 3) `--baseline` over the SAME unchanged project: zero review/* findings.
+    let (after, _stderr, code) = run_check_json(&dir, &cache_dir, &["--baseline"]);
+    assert_eq!(code, 0, "--baseline must exit 0");
+    let baselined_review_count = count_review_findings(&after);
+    assert_eq!(
+        baselined_review_count, 0,
+        "check --baseline over unchanged content must suppress every review/* finding to zero, got {baselined_review_count}:\n{after}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// SC-4 at the CLI level: a reformat (blank lines inserted ABOVE a baselined
+/// finding, shifting its line number without changing its content) keeps the
+/// finding suppressed — the baseline FILTER reads the stored, line-independent
+/// `gdv1:` token, never the line number. Composes the CLI surface (this test)
+/// with the already-proven core property (`baseline.rs`'s
+/// `occurrence_index_shift_is_documented_not_a_baseline_bug` /
+/// `fingerprint.rs`'s temp-dir-invariance anchor).
+#[test]
+fn reformat_above_a_baselined_finding_stays_suppressed() {
+    let dir = tmp_dir("reformat-stays-suppressed");
+    let cache_dir = dir.join("cache");
+
+    // One detectable finding: a hardcoded live secret, line 1.
+    std::fs::write(
+        dir.join("app.js"),
+        "const stripeKey = \"sk_live_ABCDEFGHIJKLMNOP01\";\n",
+    )
+    .unwrap();
+
+    // `--update-baseline` writes the baseline over the original layout.
+    let (baseline_run, _stderr, code) = run_check_json(&dir, &cache_dir, &["--update-baseline"]);
+    assert_eq!(code, 0, "--update-baseline must exit 0");
+    assert!(
+        baseline_run.contains("env/hardcoded-secret"),
+        "the finding must be reported on the run that writes the baseline, got:\n{baseline_run}"
+    );
+
+    // Reformat: insert blank lines ABOVE the finding, shifting its line number
+    // (1 -> 6) without changing the matched content.
+    std::fs::write(
+        dir.join("app.js"),
+        "\n\n\n\n\nconst stripeKey = \"sk_live_ABCDEFGHIJKLMNOP01\";\n",
+    )
+    .unwrap();
+
+    // `--baseline` over the reformatted file: still suppressed.
+    let (after, _stderr, code) = run_check_json(&dir, &cache_dir, &["--baseline"]);
+    assert_eq!(code, 0, "--baseline must exit 0");
+    assert!(
+        !after.contains("env/hardcoded-secret"),
+        "a reformat above a baselined finding must keep it suppressed (fingerprint-keyed, not line-keyed), got:\n{after}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
