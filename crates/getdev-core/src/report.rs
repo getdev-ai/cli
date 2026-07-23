@@ -78,7 +78,7 @@ pub fn render_ship_score_weights() -> String {
 /// Human terminal output: findings grouped by FILE (worst file first, per-file
 /// severity tally in the header), each row as position · severity · message ·
 /// rule-id with the most actionable next step on a `→` continuation line.
-pub fn render_terminal(report: &FindingsReport, color: ColorMode) -> String {
+pub fn render_terminal(report: &FindingsReport, color: ColorMode, verbose: bool) -> String {
     let mut out = String::new();
 
     // `check` is the only command that sets `score` (docs/SPEC-COMMANDS.md):
@@ -94,6 +94,37 @@ pub fn render_terminal(report: &FindingsReport, color: ColorMode) -> String {
         // zeros) for `check`; only the non-check path prints the plain line.
         if report.score.is_none() {
             let _ = writeln!(out, "no findings — clean");
+        }
+        return out;
+    }
+
+    // Summary-by-default (B-06, docs/SPEC-COMMANDS.md): a report longer than the
+    // threshold would flood the terminal, so the DEFAULT human render collapses
+    // to the summary (banner / tally) + the top-3 worst findings + one reminder
+    // line — the full per-file list is shown only for short reports or with
+    // `-v`. Deterministic (a count, not a tty probe): identical piped or
+    // interactive, so CI logs / grep / corpus snapshots are unaffected. Machine
+    // paths (`--json`, `-o`) never reach here and always carry the full report.
+    if !verbose && report.findings.len() > SUMMARY_ONLY_THRESHOLD {
+        // The worst 3, for every command (not just `check`) — the banner above
+        // already covers the score path; render the tally for the rest.
+        render_top_three(&mut out, &report.findings);
+        if report.score.is_none() {
+            render_summary_tally(&mut out, &report.summary);
+        }
+        let _ = writeln!(
+            out,
+            "\n{} findings — showing the top 3. Full list: re-run with -v · full report: -o report.json or --json",
+            report.findings.len()
+        );
+        if report.score.is_some() {
+            let fixable = report.summary.fixable;
+            if fixable > 0 {
+                let _ = writeln!(
+                    out,
+                    "{fixable} finding(s) fixable — run: getdev env --write"
+                );
+            }
         }
         return out;
     }
@@ -128,7 +159,7 @@ pub fn render_terminal(report: &FindingsReport, color: ColorMode) -> String {
     // A very long terminal report is better read from a file — point at `-o`
     // once the list stops being scannable (threshold, not truncation: CI logs
     // and grep keep the complete output either way).
-    if report.findings.len() > LONG_REPORT_HINT_THRESHOLD {
+    if report.findings.len() > SUMMARY_ONLY_THRESHOLD {
         let _ = writeln!(
             out,
             "\ntip: {} findings — write the full JSON report to a file with: -o report.json",
@@ -146,35 +177,22 @@ pub fn render_terminal(report: &FindingsReport, color: ColorMode) -> String {
             );
         }
     } else {
-        let s = &report.summary;
-        let _ = writeln!(
-            out,
-            "{} finding(s): {} critical · {} high · {} medium · {} low · {} info ({} fixable)",
-            s.total(),
-            s.critical,
-            s.high,
-            s.medium,
-            s.low,
-            s.info,
-            s.fixable
-        );
+        render_summary_tally(&mut out, &report.summary);
     }
     out
 }
 
-/// Findings count past which the full terminal render appends the `-o` tip.
-const LONG_REPORT_HINT_THRESHOLD: usize = 25;
+/// Findings count past which the human terminal render collapses to
+/// summary-by-default (B-06): banner/tally + top-3 + a reminder line, with the
+/// full per-file list shown only for short reports or under `-v`. The same
+/// threshold gates the non-collapsed `-o` tip. Single source — no duplicate
+/// magic number.
+pub const SUMMARY_ONLY_THRESHOLD: usize = 25;
 
-/// Short terminal companion for `-o/--output` runs: the score banner and
-/// top-3 when present (`check`), the one-line tally always — the full
-/// findings list lives in the report file, so the terminal stays scannable.
-pub fn render_terminal_short(report: &FindingsReport) -> String {
-    let mut out = String::new();
-    if let Some(score) = report.score {
-        render_score_banner(&mut out, &report.summary, score);
-        render_top_three(&mut out, &report.findings);
-    }
-    let s = &report.summary;
+/// The one-line severity tally (`N finding(s): … (K fixable)`) that closes a
+/// score-less report and stands in for the banner in a collapsed non-`check`
+/// render — single-sourced so the two callers never drift.
+fn render_summary_tally(out: &mut String, s: &Summary) {
     let _ = writeln!(
         out,
         "{} finding(s): {} critical · {} high · {} medium · {} low · {} info ({} fixable)",
@@ -186,6 +204,18 @@ pub fn render_terminal_short(report: &FindingsReport) -> String {
         s.info,
         s.fixable
     );
+}
+
+/// Short terminal companion for `-o/--output` runs: the score banner and
+/// top-3 when present (`check`), the one-line tally always — the full
+/// findings list lives in the report file, so the terminal stays scannable.
+pub fn render_terminal_short(report: &FindingsReport) -> String {
+    let mut out = String::new();
+    if let Some(score) = report.score {
+        render_score_banner(&mut out, &report.summary, score);
+        render_top_three(&mut out, &report.findings);
+    }
+    render_summary_tally(&mut out, &report.summary);
     out
 }
 
@@ -479,6 +509,7 @@ mod tests {
                 finding(Severity::Critical, Confidence::High),
             ]),
             ColorMode::Off,
+            false,
         );
         let critical_pos = out.find("✖ critical").unwrap();
         let low_pos = out.find("○ low").unwrap();
@@ -500,6 +531,7 @@ mod tests {
         let out = render_terminal(
             &report(vec![finding(Severity::High, Confidence::Low)]),
             ColorMode::Off,
+            false,
         );
         assert!(out.contains("(confidence: low)"));
     }
@@ -537,6 +569,7 @@ mod tests {
                 finding(Severity::Low, Confidence::High),
             ]),
             ColorMode::On,
+            false,
         );
         // color must actually have been applied
         assert!(
@@ -569,7 +602,7 @@ mod tests {
 
     #[test]
     fn clean_report_says_clean() {
-        let out = render_terminal(&report(vec![]), ColorMode::Off);
+        let out = render_terminal(&report(vec![]), ColorMode::Off, false);
         assert!(out.contains("no findings"));
         let empty = Summary::default();
         assert_eq!(empty.total(), 0);
@@ -643,7 +676,7 @@ mod tests {
             finding(Severity::Low, Confidence::High),
         ]);
         rep.score = Some(ship_score(&rep.summary));
-        let out = render_terminal(&rep, ColorMode::Off);
+        let out = render_terminal(&rep, ColorMode::Off, false);
         assert!(out.contains("┌─ getdev check "));
         assert!(out.contains("Ship Score: "));
         assert!(out.contains("1 critical · 0 high · 0 medium · 1 low"));
@@ -660,7 +693,7 @@ mod tests {
     fn score_present_clean_shows_full_banner() {
         let mut rep = report(vec![]);
         rep.score = Some(ship_score(&rep.summary));
-        let out = render_terminal(&rep, ColorMode::Off);
+        let out = render_terminal(&rep, ColorMode::Off, false);
         assert!(out.contains("Ship Score: 100/100"));
         assert!(out.contains("0 critical · 0 high · 0 medium · 0 low"));
         assert!(!out.contains("no findings"));
@@ -704,5 +737,67 @@ mod tests {
         let colored = render_no_config_hint(ColorMode::On);
         assert!(colored.contains('\u{1b}'), "colored mode wraps ANSI");
         assert!(colored.contains("run `getdev init` to customize"));
+    }
+
+    /// A report whose length exceeds [`SUMMARY_ONLY_THRESHOLD`], for the
+    /// summary-by-default (B-06) tests. All findings share the same file, so the
+    /// per-file group header only appears in the FULL render — a clean signal
+    /// that the collapsed render omitted the per-file list.
+    fn long_report() -> FindingsReport {
+        let findings = (0..SUMMARY_ONLY_THRESHOLD + 5)
+            .map(|_| finding(Severity::Medium, Confidence::High))
+            .collect::<Vec<_>>();
+        report(findings)
+    }
+
+    /// Collapsed (B-06): a report longer than the threshold with `verbose=false`
+    /// renders the top-3 + the reminder line + the tally, and NONE of the
+    /// beyond-top per-file rows (no group header, no glyph rows, no `-o` tip).
+    #[test]
+    fn long_report_collapses_to_summary_by_default() {
+        let rep = long_report();
+        let total = rep.findings.len();
+        let out = render_terminal(&rep, ColorMode::Off, false);
+        // top-3 + reminder + tally are present
+        assert!(out.contains("top 3 things to fix first:"));
+        assert!(out.contains(&format!(
+            "{total} findings — showing the top 3. Full list: re-run with -v · full report: -o report.json or --json"
+        )));
+        assert!(out.contains(&format!("{total} finding(s):")));
+        // the full per-file list is NOT rendered: no group header, no severity
+        // glyph rows, no `-o` tip (the reminder line supersedes it)
+        assert!(!out.contains("requirements.txt —"));
+        assert!(!out.contains("● medium"));
+        assert!(!out.contains("write the full JSON report"));
+    }
+
+    /// Verbose (B-06): the SAME long report with `verbose=true` renders the full
+    /// per-file list (group header + every row) and NO collapse reminder.
+    #[test]
+    fn long_report_verbose_renders_full_list() {
+        let rep = long_report();
+        let out = render_terminal(&rep, ColorMode::Off, true);
+        // full list: the per-file group header and the glyph rows are present
+        assert!(out.contains("requirements.txt —"));
+        assert!(out.contains("● medium"));
+        // no collapse — the reminder line is absent
+        assert!(!out.contains("showing the top 3"));
+        // the >threshold `-o` tip still trails the full verbose render
+        assert!(out.contains("write the full JSON report"));
+    }
+
+    /// Short (B-06): a report UNDER the threshold with `verbose=false` renders
+    /// the full per-file list unchanged — no collapse, no reminder line. This is
+    /// what keeps golden examples and the corpus snapshot (< threshold) stable.
+    #[test]
+    fn short_report_renders_full_list_without_collapse() {
+        let rep = report(vec![
+            finding(Severity::Critical, Confidence::High),
+            finding(Severity::Low, Confidence::High),
+        ]);
+        let out = render_terminal(&rep, ColorMode::Off, false);
+        assert!(out.contains("requirements.txt —"));
+        assert!(out.contains("✖ critical"));
+        assert!(!out.contains("showing the top 3"));
     }
 }

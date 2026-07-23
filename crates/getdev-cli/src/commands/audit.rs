@@ -142,7 +142,10 @@ pub fn run(args: &AuditArgs) -> anyhow::Result<u8> {
         print!("{}", report::render_json(&report)?);
     } else {
         let color = ColorMode::resolve(args.no_color, std::io::stdout().is_terminal());
-        print!("{}", report::render_terminal(&report, color));
+        print!(
+            "{}",
+            report::render_terminal(&report, color, args.verbose > 0)
+        );
         if !skipped.is_empty() {
             if args.verbose > 0 {
                 println!("{} unreadable file(s) skipped:", skipped.len());

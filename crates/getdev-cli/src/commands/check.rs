@@ -274,7 +274,10 @@ pub fn run(args: &CheckArgs) -> anyhow::Result<u8> {
         print!("{}", report::render_json(&report)?);
     } else {
         let color = ColorMode::resolve(args.no_color, std::io::stdout().is_terminal());
-        print!("{}", report::render_terminal(&report, color));
+        print!(
+            "{}",
+            report::render_terminal(&report, color, args.verbose > 0)
+        );
         // First-run clarity (docs/SPEC-COMMANDS.md `check`): when the project has
         // no `.getdev.toml`, tell the user check ran on built-in defaults and how
         // to customize. Human render only — suppressed under `--quiet`, a non-tty

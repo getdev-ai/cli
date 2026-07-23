@@ -183,7 +183,10 @@ pub fn run(args: &EnvArgs) -> anyhow::Result<u8> {
         print!("{}", report::render_json(&report)?);
     } else {
         let color = ColorMode::resolve(args.no_color, std::io::stdout().is_terminal());
-        print!("{}", report::render_terminal(&report, color));
+        print!(
+            "{}",
+            report::render_terminal(&report, color, args.verbose > 0)
+        );
         if !args.quiet {
             match applied_result.as_ref() {
                 Some(Ok(summary)) => {
