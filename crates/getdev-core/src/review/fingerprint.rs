@@ -312,7 +312,20 @@ fn duplicate_finding(anchor: &FnRecord, other: &FnRecord, similarity: f64) -> Fi
         ),
         fixable: false,
         refs: vec!["https://getdev.ai/rules/review/duplicate-helper".to_owned()],
-        seed: crate::fingerprint::FingerprintSeed::default(),
+        // D-01 (Shape 6, content-sketch seed — Assumption A2): a duplicate helper
+        // has no single anchor text worth re-threading, so seed on the anchor's
+        // already-computed MinHash sketch (reuse existing normalization, do not
+        // build a second one). `anchor.minhash` is sorted ascending by
+        // `minhash_sketch`, so the join is deterministic (T-11-04b).
+        seed: crate::fingerprint::FingerprintSeed {
+            node_kind: "function_shingle_set",
+            matched_text: anchor
+                .minhash
+                .iter()
+                .map(|h| format!("{h:x}"))
+                .collect::<Vec<_>>()
+                .join(","),
+        },
         fingerprint: None,
     }
 }

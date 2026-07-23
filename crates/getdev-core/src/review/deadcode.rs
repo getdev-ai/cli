@@ -107,7 +107,7 @@ pub(crate) fn detect(files: &[ReviewFile]) -> Vec<Finding> {
             if index.is_referenced(&decl.name) {
                 continue;
             }
-            findings.push(deadcode_finding(&file.rel, &decl));
+            findings.push(deadcode_finding(&file.rel, &decl, bytes));
         }
     }
 
@@ -320,7 +320,7 @@ fn path_is_exempt(globs: Option<&GlobSet>, rel: &str) -> bool {
 
 /// Build the `review/dead-code-introduced` finding with the mandatory caveat
 /// `detail` (SPEC-RULES heuristic-detail requirement — confidence != high).
-fn deadcode_finding(rel: &str, decl: &Declaration<'_>) -> Finding {
+fn deadcode_finding(rel: &str, decl: &Declaration<'_>, source: &[u8]) -> Finding {
     Finding {
         id: "review/dead-code-introduced".to_owned(),
         command: "review".to_owned(),
@@ -346,7 +346,14 @@ fn deadcode_finding(rel: &str, decl: &Declaration<'_>) -> Finding {
         ),
         fixable: false,
         refs: vec!["https://getdev.ai/rules/review/dead-code-introduced".to_owned()],
-        seed: crate::fingerprint::FingerprintSeed::default(),
+        // D-01 (Shape 1, real node): anchor on the declaration node's kind + its
+        // source text, read from the parse-once bytes already in scope at the
+        // call site (no re-parse — CLAUDE.md rule 5). `.unwrap_or_default()`
+        // keeps clippy clean and degrades a non-UTF-8 span to the empty seed.
+        seed: crate::fingerprint::FingerprintSeed {
+            node_kind: decl.node.kind(),
+            matched_text: decl.node.utf8_text(source).unwrap_or_default().to_owned(),
+        },
         fingerprint: None,
     }
 }
