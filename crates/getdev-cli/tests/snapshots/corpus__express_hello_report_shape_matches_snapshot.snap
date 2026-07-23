@@ -1,6 +1,5 @@
 ---
 source: crates/getdev-cli/tests/corpus.rs
-assertion_line: 363
 expression: report
 ---
 {
@@ -10,6 +9,7 @@ expression: report
       "confidence": "high",
       "detail": "declared in the manifest. No package with this name has ever been published on npm.",
       "file": "package.json",
+      "fingerprint": "gdv1:0902671192989f8f52b4d47760216ceb",
       "fixable": false,
       "id": "real/nonexistent-package",
       "message": "Package 'totally-fake-auth-helper-xyz' does not exist on npm",
@@ -25,6 +25,7 @@ expression: report
       "detail": "this import is neither a manifest-declared package, a language builtin, nor a local project module — a likely hallucinated or since-removed dependency",
       "end_line": 2,
       "file": "src/app.js",
+      "fingerprint": "gdv1:97a5065bda7ec27de8148141e9339c95",
       "fixable": false,
       "id": "real/phantom-import",
       "line": 2,
@@ -41,6 +42,7 @@ expression: report
       "detail": "no vendor family prefix (Anthropic/OpenAI/Google/Mistral/Meta/Cohere/xAI/DeepSeek) matched this literal — it may be a hallucinated, deprecated, or newly-released model id",
       "end_line": 5,
       "file": "src/app.js",
+      "fingerprint": "gdv1:5ddc70e7a00834946af75bef2b91cc32",
       "fixable": false,
       "id": "real/unknown-model-string",
       "line": 5,
