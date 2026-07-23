@@ -35,7 +35,9 @@ Cross-cutting contracts:
 
 **Flags:** global flags only (per-analyzer configuration comes from `.getdev.toml`). `--fix` maps to `env --write` in v0.1. `--min-score` and `--format` are **global** flags (not `check`-specific) — this preserves the "check takes global flags only" contract: `--min-score` is effective here because the Ship Score exists, and `--format` applies to every findings command.
 
-**Mutates:** no (except via `--fix` → env apply path). **Network:** registry (via `real`); cache-only with `--offline`.
+**Baseline suppression (v0.2, LOOP-03 — `check`-only flags):** three flags let an agent loop see only the findings **it** introduced, keyed on the `gdv1:` fingerprint (full contract in `docs/SPEC-CONFIG.md` → *Baseline suppression*). `--baseline` applies the committable `.getdev-baseline` file (persisted mode); `--update-baseline` (re)writes that file from the current run's surviving fingerprints; `--since <snap-id>` suppresses everything present at a snapshot (ephemeral mode — reconstructs the snapshot's findings by re-collecting against its `refs/getdev/` tree, offline). Baseline filtering composes **after** the `[[suppress]]`/`[ignore]` chain and the suppressed count is shown under `-v` (never silent) and in the `--json` envelope's `baseline` block. `--since` and `--baseline` are mutually exclusive, and `--update-baseline` may not combine with `--since` (usage error, exit `2`); `--baseline` against a missing file is a config error (exit `3`). These are the only `check`-specific flags — every other option remains global (the "check takes global flags only" contract holds for the pre-v0.2 surface).
+
+**Mutates:** no (except via `--fix` → env apply path, and `--update-baseline` which writes only the `.getdev-baseline` file — never project source). **Network:** registry (via `real`); cache-only with `--offline`.
 
 **Golden example (normative — v0.1.3 grouped renderer):**
 

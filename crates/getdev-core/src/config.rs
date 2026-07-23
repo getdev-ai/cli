@@ -123,6 +123,7 @@ pub struct Config {
     pub ship: ShipConfig,
     pub update: UpdateConfig,
     pub ignore: IgnoreConfig,
+    pub baseline: BaselineConfig,
     #[serde(rename = "suppress")]
     pub suppressions: Vec<Suppression>,
 }
@@ -305,6 +306,34 @@ pub struct Suppression {
     pub reason: String,
 }
 
+/// `[baseline]` (v0.2, LOOP-03) — baseline suppression policy. The persisted
+/// baseline is a committable `.getdev-baseline` file of `gdv1:` fingerprints
+/// that `check` subtracts from the current run; this section says WHERE it
+/// lives and whether it applies without an explicit `--baseline` flag. The
+/// modes themselves (`--baseline`/`--update-baseline`/`--since`) are
+/// `check` flags — see docs/SPEC-CONFIG.md → *Baseline suppression*.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct BaselineConfig {
+    /// The committable baseline path, resolved relative to the project root;
+    /// both `--baseline` and `--update-baseline` target this file.
+    pub file: String,
+    /// When `true` AND the file exists, `check` applies the baseline without
+    /// `--baseline` (the agent-loop convenience). `false` (default): the
+    /// baseline applies only when `--baseline` is passed. A `true` with no
+    /// file present is a silent no-op, never an error.
+    pub auto: bool,
+}
+
+impl Default for BaselineConfig {
+    fn default() -> Self {
+        Self {
+            file: ".getdev-baseline".into(),
+            auto: false,
+        }
+    }
+}
+
 /// Presence-tracking mirror of [`Config`] used only during [`Config::merge`]
 /// (B1 audit fix): every leaf is `Option<T>` so "this key was absent from
 /// the file" is distinguishable from "present and happens to equal the
@@ -327,6 +356,7 @@ struct RawConfig {
     ship: RawShipConfig,
     update: RawUpdateConfig,
     ignore: RawIgnoreConfig,
+    baseline: RawBaselineConfig,
     #[serde(rename = "suppress")]
     suppressions: Option<Vec<Suppression>>,
 }
@@ -398,6 +428,13 @@ struct RawUpdateConfig {
 struct RawIgnoreConfig {
     rules: Option<Vec<String>>,
     paths: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct RawBaselineConfig {
+    file: Option<String>,
+    auto: Option<bool>,
 }
 
 impl RawConfig {
@@ -585,6 +622,18 @@ impl Config {
                     project.ignore.paths,
                     global.ignore.paths,
                     default.ignore.paths,
+                ),
+            },
+            baseline: BaselineConfig {
+                file: resolve_field(
+                    project.baseline.file,
+                    global.baseline.file,
+                    default.baseline.file,
+                ),
+                auto: resolve_field(
+                    project.baseline.auto,
+                    global.baseline.auto,
+                    default.baseline.auto,
                 ),
             },
             suppressions: resolve_field(
@@ -786,6 +835,58 @@ reason = "test fixture key, not a real secret"
         let err =
             Config::parse("[check]\nfail_onn = \"high\"\n", Path::new(".getdev.toml")).unwrap_err();
         assert!(err.to_string().contains(".getdev.toml"));
+    }
+
+    #[test]
+    fn baseline_defaults_when_absent() {
+        // LOOP-03: no `[baseline]` section → committable default path, and
+        // `auto` off (the baseline applies only on explicit `--baseline`).
+        let config = Config::parse("", Path::new(".getdev.toml")).unwrap();
+        assert_eq!(config.baseline.file, ".getdev-baseline");
+        assert!(!config.baseline.auto);
+    }
+
+    #[test]
+    fn baseline_section_parses() {
+        let config = Config::parse(
+            "[baseline]\nfile = \".baseline/prod.gdv\"\nauto = true\n",
+            Path::new(".getdev.toml"),
+        )
+        .unwrap();
+        assert_eq!(config.baseline.file, ".baseline/prod.gdv");
+        assert!(config.baseline.auto);
+    }
+
+    #[test]
+    fn baseline_unknown_key_is_a_hard_error() {
+        // deny_unknown_fields must cover the new section too — a typo that
+        // silently disables the baseline is worse than a loud failure.
+        assert!(Config::parse(
+            "[baseline]\nfle = \".getdev-baseline\"\n", // typo: fle
+            Path::new(".getdev.toml")
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn baseline_project_file_overrides_global_auto_falls_through() {
+        // Presence-based precedence (B1): a project that sets only `file` must
+        // NOT wipe a global `auto = true` — absent project keys fall through.
+        let dir = tmp_dir("baseline-precedence");
+        std::fs::write(
+            dir.join(GLOBAL_CONFIG_FILE),
+            "[baseline]\nfile = \".global-baseline\"\nauto = true\n",
+        )
+        .unwrap();
+        let global = RawConfig::load_global_at(&dir).unwrap();
+        let project = RawConfig::parse(
+            "[baseline]\nfile = \".proj-baseline\"\n",
+            Path::new(".getdev.toml"),
+        )
+        .unwrap();
+        let merged = Config::merge(project, global);
+        assert_eq!(merged.baseline.file, ".proj-baseline"); // project wins
+        assert!(merged.baseline.auto); // global auto falls through
     }
 
     #[test]
