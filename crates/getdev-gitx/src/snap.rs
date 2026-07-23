@@ -71,6 +71,8 @@ pub enum GitxError {
     GitTooOld { found: String },
     #[error("no snapshot with id {id}")]
     NoSuchSnapshot { id: u32 },
+    #[error("materialize destination must be an absolute path, got: {dest}")]
+    RelativeDest { dest: String },
     #[error("git {op} failed (exit {code:?}): {stderr}")]
     Command {
         op: &'static str,
@@ -681,6 +683,16 @@ pub fn restore(root: &Path, id: u32) -> Result<RestoreOutcome, GitxError> {
 /// `GitxError` variant is needed: `NoSuchSnapshot`/`Command`/`Io` cover every
 /// failure mode.
 pub fn materialize(root: &Path, snap_id: u32, dest: &Path) -> Result<(), GitxError> {
+    // WR-01: `checkout-index --prefix` is NOT `-C`-aware — a RELATIVE prefix
+    // resolves against `root`, so a relative `dest` would unpack the snapshot
+    // INTO the live repo and clobber the working tree. Enforce the documented
+    // absolute-path invariant up front (this `pub fn` is earmarked for Phase 15
+    // `fix`/`guard` reuse — the guard must not depend on the caller being careful).
+    if !dest.is_absolute() {
+        return Err(GitxError::RelativeDest {
+            dest: dest.display().to_string(),
+        });
+    }
     // Resolve the target BEFORE touching `dest` — a bad id must be a clean
     // `NoSuchSnapshot`, never a partial materialize (mirrors restore, T-05-10).
     let (_, target_commit) = resolve_ref(root, snap_id)?;

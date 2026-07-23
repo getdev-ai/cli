@@ -49,9 +49,14 @@ use crate::commands::real;
 pub(crate) enum BaselineMode {
     /// No baseline suppression this run.
     None,
-    /// The persisted `.getdev-baseline` file. `update` = also rewrite it from
-    /// the current run's fingerprints (`--update-baseline`, D-09 auto-prune).
-    Persisted { update: bool },
+    /// The persisted `.getdev-baseline` file. `apply` = READ the file and
+    /// suppress this run's matching findings (`--baseline`, or `[baseline].auto`
+    /// with the file present). `update` = WRITE the file from the current run's
+    /// fingerprints (`--update-baseline`, D-09 auto-prune). The two are
+    /// INDEPENDENT (CR-01): `--update-baseline` alone writes without suppressing
+    /// the current report — suppression is exclusively `--baseline`'s job per
+    /// docs/SPEC-COMMANDS.md / SPEC-CONFIG.md.
+    Persisted { apply: bool, update: bool },
     /// Ephemeral snapshot baseline (`--since <snap-id>`) — reconstructed by
     /// materializing a `refs/getdev/` snap and recomputing its finding-set over
     /// the SAME `collect()` pipeline, forced offline (D-06).
@@ -128,14 +133,21 @@ pub(crate) fn resolve_baseline_mode(
             }
             .into());
         }
+        // `apply` is gated on `--baseline` ONLY — `--update-baseline` alone
+        // writes without suppressing this run (CR-01). `--baseline
+        // --update-baseline` = apply the OLD baseline, then refresh.
         return Ok(BaselineMode::Persisted {
+            apply: baseline,
             update: update_baseline,
         });
     }
     // No flags: `[baseline].auto` applies the baseline iff the file exists;
     // `auto` + no file is a silent no-op, never an error (SPEC-CONFIG).
     if cfg.baseline.auto && baseline_path.exists() {
-        return Ok(BaselineMode::Persisted { update: false });
+        return Ok(BaselineMode::Persisted {
+            apply: true,
+            update: false,
+        });
     }
     Ok(BaselineMode::None)
 }
@@ -338,16 +350,8 @@ pub(crate) fn collect(
     // recomputes a hash (SC-4). ---
     let (findings, baseline_result) = match baseline_mode {
         BaselineMode::None => (findings, None),
-        BaselineMode::Persisted { update } => {
+        BaselineMode::Persisted { apply, update } => {
             let baseline_path = path.join(&cfg.baseline.file);
-            // Absent file → empty set (a silent no-op under `auto`, or the
-            // fresh-create case under `--update-baseline` alone; explicit
-            // `--baseline` against a missing file was already rejected as
-            // `BaselineMissing` at the CLI boundary).
-            let baseline_set = match baseline::read_baseline_capped(&baseline_path)? {
-                Some(text) => baseline::parse_baseline(&text, &baseline_path)?,
-                None => BTreeSet::new(),
-            };
             // Capture the fingerprints of every finding PRESENT this run (the
             // set entering the baseline stage) BEFORE filtering — this is what
             // `--update-baseline` writes, so a later `--baseline` run suppresses
@@ -360,14 +364,35 @@ pub(crate) fn collect(
             } else {
                 BTreeSet::new()
             };
-            let outcome = baseline::filter_by_baseline(findings, &baseline_set);
+            // CR-01: suppression is applied ONLY when `--baseline` (or `auto`)
+            // asked for it — `--update-baseline` alone WRITES the file without
+            // touching this run's report/score/exit. Read the OLD baseline set
+            // here, BEFORE the refresh write below, so `--baseline
+            // --update-baseline` applies the pre-existing baseline and only then
+            // refreshes to the current set.
+            let result = if *apply {
+                // Absent file → empty set (silent no-op under `auto`; explicit
+                // `--baseline` against a missing file was already rejected as
+                // `BaselineMissing` at the CLI boundary).
+                let baseline_set = match baseline::read_baseline_capped(&baseline_path)? {
+                    Some(text) => baseline::parse_baseline(&text, &baseline_path)?,
+                    None => BTreeSet::new(),
+                };
+                let mut outcome = baseline::filter_by_baseline(findings, &baseline_set);
+                let kept = std::mem::take(&mut outcome.kept); // avoid cloning kept
+                (kept, Some(outcome))
+            } else {
+                // `--update-baseline` alone: write-only, this run is NOT suppressed.
+                (findings, None)
+            };
+            // Refresh the file AFTER reading the old set (D-09 auto-prune).
             if *update {
                 let serialized = baseline::serialize_baseline(&present, env!("CARGO_PKG_VERSION"));
                 std::fs::write(&baseline_path, serialized).with_context(|| {
                     format!("failed to write baseline file {}", baseline_path.display())
                 })?;
             }
-            (outcome.kept.clone(), Some(outcome))
+            result
         }
         BaselineMode::Since { snap_id } => {
             // Ephemeral snap-anchored baseline (D-06): materialize the snapshot's
@@ -393,8 +418,9 @@ pub(crate) fn collect(
                 .iter()
                 .filter_map(|f| f.fingerprint.clone())
                 .collect();
-            let outcome = baseline::filter_by_baseline(findings, &baseline_set);
-            (outcome.kept.clone(), Some(outcome))
+            let mut outcome = baseline::filter_by_baseline(findings, &baseline_set);
+            let kept = std::mem::take(&mut outcome.kept); // avoid cloning kept
+            (kept, Some(outcome))
         }
     };
 

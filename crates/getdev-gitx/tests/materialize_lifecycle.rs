@@ -167,6 +167,28 @@ fn materialize_bad_snap_id_is_no_such_snapshot_and_writes_nothing() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// WR-01: `checkout-index --prefix` is not `-C`-aware, so a RELATIVE dest would
+/// resolve against the repo root and clobber the live working tree. `materialize`
+/// must refuse a non-absolute dest up front (before any git write) — the
+/// documented safety invariant is enforced, not merely assumed by the caller.
+#[test]
+fn materialize_refuses_a_relative_dest() {
+    let dir = mixed_repo("relative-dest");
+    let snap = snapshot(&dir, Namespace::Snaps, "base", false, 20).unwrap();
+
+    let err = materialize(&dir, snap.id, Path::new("relative/dest")).unwrap_err();
+    assert!(
+        matches!(err, GitxError::RelativeDest { .. }),
+        "a relative dest must be refused as RelativeDest, got {err:?}"
+    );
+    assert!(
+        !dir.join("relative").exists(),
+        "a refused relative dest must never have been written under the repo root"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// An empty-tree snapshot (a snapshot of an empty project) materializes without
 /// error — `read-tree <empty>` + `checkout-index -a -f --prefix` exits 0 and
 /// writes zero files. git creates NO directory when the index is empty, so the

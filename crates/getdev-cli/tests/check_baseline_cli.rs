@@ -183,6 +183,68 @@ fn persisted_baseline_round_trip_suppresses_a_previously_seen_finding() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// CR-01 regression: `--update-baseline` alone must NEVER apply suppression to
+/// the current run — even when a `.getdev-baseline` file ALREADY exists with the
+/// finding's fingerprint. Suppression is exclusively `--baseline`'s job
+/// (docs/SPEC-COMMANDS.md / SPEC-CONFIG.md). Before the fix, a second
+/// `--update-baseline` run silently suppressed everything the first run recorded
+/// — masking real findings from the report, the Ship Score, AND the `--fail-on`
+/// gate (a critical secret went from exit 1 to exit 0).
+#[test]
+fn update_baseline_alone_never_suppresses_even_with_a_preexisting_file() {
+    let dir = tmp_dir("update-no-suppress");
+    let cache_dir = dir.join("cache");
+    std::fs::write(
+        dir.join("app.js"),
+        "const stripeKey = \"sk_live_ABCDEFGHIJKLMNOP01\";\n",
+    )
+    .unwrap();
+
+    // 1) First `--update-baseline`: writes the file, the finding still shows.
+    let (first, _c1) = run_check_agent(&dir, &cache_dir, &["--update-baseline"]);
+    assert!(
+        first.contains("env/hardcoded-secret"),
+        "1st --update-baseline must report the finding, got:\n{first}"
+    );
+    let baseline_path = dir.join(".getdev-baseline");
+    assert!(
+        std::fs::read_to_string(&baseline_path)
+            .unwrap()
+            .contains("gdv1:"),
+        "the first --update-baseline must have recorded the fingerprint"
+    );
+
+    // 2) SECOND `--update-baseline`, file now present WITH the fingerprint: the
+    //    finding MUST STILL show (write-only, never suppresses) — this is the
+    //    exact case the CR-01 bug silently suppressed.
+    let (second, _c2) = run_check_agent(&dir, &cache_dir, &["--update-baseline"]);
+    assert!(
+        second.contains("env/hardcoded-secret"),
+        "CR-01: --update-baseline alone must NOT suppress a pre-recorded finding, got:\n{second}"
+    );
+
+    // 3) The `--fail-on critical` gate must still TRIP under `--update-baseline`
+    //    (the critical secret is real and unsuppressed) — never silently pass.
+    let (_o, _e, gate_code) = run_check_json(
+        &dir,
+        &cache_dir,
+        &["--update-baseline", "--fail-on", "critical"],
+    );
+    assert_eq!(
+        gate_code, 1,
+        "CR-01: --update-baseline must not mask a critical finding from --fail-on (want exit 1)"
+    );
+
+    // 4) Contrast — `--baseline` DOES suppress it (the file holds the fingerprint).
+    let (baselined, _c) = run_check_agent(&dir, &cache_dir, &["--baseline"]);
+    assert!(
+        !baselined.contains("env/hardcoded-secret"),
+        "--baseline (the suppression flag) must still suppress, got:\n{baselined}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// SC-1 ephemeral round-trip: snap a project, introduce a NEW finding, then
 /// `check --since <snap-id>` surfaces ONLY the new finding — the pre-existing
 /// one (present in the materialized snapshot) is suppressed. Also asserts the
