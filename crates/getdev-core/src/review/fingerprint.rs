@@ -27,19 +27,39 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use getdev_grammars::tree_sitter::{Node, Query};
+use globset::{Glob, GlobSet, GlobSetBuilder};
 use sha2::{Digest, Sha256};
 
 use super::{is_introduced_declaration, ReviewFile};
 use crate::findings::{Confidence, Finding, Severity};
 use crate::scan::Lang;
 
+/// Test/scaffolding path conventions exempt from `duplicate-helper` (PREC-05/
+/// D-16) — mirrors the test-file subset of `deadcode`/`orphan`'s
+/// `EXEMPT_PATH_GLOBS`. The Seava 1,523-FP storm was concentrated in E2E/UAT
+/// test scaffolding, where repetitive setup helpers are idiomatic, not a
+/// maintainability smell. `fingerprint.rs` previously lacked this guard its
+/// sibling detectors already had.
+const EXEMPT_PATH_GLOBS: &[&str] = &[
+    "**/*.test.*",
+    "*.test.*",
+    "**/*.spec.*",
+    "*.spec.*",
+    "**/tests/**",
+    "**/test_*.py",
+    "**/*_test.py",
+];
+
 /// Exact-Jaccard fire threshold (A2, LOCKED). A near-duplicate is a
 /// maintainability nudge, never a bug — hence `low`/`medium` below.
 const JACCARD_THRESHOLD: f64 = 0.85;
-/// Minimum normalized-token length before a function is even a candidate
-/// (A5, LOCKED) — below this, getters / one-liners produce meaningless
-/// "duplicates".
-const MIN_NORMALIZED_TOKENS: usize = 20;
+/// Minimum normalized-token length before a function is even a candidate.
+/// Raised 20 -> 25 (PREC-05/D-16): the tightened non-test fire gate, so
+/// small/idiomatic near-duplicate scaffolding helpers in non-test files do not
+/// mass-fire. Genuine near-duplicate helpers of real substance (a loop over a
+/// collection, a parse-and-validate block) comfortably clear 25 normalized
+/// tokens; below that, the "duplicate" is boilerplate noise.
+const MIN_NORMALIZED_TOKENS: usize = 25;
 /// Shingle (k-gram) width over the normalized token sequence.
 const SHINGLE_K: usize = 5;
 /// How many of the smallest shingle values form the MinHash-LSH sketch used
@@ -128,11 +148,19 @@ pub(crate) fn detect(files: &[ReviewFile]) -> Vec<Finding> {
 /// deterministic (file order, then source order) sequence.
 fn fingerprint_functions(files: &[ReviewFile]) -> Vec<FnRecord> {
     let mut records = Vec::new();
+    // PREC-05/D-16: skip test/scaffolding files before extracting any candidate
+    // functions — a cheap glob match before the (more expensive) fingerprinting,
+    // keeping the `< 2 s` perf budget. Test scaffolding never contributes to
+    // duplicate-helper.
+    let exemptions = compile_exemptions();
     // Compile the function query once per language, not once per file — on a
     // 500-file tree the per-file recompile was a needless O(files) query-build
     // cost inside the `< 2 s` perf budget (docs/PLAN.md §3.5).
     let mut query_cache: Vec<(Lang, Query)> = Vec::new();
     for file in files {
+        if path_is_exempt(exemptions.as_ref(), &file.rel) {
+            continue;
+        }
         if !query_cache.iter().any(|(l, _)| *l == file.lang) {
             let Ok(q) = Query::new(&file.lang.language(), function_query(file.lang)) else {
                 continue;
@@ -184,6 +212,22 @@ fn fingerprint_functions(files: &[ReviewFile]) -> Vec<FnRecord> {
         }
     }
     records
+}
+
+/// Compile the [`EXEMPT_PATH_GLOBS`] set once, mirroring `orphan`/`deadcode`'s
+/// exemption compilation. A malformed pattern is skipped, never fatal.
+fn compile_exemptions() -> Option<GlobSet> {
+    let mut builder = GlobSetBuilder::new();
+    for pattern in EXEMPT_PATH_GLOBS {
+        if let Ok(glob) = Glob::new(pattern) {
+            builder.add(glob);
+        }
+    }
+    builder.build().ok()
+}
+
+fn path_is_exempt(globs: Option<&GlobSet>, rel: &str) -> bool {
+    globs.is_some_and(|set| set.is_match(rel))
 }
 
 /// The function-like node kinds review fingerprints — the exact set
@@ -457,6 +501,145 @@ function parseConfig(raw) {
         assert!(
             detect(&[a, b]).is_empty(),
             "a duplicate where neither side is introduced must produce zero findings"
+        );
+    }
+
+    // A ~21-normalized-token helper — above the OLD 20 floor, BELOW the new 25
+    // fire gate. Two copies stay quiet (the tightened non-test gate, D-16).
+    const SMALL_HELPER_A: &str = "\
+function scaleA(a, b) {
+  const x = a * b;
+  return x + 1;
+}
+";
+    const SMALL_HELPER_B: &str = "\
+function scaleB(m, n) {
+  const y = m * n;
+  return y + 1;
+}
+";
+
+    /// PREC-05/D-16: two near-identical helper functions in a `*.spec.ts` /
+    /// `*.uat.spec.ts` / `tests/` file produce ZERO duplicate-helper findings —
+    /// test scaffolding is exempt (the Seava 1,523-FP storm).
+    #[test]
+    fn test_file_duplicates_exempt() {
+        for rel in [
+            "smoke.spec.ts",
+            "e2e/checkout.uat.spec.ts",
+            "tests/helpers.ts",
+        ] {
+            let introduced = review_file(rel, Lang::TypeScript, INTRODUCED_FN, vec![(1, 8)], true);
+            let existing = review_file(
+                "tests/existing.spec.ts",
+                Lang::TypeScript,
+                EXISTING_FN,
+                vec![],
+                false,
+            );
+            assert!(
+                detect(&[introduced, existing]).is_empty(),
+                "duplicates in test-scaffolding file {rel} must be exempt (D-16)"
+            );
+        }
+    }
+
+    /// PREC-05/D-16 recall guard: a genuine introduced near-duplicate in
+    /// ORDINARY `src/*.ts` files still fires — the exemption is scoped to test
+    /// paths only.
+    #[test]
+    fn genuine_introduced_duplicate_still_fires() {
+        let introduced = review_file(
+            "src/new.ts",
+            Lang::TypeScript,
+            INTRODUCED_FN,
+            vec![(1, 8)],
+            true,
+        );
+        let existing = review_file("src/old.ts", Lang::TypeScript, EXISTING_FN, vec![], false);
+        let findings = detect(&[introduced, existing]);
+        assert_eq!(
+            findings.len(),
+            1,
+            "a genuine introduced duplicate in non-test files must still fire"
+        );
+        assert_eq!(findings[0].id, "review/duplicate-helper");
+    }
+
+    /// PREC-05/D-16: near-similar but small/idiomatic helpers (below the raised
+    /// 25-token fire gate) in NON-test files do not mass-fire.
+    #[test]
+    fn below_threshold_scaffolding_quiet() {
+        let a = review_file(
+            "src/a.js",
+            Lang::JavaScript,
+            SMALL_HELPER_A,
+            vec![(1, 4)],
+            true,
+        );
+        let b = review_file(
+            "src/b.js",
+            Lang::JavaScript,
+            SMALL_HELPER_B,
+            vec![(1, 4)],
+            true,
+        );
+        assert!(
+            detect(&[a, b]).is_empty(),
+            "near-similar helpers below the 25-token fire gate must stay quiet (D-16)"
+        );
+    }
+
+    const PY_INTRODUCED_FN: &str = "\
+def compute_total(items):
+    total = 0
+    for i in range(len(items)):
+        total += items[i].price * items[i].quantity
+    return total
+";
+    const PY_EXISTING_FN: &str = "\
+def sum_orders(orders):
+    running = 0
+    for j in range(len(orders)):
+        running += orders[j].price * orders[j].quantity
+    return running
+";
+
+    /// PREC-05/D-16 positive (3rd for the ≥3+3 contract): a genuine introduced
+    /// Python near-duplicate in non-test files still fires.
+    #[test]
+    fn genuine_introduced_python_duplicate_fires() {
+        let introduced = review_file(
+            "src/totals.py",
+            Lang::Python,
+            PY_INTRODUCED_FN,
+            vec![(1, 6)],
+            true,
+        );
+        let existing = review_file("src/orders.py", Lang::Python, PY_EXISTING_FN, vec![], false);
+        let findings = detect(&[introduced, existing]);
+        assert_eq!(
+            findings.len(),
+            1,
+            "a genuine introduced Python duplicate must fire"
+        );
+        assert_eq!(findings[0].id, "review/duplicate-helper");
+    }
+
+    /// PREC-05/D-16 — a single, non-duplicated helper in a non-test file is
+    /// quiet (a third negative case for the ≥3+3 fixture contract).
+    #[test]
+    fn single_non_duplicated_helper_is_quiet() {
+        let only = review_file(
+            "src/solo.js",
+            Lang::JavaScript,
+            INTRODUCED_FN,
+            vec![(1, 8)],
+            true,
+        );
+        assert!(
+            detect(&[only]).is_empty(),
+            "a lone helper with no duplicate partner must not fire"
         );
     }
 }
