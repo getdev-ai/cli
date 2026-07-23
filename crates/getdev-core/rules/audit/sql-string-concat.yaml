@@ -1,5 +1,5 @@
 id: audit/sql-string-concat
-severity: high
+severity: medium
 confidence: high
 languages: [javascript, typescript, tsx, python]
 description: >
@@ -7,7 +7,11 @@ description: >
   literal interpolation directly inside a database execute/executemany/query
   call, instead of a parameterized query — the classic SQL injection shape
   AI assistants routinely emit when asked to "query the database".
-message: "SQL query built by string concatenation/interpolation (SQL injection risk)"
+  Reframed to medium/proportionate wording (PREC-05/D-15): getdev is
+  deterministic and does no dataflow/taint analysis, so it observes only the
+  interpolation SHAPE, not proven attacker control. A parameterized ORM tagged
+  template (Drizzle's sql``) is safe and does not fire.
+message: "string-interpolated SQL — review for injection"
 remediation: >
   Use parameterized queries (placeholders plus a separate params argument,
   e.g. cursor.execute(sql, params) or db.query("... WHERE id = ?", [id]))
@@ -97,3 +101,8 @@ fixtures:
     - negative/sql_concat_neg_orm_js.js
     - negative/sql_concat_neg_constant_py.py
     - negative/sql_concat_neg_unrelated_concat_js.js
+    # PREC-05 (13-05): parameterized ORM (Drizzle `sql`) tagged-template
+    # arguments are safe and must not fire.
+    - negative/sql_concat_neg_drizzle_sql_tag_ts.ts
+    - negative/sql_concat_neg_drizzle_sql_tag_js.js
+    - negative/sql_concat_neg_orm_tag_ts.ts

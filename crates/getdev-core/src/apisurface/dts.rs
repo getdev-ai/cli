@@ -73,11 +73,11 @@ pub fn enumerate_js(pkg_dir: &Path) -> Result<ApiSurface, SurfaceError> {
     if !pkg_dir.is_dir() {
         return Ok(not_installed());
     }
-    let Some(entry) = locate_types_entry(pkg_dir) else {
+    let Some((entry, trusted)) = locate_types_entry(pkg_dir) else {
         return Ok(unreadable());
     };
 
-    surface_from_entry(&entry, read_package_name(pkg_dir).as_deref())
+    surface_from_entry(&entry, read_package_name(pkg_dir).as_deref(), trusted)
 }
 
 /// Enumerate the surface of one JS subpath import (`react-dom/server`,
@@ -96,7 +96,11 @@ pub fn enumerate_js_subpath(pkg_dir: &Path, subpath: &str) -> Result<ApiSurface,
             tier: SurfaceTier::Dynamic,
         });
     };
-    surface_from_entry(&entry, read_package_name(pkg_dir).as_deref())
+    // A subpath entry is only ever located from a trusted source (the exports
+    // map's `types` field, or a literal `<subpath>.d.ts`/`<subpath>/index.d.ts`)
+    // — there is no alphabetical-first guess on the subpath path — so it is a
+    // trusted surface.
+    surface_from_entry(&entry, read_package_name(pkg_dir).as_deref(), true)
 }
 
 /// The package's own declared module name (`package.json` `"name"`), used to
@@ -118,7 +122,11 @@ fn read_package_name(pkg_dir: &Path) -> Option<String> {
 /// (Pitfall 6). Named re-exports (`export { a, b } from './y'`) need no
 /// cross-file work at all — the names are already in the export_clause
 /// itself.
-fn surface_from_entry(entry: &Path, own_module: Option<&str>) -> Result<ApiSurface, SurfaceError> {
+fn surface_from_entry(
+    entry: &Path,
+    own_module: Option<&str>,
+    trusted: bool,
+) -> Result<ApiSurface, SurfaceError> {
     let parsed = match parse_dts_file(entry, own_module) {
         Ok(parsed) => parsed,
         Err(
@@ -131,7 +139,13 @@ fn surface_from_entry(entry: &Path, own_module: Option<&str>) -> Result<ApiSurfa
     };
 
     let mut exported = parsed.names;
-    let mut tier = if parsed.has_wildcard_ambient || parsed.has_export_assign {
+    // PREC-03/D-06: a surface located only by the alphabetical-first `.d.ts`
+    // GUESS (no trusted `types`/`typings`/`exports[.].types`/literal
+    // `index.d.ts` entry) can NEVER be claimed `Resolved` — it degrades to
+    // `Dynamic` (info/low-confidence), so a member absent from a guessed/partial
+    // surface never becomes a High-confidence "does not exist" miss. A trusted
+    // entry keeps the existing wildcard/`export =` downgrade logic.
+    let mut tier = if !trusted || parsed.has_wildcard_ambient || parsed.has_export_assign {
         SurfaceTier::Dynamic
     } else {
         SurfaceTier::Resolved
@@ -185,26 +199,44 @@ fn not_installed() -> ApiSurface {
     }
 }
 
-/// Locate the package's type declaration entry point: `package.json`'s
-/// `types`/`typings` field, else `index.d.ts`, else the first top-level
-/// `.d.ts` file found (deterministic — sorted by name).
-fn locate_types_entry(pkg_dir: &Path) -> Option<PathBuf> {
+/// Locate the package's type declaration entry point, returning `(path,
+/// trusted)`. A **trusted** entry (the second tuple element is `true`) is one
+/// the package itself advertises — its `package.json` `types`/`typings` field,
+/// its `exports["."]` conditional `types` field (PREC-03/D-06), or a literal
+/// `index.d.ts`. A **guessed** entry (`false`) is the alphabetical-first
+/// top-level `.d.ts` fallback: modern packages (drizzle-orm, @aws-sdk/*,
+/// @testing-library/*) declare their types ONLY via the `exports` map, so
+/// before D-06 this fallback guessed a wrong/partial `.d.ts` and enumerated it
+/// as a confident `Resolved` surface — the Seava 432-FP class. A guessed entry
+/// is enumerated as `Dynamic`, never `Resolved`, by [`surface_from_entry`].
+fn locate_types_entry(pkg_dir: &Path) -> Option<(PathBuf, bool)> {
+    // (1) legacy top-level `types`/`typings` field — trusted.
     if let Ok(text) = std::fs::read_to_string(pkg_dir.join("package.json")) {
         if let Ok(pkg) = serde_json::from_str::<PackageJsonTypes>(&text) {
             if let Some(types_field) = pkg.types.or(pkg.typings) {
                 let candidate = normalize_dts_path(pkg_dir, &types_field);
                 if candidate.is_file() {
-                    return Some(candidate);
+                    return Some((candidate, true));
                 }
             }
         }
     }
 
-    let index = pkg_dir.join("index.d.ts");
-    if index.is_file() {
-        return Some(index);
+    // (2) modern `exports["."]` conditional `types` field — trusted (D-06).
+    if let Some(types_field) = root_exports_types_field(pkg_dir) {
+        let candidate = normalize_dts_path(pkg_dir, &types_field);
+        if candidate.is_file() {
+            return Some((candidate, true));
+        }
     }
 
+    // (3) a literal `index.d.ts` — an implicitly-trusted conventional entry.
+    let index = pkg_dir.join("index.d.ts");
+    if index.is_file() {
+        return Some((index, true));
+    }
+
+    // (4) alphabetical-first top-level `.d.ts` — a GUESS, never trusted.
     let mut found: Vec<PathBuf> = std::fs::read_dir(pkg_dir)
         .into_iter()
         .flatten()
@@ -213,7 +245,26 @@ fn locate_types_entry(pkg_dir: &Path) -> Option<PathBuf> {
         .filter(|path| is_dts_file(path))
         .collect();
     found.sort();
-    found.into_iter().next()
+    found.into_iter().next().map(|path| (path, false))
+}
+
+/// Read `package.json`'s `exports["."]` (the root/`.` entry) and pull a `types`
+/// field via the existing [`types_field_from_exports_entry`] helper — the root
+/// analogue of [`exports_map_types_field`], which handles subpaths. Handles the
+/// `exports` value being either a map keyed by `"."` or a bare shorthand.
+fn root_exports_types_field(pkg_dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(pkg_dir.join("package.json")).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let exports = value.get("exports")?;
+    // `"exports": { ".": { … } }` — the common, explicit form.
+    if let Some(dot) = exports.get(".") {
+        if let Some(types) = types_field_from_exports_entry(dot) {
+            return Some(types);
+        }
+    }
+    // `"exports": { "types": "…", "import": "…" }` — a bare conditional map with
+    // no subpath keys is itself the `.` entry.
+    types_field_from_exports_entry(exports)
 }
 
 /// Locate a JS subpath import's type declaration entry point (audit A13):
@@ -276,9 +327,11 @@ fn types_field_from_exports_entry(entry: &serde_json::Value) -> Option<String> {
 }
 
 fn is_dts_file(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|n| n.to_str())
-        .is_some_and(|n| n.ends_with(".d.ts"))
+    path.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+        // Accept the modern ESM/CJS declaration extensions too (PREC-03/D-06):
+        // exports-map packages frequently ship `.d.mts`/`.d.cts` entries.
+        n.ends_with(".d.ts") || n.ends_with(".d.mts") || n.ends_with(".d.cts")
+    })
 }
 
 fn normalize_dts_path(pkg_dir: &Path, types_field: &str) -> PathBuf {
@@ -1048,6 +1101,95 @@ mod tests {
         let surface = enumerate_js_subpath(&dir, "server").unwrap();
         assert_eq!(surface.tier, SurfaceTier::Resolved);
         assert!(surface.exported.contains("renderToString"));
+    }
+
+    /// PREC-03/D-06: a package with NO top-level `types`, only an
+    /// `exports["."].types` field, resolves that entry and enumerates its real
+    /// surface as `Resolved` (the drizzle-orm/@aws-sdk/@testing-library shape).
+    #[test]
+    fn exports_map_root_types_resolves() {
+        let dir = tempdir("exports-root-types");
+        std::fs::create_dir_all(dir.join("dist")).unwrap();
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name":"drizzle-like","exports":{".":{"types":"./dist/index.d.ts"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("dist/index.d.ts"),
+            "export function eq(): void;\n\
+             export function and(): void;\n\
+             export const sql: unknown;\n",
+        )
+        .unwrap();
+
+        let surface = enumerate_js(&dir).unwrap();
+        assert_eq!(surface.tier, SurfaceTier::Resolved);
+        assert!(surface.exported.contains("eq"));
+        assert!(surface.exported.contains("and"));
+        assert!(surface.exported.contains("sql"));
+        // a genuine miss on this trusted resolved surface is still absent, so
+        // downstream fires a High miss (recall preserved, D-07).
+        assert!(!surface.exported.contains("definitelyNotAnExport"));
+    }
+
+    /// PREC-03/D-06: a one-level `import`/`require` conditional in the root
+    /// exports map resolves, and a `.d.mts` entry extension is accepted.
+    #[test]
+    fn exports_map_conditional_root() {
+        let dir = tempdir("exports-conditional-root");
+        std::fs::create_dir_all(dir.join("dist")).unwrap();
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name":"esm-like","exports":{".":{"import":{"types":"./dist/index.d.mts"}}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("dist/index.d.mts"),
+            "export function screen(): void;\n",
+        )
+        .unwrap();
+
+        let surface = enumerate_js(&dir).unwrap();
+        assert_eq!(surface.tier, SurfaceTier::Resolved);
+        assert!(surface.exported.contains("screen"));
+    }
+
+    /// PREC-03/D-06 — the core guarantee: a package with NO `types`/`typings`
+    /// and NO `exports` map, but multiple top-level `.d.ts` files, resolves via
+    /// the alphabetical-first GUESS and enumerates as `Dynamic` (NOT
+    /// `Resolved`), so a member absent from the guessed file never becomes a
+    /// High-confidence miss (the Seava 432-FP class).
+    #[test]
+    fn guessed_first_dts_is_dynamic_not_resolved() {
+        let dir = tempdir("guessed-first-dts");
+        // No `types`/`typings`, no `exports`, no `index.d.ts` — only two
+        // unrelated top-level `.d.ts` files. `aaa.d.ts` sorts first and is a
+        // partial/wrong guess.
+        std::fs::write(dir.join("package.json"), r#"{"name":"guess-me"}"#).unwrap();
+        std::fs::write(dir.join("aaa.d.ts"), "export function onlyInAaa(): void;\n").unwrap();
+        std::fs::write(dir.join("zzz.d.ts"), "export function realEntry(): void;\n").unwrap();
+
+        let surface = enumerate_js(&dir).unwrap();
+        assert_eq!(
+            surface.tier,
+            SurfaceTier::Dynamic,
+            "a guessed alphabetical-first entry must never be Resolved (D-06)"
+        );
+    }
+
+    /// PREC-03/D-06 boundary: a literal `index.d.ts` (no `types` field, no
+    /// `exports`) is an implicitly-trusted conventional entry and stays
+    /// `Resolved` — the downgrade must not over-fire on the common case.
+    #[test]
+    fn trusted_index_dts_still_resolved() {
+        let dir = tempdir("trusted-index-dts");
+        std::fs::write(dir.join("package.json"), r#"{"name":"idx"}"#).unwrap();
+        std::fs::write(dir.join("index.d.ts"), "export function realFn(): void;\n").unwrap();
+
+        let surface = enumerate_js(&dir).unwrap();
+        assert_eq!(surface.tier, SurfaceTier::Resolved);
+        assert!(surface.exported.contains("realFn"));
     }
 
     #[test]

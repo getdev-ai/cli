@@ -476,6 +476,167 @@ fn real_json_populates_gdv1_fingerprint_on_every_finding() {
     );
 }
 
+/// PREC-02 (13-02): a TS `tsconfig.json` `@/*` path alias resolves BEFORE
+/// import classification, so an `@/components/Foo` import is a local module —
+/// never a hallucinated npm package. The Seava dogfood's single
+/// highest-leverage FP class (~39% of findings): every `@/…` import looked
+/// phantom. Run fully offline so the aliased import must never even enter the
+/// registry lookup set.
+#[test]
+fn ts_path_alias_import_yields_zero_alias_driven_real_findings() {
+    let dir = tmp_dir("ts-path-alias");
+    // cache lives OUTSIDE the project so the run's cache writes never show up in
+    // the mutation snapshot below.
+    let cache_dir = tmp_dir("ts-path-alias-cache");
+    std::fs::write(
+        dir.join("tsconfig.json"),
+        r#"{ "compilerOptions": { "paths": { "@/*": ["./src/*"] } } }"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.join("src/components")).unwrap();
+    std::fs::write(
+        dir.join("src/components/Foo.tsx"),
+        "export const Foo = () => null;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/Page.tsx"),
+        "import Foo from \"@/components/Foo\";\nexport const Page = () => Foo;\n",
+    )
+    .unwrap();
+
+    let before = snapshot(&dir);
+
+    let assert = getdev()
+        .current_dir(&dir)
+        .env("GETDEV_OFFLINE", "1")
+        .env("GETDEV_CACHE_DIR", &cache_dir)
+        .arg("real")
+        .arg("--offline")
+        .arg("--json")
+        .assert();
+
+    let output = assert.get_output();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let report: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|err| panic!("stdout was not valid JSON ({err}): {stdout}"));
+    let findings = report["findings"].as_array().unwrap();
+
+    for id in [
+        "real/phantom-import",
+        "real/nonexistent-package",
+        "real/typosquat-suspect",
+    ] {
+        let alias_hits: Vec<&serde_json::Value> = findings
+            .iter()
+            .filter(|f| {
+                f["id"] == id
+                    && f["message"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .contains("@/components")
+            })
+            .collect();
+        assert!(
+            alias_hits.is_empty(),
+            "an @/ aliased import must produce zero {id} findings, got: {stdout}"
+        );
+    }
+    // Belt-and-braces: NO finding anywhere should name the alias specifier.
+    assert!(
+        findings.iter().all(|f| !f["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("@/components/Foo")),
+        "no real/* finding may name the aliased import, got: {stdout}"
+    );
+
+    let after = snapshot(&dir);
+    assert_eq!(before, after, "getdev real must never mutate the project");
+}
+
+/// PREC-03 (13-03): a package that declares its `.d.ts` entry ONLY via the
+/// modern `package.json` `exports["."].types` field (drizzle-orm/@aws-sdk/
+/// @testing-library shape) enumerates its REAL export surface, so real named
+/// imports (`eq`/`and`/`sql`) produce ZERO `real/nonexistent-api` findings.
+/// Before 13-03 `locate_types_entry` ignored the exports map, guessed a
+/// wrong/partial `.d.ts`, and flagged every real member High — the Seava
+/// 432-FP class.
+#[test]
+fn exports_map_typed_package_real_imports_yield_zero_nonexistent_api() {
+    let dir = tmp_dir("exports-map-api");
+    let cache_dir = tmp_dir("exports-map-api-cache");
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"app","dependencies":{"drizzle-like":"^1.0.0"}}"#,
+    )
+    .unwrap();
+    // fixture node_modules/<pkg> whose types are reachable ONLY via the exports
+    // map (no top-level `types` field, no index.d.ts).
+    let pkg_dir = dir.join("node_modules").join("drizzle-like");
+    std::fs::create_dir_all(pkg_dir.join("dist")).unwrap();
+    std::fs::write(
+        pkg_dir.join("package.json"),
+        r#"{"name":"drizzle-like","exports":{".":{"types":"./dist/index.d.ts"}}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        pkg_dir.join("dist/index.d.ts"),
+        "export function eq(): void;\n\
+         export function and(): void;\n\
+         export const sql: unknown;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src_db.ts"),
+        "import { eq, and, sql } from 'drizzle-like';\n\
+         export const q = () => { eq(); and(); return sql; };\n",
+    )
+    .unwrap();
+
+    // seed offline existence so the package resolves Found (no network).
+    let cache = Cache::open_at(&cache_dir).unwrap();
+    cache
+        .put_existence(Ecosystem::Npm, "drizzle-like", Existence::Found)
+        .unwrap();
+    drop(cache);
+
+    let assert = getdev()
+        .current_dir(&dir)
+        .env("GETDEV_OFFLINE", "1")
+        .env("GETDEV_CACHE_DIR", &cache_dir)
+        .arg("real")
+        .arg("--apis-only")
+        .arg("--offline")
+        .arg("--json")
+        .assert();
+
+    let output = assert.get_output();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let report: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|err| panic!("stdout was not valid JSON ({err}): {stdout}"));
+    let findings = report["findings"].as_array().unwrap();
+
+    for member in ["eq", "and", "sql"] {
+        assert!(
+            findings.iter().all(|f| {
+                !(f["id"] == "real/nonexistent-api"
+                    && f["message"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .contains(member))
+            }),
+            "a real exports-map export ({member}) must not be flagged nonexistent-api, got: {stdout}"
+        );
+    }
+    // No High nonexistent-api at all on this trusted, fully-resolved surface's
+    // real members.
+    assert!(
+        findings.iter().all(|f| f["id"] != "real/nonexistent-api"),
+        "real named imports of a correctly-enumerated surface must produce zero nonexistent-api, got: {stdout}"
+    );
+}
+
 #[test]
 fn more_than_one_only_flag_is_rejected() {
     let dir = tmp_dir("conflicting-flags");

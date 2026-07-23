@@ -4,6 +4,9 @@
 //! Invariant (docs/SPEC-FINDINGS.md): raw secret values never leave this
 //! module except through [`mask`].
 
+use std::sync::OnceLock;
+
+use globset::{Glob, GlobSet, GlobSetBuilder};
 use regex::Regex;
 use serde::Deserialize;
 
@@ -150,9 +153,13 @@ impl SecretPatterns {
         }
         // generic fallback: random-looking value assigned to a secret-ish
         // name — no vendor format to anchor on, so the placeholder screen
-        // applies here only.
+        // applies here only. PREC-04/D-08: a secret-suggesting NAME is now
+        // necessary but NOT sufficient — the VALUE must also look like an
+        // opaque credential and must not match a known non-secret value shape
+        // (URL/DSN, filename/path, or lowercase snake/kebab slug).
         if !looks_like_placeholder(value)
             && !is_known_non_secret(value)
+            && !value_shape_is_non_secret(value)
             && identifier_suggests_secret(identifier)
             && value.len() >= ENTROPY_MIN_LEN
             && !value.contains(char::is_whitespace)
@@ -366,6 +373,109 @@ fn is_known_non_secret(value: &str) -> bool {
     .any(|prefix| value.starts_with(prefix))
 }
 
+/// PREC-04/D-08: a deterministic value-SHAPE gate on the entropy fallback —
+/// returns `true` when the value matches a known NON-secret shape and so must
+/// not fire as a hardcoded secret regardless of a secret-suggesting identifier
+/// name. Provider-pattern matches never reach here (they return before the
+/// fallback), so a genuinely planted `sk-…`/`AKIA…` key still flags. The three
+/// rejected shapes are exactly the four Seava FP classes (§3.5):
+///   - URL / connection-string values (`TOKEN_URL = "https://…"`) — deployment
+///     config, delegated to [`classify_url`]'s existing shape test;
+///   - filesystem-path / filename values (`cvFileKey = "crew-….pdf"`);
+///   - lowercase snake/kebab slug / enum values (`key: "yacht_management_…"`).
+fn value_shape_is_non_secret(value: &str) -> bool {
+    classify_url(value).is_some() || is_path_or_filename(value) || is_identifier_slug(value)
+}
+
+/// Common file extensions whose presence marks a value as a filename/path, not
+/// a credential (D-08).
+const NON_SECRET_FILE_EXTENSIONS: &[&str] = &[
+    ".pdf", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".ico", ".bmp", ".tiff", ".json",
+    ".csv", ".tsv", ".md", ".txt", ".yaml", ".yml", ".xml", ".html", ".htm", ".doc", ".docx",
+    ".xls", ".xlsx", ".zip", ".gz", ".tar", ".mp4", ".mp3", ".wav", ".mov",
+];
+
+/// Whether the value is a filesystem path or filename: it ends in a common
+/// file extension, or it is a `/`-delimited path whose final segment carries a
+/// file extension. Deliberately NOT "contains any `/`" — a base64 secret body
+/// legitimately contains `/`, so only a dotted final path segment (a filename)
+/// is treated as a path (D-08 / recall guard).
+fn is_path_or_filename(value: &str) -> bool {
+    let lower = value.to_lowercase();
+    if NON_SECRET_FILE_EXTENSIONS
+        .iter()
+        .any(|ext| lower.ends_with(ext))
+    {
+        return true;
+    }
+    if value.contains('/') {
+        if let Some(last) = value.rsplit('/').next() {
+            // a final segment like `report.pdf` / `avatar.png` — a filename.
+            // A leading dot (`.env`) is a dotfile name, still a filename.
+            if last.contains('.') && last.len() > 1 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Whether the value is a single lowercase `snake_case`/`kebab_case` token — a
+/// taxonomy slug or enum constant, not a random secret body. It contains only
+/// `[a-z0-9_-]` (so any uppercase or other char disqualifies it — a real
+/// mixed-case+digit random body still fires) AND reads as a word-slug (has a
+/// `_`/`-` separator, or is purely alphabetic). A lowercase hex/digit blob
+/// (`9fq4ca2e…`, no separator, not purely alphabetic) is NOT a slug and still
+/// fires (D-08).
+fn is_identifier_slug(value: &str) -> bool {
+    if value.is_empty() {
+        return false;
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+    {
+        return false;
+    }
+    let has_separator = value.contains('_') || value.contains('-');
+    let purely_alphabetic = value.chars().all(|c| c.is_ascii_lowercase());
+    has_separator || purely_alphabetic
+}
+
+/// Test/scaffolding path globs (PREC-04/D-09) — the subset of the `review`
+/// detectors' `EXEMPT_PATH_GLOBS` that marks a file as test scaffolding, where
+/// entropy-fallback secret FPs concentrate (credential-shaped fixture strings).
+const TEST_FIXTURE_PATH_GLOBS: &[&str] = &[
+    "**/*.test.*",
+    "*.test.*",
+    "**/*.spec.*",
+    "*.spec.*",
+    "**/tests/**",
+    "**/test_*.py",
+    "**/*_test.py",
+];
+
+/// Whether `path` (a project-relative display path) is a test/scaffolding file
+/// whose entropy-fallback secret findings D-09 suppresses at the audit + env
+/// call sites. A provider-format key is NEVER gated by this — only the generic
+/// entropy fallback (`pattern_id == "entropy"`) is suppressed. Compiled once.
+#[must_use]
+pub fn is_test_fixture_path(path: &str) -> bool {
+    static SET: OnceLock<Option<GlobSet>> = OnceLock::new();
+    let set = SET.get_or_init(|| {
+        let mut builder = GlobSetBuilder::new();
+        for pattern in TEST_FIXTURE_PATH_GLOBS {
+            if let Ok(glob) = Glob::new(pattern) {
+                builder.add(glob);
+            }
+        }
+        builder.build().ok()
+    });
+    let normalized = path.replace('\\', "/");
+    set.as_ref()
+        .is_some_and(|globs| globs.is_match(&normalized))
+}
+
 fn looks_like_placeholder(value: &str) -> bool {
     let lower = value.to_lowercase();
     [
@@ -544,6 +654,91 @@ mod tests {
     /// back to fully-elided `…` rather than emitting a head/tail pair that
     /// overlaps (or reveals more of the value than intended, e.g. a
     /// `head…tail` where `head` and `tail` share characters).
+    /// PREC-04/D-08: provider-pattern matches are untouched by the value-shape
+    /// gate — a planted `sk_live_…`/`AKIA…`/PEM key still fires (recall).
+    #[test]
+    fn provider_key_still_fires_after_value_shape_gate() {
+        let p = patterns();
+        assert!(p
+            .classify("sk_live_FAKEFAKEFAKE1234", "stripeKey")
+            .is_some());
+        assert!(p.classify("AKIAFAKEFAKEFAKEFAKE", "x").is_some());
+        let pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAK\n-----END RSA PRIVATE KEY-----";
+        assert!(
+            p.classify(pem, "privateKey").is_some(),
+            "a PEM block still classifies"
+        );
+    }
+
+    /// PREC-04/D-08 — the four Seava FP classes no longer fire via the entropy
+    /// fallback (a secret-suggesting NAME is no longer sufficient).
+    #[test]
+    fn value_shape_gate_kills_the_four_seava_fp_classes() {
+        let p = patterns();
+        // (a) URL / connection-string value
+        assert!(
+            p.classify(
+                "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer",
+                "TOKEN_URL"
+            )
+            .is_none(),
+            "a URL value must not fire as a hardcoded secret"
+        );
+        // (b) filename values (with an extension)
+        assert!(p
+            .classify("crew-3f9a1c02-d7b4-8e65.pdf", "cvFileKey")
+            .is_none());
+        assert!(p.classify("uploads/user-abc123def456.jpg", "key").is_none());
+        // (c) lowercase snake/kebab slug / enum values
+        assert!(p.classify("yacht_management_guardianage", "key").is_none());
+        assert!(p
+            .classify("revoke_staff_authority", "REVOKE_STAFF_AUTHORITY")
+            .is_none());
+    }
+
+    /// PREC-04/D-08 recall guard: a genuine mixed-case+digit random body still
+    /// fires via the entropy fallback (it is not slug/url/filename-shaped),
+    /// including the existing `aws_secret_access_key` synthetic value.
+    #[test]
+    fn real_entropy_secret_still_fires_through_the_value_shape_gate() {
+        let p = patterns();
+        let hit = p
+            .classify("9fQ4cA2e78bZ1dY6fX3aP5cV0e9K", "api_token")
+            .unwrap();
+        assert_eq!(hit.pattern_id, "entropy");
+        // the AWS-secret-half synthetic value (mixed case + digits) still fires
+        let aws = p
+            .classify("Zx7Qm2Kp9Rv4Tb6Nw1Lc8Hj3Yd5Fs", "AWS_SECRET_ACCESS_KEY")
+            .unwrap();
+        assert_eq!(aws.pattern_id, "entropy");
+    }
+
+    /// PREC-04/D-10 (Invariant 2): a still-firing entropy finding's masked
+    /// preview never contains the raw value.
+    #[test]
+    fn value_shape_gate_leaves_masking_intact() {
+        let p = patterns();
+        let raw = "9fQ4cA2e78bZ1dY6fX3aP5cV0e9K";
+        let hit = p.classify(raw, "api_token").unwrap();
+        assert!(
+            !hit.masked.contains(raw),
+            "value must be masked: {}",
+            hit.masked
+        );
+    }
+
+    #[test]
+    fn is_test_fixture_path_matches_test_globs_only() {
+        assert!(is_test_fixture_path("src/foo.test.ts"));
+        assert!(is_test_fixture_path("foo.spec.js"));
+        assert!(is_test_fixture_path("tests/data/x.py"));
+        assert!(is_test_fixture_path("pkg/test_thing.py"));
+        assert!(is_test_fixture_path("pkg/thing_test.py"));
+        // non-test source paths are NOT matched
+        assert!(!is_test_fixture_path("src/config.ts"));
+        assert!(!is_test_fixture_path("src/api/handler.js"));
+    }
+
     #[test]
     fn mask_falls_back_when_prefix_plus_tail_would_overlap() {
         // "github_pat_" is 11 chars; value is exactly 15 chars total, so
