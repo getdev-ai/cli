@@ -955,6 +955,7 @@ dependencies = [
  "include_dir",
  "jsonschema",
  "owo-colors",
+ "proptest",
  "pyproject-toml",
  "rayon",
  "regex",

@@ -346,6 +346,7 @@ fn deadcode_finding(rel: &str, decl: &Declaration<'_>) -> Finding {
         ),
         fixable: false,
         refs: vec!["https://getdev.ai/rules/review/dead-code-introduced".to_owned()],
+        seed: crate::fingerprint::FingerprintSeed::default(),
         fingerprint: None,
     }
 }

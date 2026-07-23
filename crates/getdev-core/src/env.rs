@@ -236,6 +236,7 @@ pub fn findings(plan: &EnvPlan, options: &EnvOptions) -> Vec<Finding> {
                 remediation: Some("run: getdev env --write".to_owned()),
                 fixable: true,
                 refs: vec!["https://getdev.ai/rules/env/hardcoded-secret".to_owned()],
+                seed: crate::fingerprint::FingerprintSeed::default(),
                 fingerprint: None,
             }
         })

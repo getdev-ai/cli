@@ -412,6 +412,8 @@ fn ast_hit_to_finding(rule: &Rule, node: Node<'_>, file: &str) -> Finding {
         remediation: Some(rule.remediation.clone()),
         fixable: false,
         refs: rule.refs.clone(),
+        // Tracer stub (11-02): real AST seed lands in plan 11-05.
+        seed: crate::fingerprint::FingerprintSeed::default(),
         fingerprint: None,
     }
 }
@@ -434,6 +436,8 @@ fn text_hit_to_finding(rule: &Rule, file: &str) -> Finding {
         remediation: Some(rule.remediation.clone()),
         fixable: false,
         refs: rule.refs.clone(),
+        // Tracer stub (11-02): D-02 message-fallback seed lands in plan 11-05.
+        seed: crate::fingerprint::FingerprintSeed::default(),
         fingerprint: None,
     }
 }
@@ -470,6 +474,14 @@ fn secret_hit_to_finding(
         remediation: Some(rule.remediation.clone()),
         fixable: false,
         refs: rule.refs.clone(),
+        // D-05: the raw secret value is the identity seed — two distinct
+        // secrets on one line differentiate intrinsically. It is hashed only;
+        // `FingerprintSeed`'s redacting `Debug` + `#[serde(skip)]` keep it off
+        // every wire/renderer (Invariant 2). This is the tracer's ONE real seed.
+        seed: crate::fingerprint::FingerprintSeed {
+            node_kind: "secret_literal",
+            matched_text: assignment.value.clone(),
+        },
         fingerprint: None,
     }
 }

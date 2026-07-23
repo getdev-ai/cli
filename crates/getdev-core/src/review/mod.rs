@@ -402,6 +402,7 @@ fn review_ast_hit_to_finding(rule: &rules::Rule, node: Node<'_>, file: &str) -> 
         remediation: Some(rule.remediation.clone()),
         fixable: false,
         refs: rule.refs.clone(),
+        seed: crate::fingerprint::FingerprintSeed::default(),
         fingerprint: None,
     }
 }

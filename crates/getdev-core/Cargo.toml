@@ -37,6 +37,10 @@ yarn-lock-parser = "0.14"
 # (`cargo bench -p getdev-core`), exempt from the 04-01-style third-party
 # legitimacy checkpoint (04-07-PLAN.md Task 2 rationale).
 criterion = "0.5"
+# Dev-only: the D-14 occurrence-index property test (11-02) exercises the
+# fingerprint batch pass over arbitrary sibling sets. Already a workspace-pinned,
+# cargo-deny-green dependency (getdev-gitx uses it); never shipped in the binary.
+proptest = { workspace = true }
 # Dev-only: the `check_perf` gate (07-07) reproduces `getdev check`'s
 # parallel analyzer fan-out (which lives in `getdev-cli::commands::check`,
 # already a rayon consumer) to measure the warm/cold budget faithfully. rayon

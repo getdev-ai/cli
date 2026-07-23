@@ -261,6 +261,7 @@ fn orphan_finding(rel: &str) -> Finding {
         ),
         fixable: false,
         refs: vec!["https://getdev.ai/rules/review/orphan-file".to_owned()],
+        seed: crate::fingerprint::FingerprintSeed::default(),
         fingerprint: None,
     }
 }

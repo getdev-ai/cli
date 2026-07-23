@@ -286,6 +286,7 @@ fn env_file_committed_finding(env_file: &str) -> Finding {
         )),
         fixable: false,
         refs: vec!["https://getdev.ai/rules/env/env-file-committed".to_owned()],
+        seed: getdev_core::fingerprint::FingerprintSeed::default(),
         fingerprint: None,
     }
 }

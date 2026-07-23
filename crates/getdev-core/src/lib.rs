@@ -9,6 +9,7 @@ pub mod config;
 pub mod deps;
 pub mod env;
 pub mod findings;
+pub mod fingerprint;
 pub mod frameworks;
 pub mod models;
 pub mod mutate;

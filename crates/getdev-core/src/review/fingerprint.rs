@@ -312,6 +312,7 @@ fn duplicate_finding(anchor: &FnRecord, other: &FnRecord, similarity: f64) -> Fi
         ),
         fixable: false,
         refs: vec!["https://getdev.ai/rules/review/duplicate-helper".to_owned()],
+        seed: crate::fingerprint::FingerprintSeed::default(),
         fingerprint: None,
     }
 }

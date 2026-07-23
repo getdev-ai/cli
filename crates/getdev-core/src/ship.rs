@@ -632,6 +632,7 @@ pub fn missing_env_declaration(ctx: &ScanContext, root: &Path) -> Vec<Finding> {
                 )),
                 fixable: false,
                 refs: Vec::new(),
+                seed: crate::fingerprint::FingerprintSeed::default(),
                 fingerprint: None,
             });
         }
@@ -709,6 +710,7 @@ pub fn hardcoded_port(ctx: &ScanContext) -> Vec<Finding> {
                 ),
                 fixable: false,
                 refs: Vec::new(),
+                seed: crate::fingerprint::FingerprintSeed::default(),
                 fingerprint: None,
             });
         }
@@ -765,6 +767,7 @@ pub fn blocking_findings(ctx: &ScanContext, root: &Path) -> Vec<Finding> {
             remediation: f.remediation,
             fixable: false,
             refs: f.refs,
+            seed: crate::fingerprint::FingerprintSeed::default(),
             fingerprint: None,
         })
         .collect();

@@ -134,6 +134,7 @@ mod tests {
             remediation: None,
             fixable: false,
             refs: vec![],
+            seed: crate::fingerprint::FingerprintSeed::default(),
             fingerprint: None,
         }
     }

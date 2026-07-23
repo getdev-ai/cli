@@ -359,6 +359,7 @@ mod tests {
             line: Some(line),
             column: None,
             end_line: None,
+            seed: getdev_core::fingerprint::FingerprintSeed::default(),
             fingerprint: None,
             message: "stripe secret assigned to 'API_KEY'".into(),
             detail: None,

@@ -331,6 +331,7 @@ fn commented_code_finding(rel: &str, line: u32) -> Finding {
         ),
         fixable: false,
         refs: vec!["https://getdev.ai/rules/review/commented-code-block".to_owned()],
+        seed: crate::fingerprint::FingerprintSeed::default(),
         fingerprint: None,
     }
 }

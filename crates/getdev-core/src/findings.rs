@@ -9,6 +9,8 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use crate::fingerprint::FingerprintSeed;
+
 /// Version of the findings JSON schema, independent of the tool version.
 pub const SCHEMA_VERSION: &str = "1";
 
@@ -137,7 +139,15 @@ pub struct Finding {
     pub fixable: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refs: Vec<String>,
-    /// Stable hash of (rule, file, normalized context) — baselines, v0.2
+    /// Internal identity seed (D-11): the AST anchor / matched text (or the raw
+    /// secret value for secret findings) the batch fingerprint pass hashes.
+    /// NEVER serialized — `#[serde(skip)]` + [`FingerprintSeed`]'s redacting
+    /// `Debug` keep it off the wire and out of any renderer (D-05, Invariant 2).
+    #[serde(skip)]
+    pub seed: FingerprintSeed,
+    /// Shift-stable `gdv1:` identity token — baselines/`guard`, v0.2. Populated
+    /// for every finding by [`crate::fingerprint::assign_fingerprints`] (its
+    /// sole writer); see docs/SPEC-FINDINGS.md §"Fingerprint identity".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<String>,
 }
@@ -314,6 +324,7 @@ mod tests {
             remediation: Some("run: getdev env --write".into()),
             fixable,
             refs: vec!["https://getdev.ai/rules/audit/hardcoded-secret".into()],
+            seed: FingerprintSeed::default(),
             fingerprint: None,
         }
     }
@@ -391,6 +402,7 @@ mod tests {
             remediation: None,
             fixable: false,
             refs: vec![],
+            seed: FingerprintSeed::default(),
             fingerprint: None,
         };
         // three findings tied on severity/file/line, differing only in the

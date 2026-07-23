@@ -129,6 +129,7 @@ pub fn nonexistent_package_finding(input: &PackageVerdictInput) -> Option<Findin
         ),
         fixable: false,
         refs: vec!["https://getdev.ai/rules/real/nonexistent-package".to_owned()],
+        seed: crate::fingerprint::FingerprintSeed::default(),
         fingerprint: None,
     })
 }
@@ -164,6 +165,7 @@ pub fn typosquat_finding(input: &PackageVerdictInput) -> Option<Finding> {
         )),
         fixable: false,
         refs: vec!["https://getdev.ai/rules/real/typosquat-suspect".to_owned()],
+        seed: crate::fingerprint::FingerprintSeed::default(),
         fingerprint: None,
     })
 }
@@ -201,6 +203,7 @@ pub fn phantom_import_finding(import_ref: &ImportRef) -> Option<Finding> {
         )),
         fixable: false,
         refs: vec!["https://getdev.ai/rules/real/phantom-import".to_owned()],
+        seed: crate::fingerprint::FingerprintSeed::default(),
         fingerprint: None,
     })
 }
@@ -237,6 +240,7 @@ pub fn unknown_model_finding(
         ),
         fixable: false,
         refs: vec!["https://getdev.ai/rules/real/unknown-model-string".to_owned()],
+        seed: crate::fingerprint::FingerprintSeed::default(),
         fingerprint: None,
     }
 }
@@ -313,6 +317,7 @@ fn api_finding(result: &ApiResult) -> Finding {
         remediation: Some(remediation),
         fixable: false,
         refs: vec![format!("https://getdev.ai/rules/{id}")],
+        seed: crate::fingerprint::FingerprintSeed::default(),
         fingerprint: None,
     }
 }
@@ -343,6 +348,7 @@ pub fn unsupported_stack_finding(stack_hint: &StackHint) -> Finding {
         remediation: None,
         fixable: false,
         refs: vec!["https://getdev.ai/rules/real/unsupported-stack".to_owned()],
+        seed: crate::fingerprint::FingerprintSeed::default(),
         fingerprint: None,
     }
 }
