@@ -247,6 +247,13 @@ fn process_lang_file(
                     .secret_patterns
                     .classify(&assignment.value, &assignment.name)
                 {
+                    // PREC-04/D-09: suppress the generic entropy fallback in
+                    // test/scaffolding files (credential-shaped fixture strings)
+                    // — a provider-format match (`pattern_id != "entropy"`) is
+                    // NEVER skipped, so a planted key in a test file still fires.
+                    if secret.pattern_id == "entropy" && crate::secrets::is_test_fixture_path(rel) {
+                        continue;
+                    }
                     findings.push(secret_hit_to_finding(rule, assignment, &secret, rel));
                 }
             }
@@ -893,6 +900,61 @@ fixtures:
         let json = serde_json::to_string(&findings).unwrap();
         assert!(!json.contains("FAKEFAKEFAKE1234"));
         assert!(json.contains("sk_live_…1234"));
+    }
+
+    /// PREC-04/D-09: an entropy-fallback secret in a `*.test.*` file is
+    /// suppressed, but a provider-format key in that same test file still fires
+    /// (the gate is on the entropy fallback only — recall preserved), and an
+    /// entropy secret in a non-test file is unaffected.
+    #[test]
+    fn entropy_fallback_is_suppressed_in_test_files_but_provider_keys_still_fire() {
+        let rules_dir = tempdir("secret-testpath-rules");
+        std::fs::write(rules_dir.join("rule.yaml"), SECRET_RULE_YAML).unwrap();
+        let pack = build_pack(&rules_dir);
+
+        let project = tempdir("secret-testpath-project");
+        // an entropy-fallback secret (mixed-case+digit random body) in a test
+        // file — must be suppressed.
+        std::fs::write(
+            project.join("thing.test.js"),
+            "const apiToken = \"9fQ4cA2e78bZ1dY6fX3aP5cV0e9K\";\n",
+        )
+        .unwrap();
+        // a provider-format key in a test file — must STILL fire.
+        std::fs::write(
+            project.join("keys.spec.js"),
+            "const stripeKey = \"sk_live_FAKEFAKEFAKE1234\";\n",
+        )
+        .unwrap();
+        // an entropy-fallback secret in a NON-test file — unaffected.
+        std::fs::write(
+            project.join("config.js"),
+            "const apiToken = \"7hK2mN9pQ4rS6tV8wX1yZ3bC5dE0fG\";\n",
+        )
+        .unwrap();
+
+        let (findings, _skipped) = run(
+            &project,
+            &pack,
+            &DetectedFrameworks::default(),
+            &AuditOptions::default(),
+        )
+        .unwrap();
+
+        let files: std::collections::HashSet<&str> =
+            findings.iter().map(|f| f.file.as_str()).collect();
+        assert!(
+            !files.contains("thing.test.js"),
+            "entropy fallback in a .test.js file must be suppressed, got: {findings:?}"
+        );
+        assert!(
+            files.contains("keys.spec.js"),
+            "a provider-format key in a .spec.js file must still fire, got: {findings:?}"
+        );
+        assert!(
+            files.contains("config.js"),
+            "an entropy secret in a non-test file must be unaffected, got: {findings:?}"
+        );
     }
 
     const TEXT_REGEX_RELATIVE_GLOB_YAML: &str = r#"

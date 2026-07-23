@@ -166,6 +166,15 @@ fn plan_from_assignments(
             },
             None => continue,
         };
+        // PREC-04/D-09: suppress the generic entropy fallback for extraction in
+        // test/scaffolding files — a provider-format match (`pattern_id !=
+        // "entropy"`) is never skipped, so a planted key in a test file still
+        // extracts. Only the entropy fallback (the Seava FP source) is gated.
+        if secret.pattern_id == "entropy"
+            && crate::secrets::is_test_fixture_path(&relative_display(&assignment.path, root))
+        {
+            continue;
+        }
         let base_name = if secret.env_key.is_empty() {
             identifier_to_env_key(&assignment.name)
         } else {
@@ -644,6 +653,67 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+
+    fn env_tempdir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "getdev-env-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// PREC-04/D-09: an entropy-fallback secret in a test file produces no env
+    /// plan entry, while a provider-format key in a test file still extracts and
+    /// an entropy secret in a non-test file is unaffected.
+    #[test]
+    fn entropy_fallback_is_suppressed_in_test_files_for_env_plan() {
+        let dir = env_tempdir("d09-testpath");
+        std::fs::write(
+            dir.join("thing.test.ts"),
+            "const apiToken = \"9fQ4cA2e78bZ1dY6fX3aP5cV0e9K\";\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+        std::fs::write(
+            dir.join("tests/keys.py"),
+            "api_token = \"7hK2mN9pQ4rS6tV8wX1yZ3bC5dE0fG\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("keys.spec.ts"),
+            "const stripeKey = \"sk_live_FAKEFAKEFAKE1234\";\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("config.ts"),
+            "const apiToken = \"3rT5yU7iO9pA1sD2fG4hJ6kL8zX0cV\";\n",
+        )
+        .unwrap();
+
+        let plan = plan(&dir, &EnvOptions::default()).unwrap();
+        let files: Vec<&str> = plan.entries.iter().map(|e| e.file.as_str()).collect();
+
+        assert!(
+            !files.contains(&"thing.test.ts"),
+            "entropy fallback in a .test.ts file must be suppressed: {files:?}"
+        );
+        assert!(
+            !files.contains(&"tests/keys.py"),
+            "entropy fallback in a tests/ file must be suppressed: {files:?}"
+        );
+        assert!(
+            files.contains(&"keys.spec.ts"),
+            "a provider-format key in a .spec.ts file must still extract: {files:?}"
+        );
+        assert!(
+            files.contains(&"config.ts"),
+            "an entropy secret in a non-test file must be unaffected: {files:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn identifier_naming() {
