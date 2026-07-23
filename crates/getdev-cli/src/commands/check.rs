@@ -19,11 +19,15 @@
 //! (cache-only). This module names no `getdev_registry` type and makes no
 //! registry call of its own.
 
+use std::collections::BTreeSet;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
+use anyhow::Context;
+
 use getdev_core::audit::{self, AuditOptions};
-use getdev_core::config::Config;
+use getdev_core::baseline;
+use getdev_core::config::{Config, ConfigError};
 use getdev_core::deps;
 use getdev_core::env::{self, EnvOptions};
 use getdev_core::findings::{Finding, FindingsReport, ProjectInfo, Severity, SkippedEntry};
@@ -36,6 +40,66 @@ use getdev_core::ship;
 use getdev_core::suppress;
 
 use crate::commands::real;
+
+/// Which baseline (if any) `check` subtracts from the current run (LOOP-03,
+/// D-03). Resolved from the raw `--baseline`/`--update-baseline`/`--since`
+/// flags plus `[baseline].auto` at the CLI boundary by [`resolve_baseline_mode`]
+/// so [`collect`] stays CLI-arg-free — a plain enum, not clap types — and
+/// Phase 15's `fix`/`guard` can drive it directly.
+pub(crate) enum BaselineMode {
+    /// No baseline suppression this run.
+    None,
+    /// The persisted `.getdev-baseline` file. `update` = also rewrite it from
+    /// the current run's fingerprints (`--update-baseline`, D-09 auto-prune).
+    Persisted { update: bool },
+    /// Ephemeral snapshot baseline (`--since <snap-id>`) — reconstructed from a
+    /// `refs/getdev/` snap. A functionality stub in 14-01: the enum/seam/flag
+    /// are the final shape; 14-02 wires the materialize→collect recompute.
+    Since {
+        #[allow(dead_code)]
+        snap_id: u32,
+    },
+}
+
+/// Resolve the raw `check` baseline flags (+ `[baseline].auto`) into a
+/// [`BaselineMode`] at the CLI boundary (D-04). Clap's `conflicts_with_all`
+/// already rejects `--since` + `--baseline`/`--update-baseline` at parse time
+/// (exit 2), so a `Some(since)` here is guaranteed exclusive. An explicit
+/// `--baseline` against a missing file is a [`ConfigError::BaselineMissing`]
+/// (exit 3, naming the file); `auto` + a missing file is a silent no-op.
+pub(crate) fn resolve_baseline_mode(
+    baseline: bool,
+    update_baseline: bool,
+    since: Option<u32>,
+    cfg: &Config,
+    path: &Path,
+) -> anyhow::Result<BaselineMode> {
+    if let Some(snap_id) = since {
+        return Ok(BaselineMode::Since { snap_id });
+    }
+    let baseline_path = path.join(&cfg.baseline.file);
+    if baseline || update_baseline {
+        // Explicit `--baseline` demands the file exist; `--update-baseline`
+        // alone creates it, so a missing file is only an error when the user
+        // asked to READ a baseline (D-04). `--baseline --update-baseline`
+        // (refresh) still requires the file since it reads-then-refreshes.
+        if baseline && !baseline_path.exists() {
+            return Err(ConfigError::BaselineMissing {
+                path: baseline_path,
+            }
+            .into());
+        }
+        return Ok(BaselineMode::Persisted {
+            update: update_baseline,
+        });
+    }
+    // No flags: `[baseline].auto` applies the baseline iff the file exists;
+    // `auto` + no file is a silent no-op, never an error (SPEC-CONFIG).
+    if cfg.baseline.auto && baseline_path.exists() {
+        return Ok(BaselineMode::Persisted { update: false });
+    }
+    Ok(BaselineMode::None)
+}
 
 pub struct CheckArgs {
     pub path: PathBuf,
@@ -60,6 +124,10 @@ pub struct CheckArgs {
     /// Debug-level detail, repeatable (global flag) — shows per-file skip
     /// reasons and the versioned Ship Score weight table.
     pub verbose: u8,
+    /// Resolved baseline mode (LOOP-03) — the `--baseline`/`--update-baseline`/
+    /// `--since` surface, reduced to a CLI-arg-free enum by
+    /// [`resolve_baseline_mode`] at the `main` boundary.
+    pub(crate) baseline_mode: BaselineMode,
 }
 
 /// The fully-aggregated, filtered, scored result of check's collection
@@ -75,6 +143,10 @@ pub(crate) struct Collected {
     /// config" section. `run()` derives its `skipped: Vec<String>` view from
     /// `report.skipped`, so that view is not carried here.
     pub suppressed: Vec<suppress::SuppressedFinding>,
+    /// Baseline-suppression outcome (LOOP-03, D-07) — `Some` iff a baseline was
+    /// active. Carries the suppressed findings + stale entries for the `-v`
+    /// "suppressed by baseline" section, parallel to `suppressed`.
+    pub(crate) baseline: Option<baseline::BaselineOutcome>,
 }
 
 /// Walk + parse the project EXACTLY once, fan the shared context into all four
@@ -87,6 +159,7 @@ pub(crate) fn collect(
     path: &Path,
     cfg: &Config,
     offline: bool,
+    baseline_mode: &BaselineMode,
     progress: &crate::progress::Progress,
 ) -> anyhow::Result<Collected> {
     // ONE shared parse-once context: walk + parse the project EXACTLY once,
@@ -216,6 +289,55 @@ pub(crate) fn collect(
     let filter_outcome = suppress::filter_findings(findings, cfg);
     let findings = filter_outcome.kept;
 
+    // --- baseline stage (LOOP-03, D-07): compose AFTER config suppression and
+    // BEFORE FindingsReport::new/ship_score, keyed on the `gdv1:` fingerprints
+    // already assigned above. Config `[ignore]`/`[[suppress]]` therefore apply
+    // first (a config-suppressed finding is never written into an
+    // `--update-baseline` file), and the Ship Score is computed on the
+    // post-baseline surviving set (the loop's score reflects only what the
+    // agent introduced). This stage reads the STORED fingerprint — it never
+    // recomputes a hash (SC-4). ---
+    let (findings, baseline_result) = match baseline_mode {
+        BaselineMode::None => (findings, None),
+        BaselineMode::Persisted { update } => {
+            let baseline_path = path.join(&cfg.baseline.file);
+            // Absent file → empty set (a silent no-op under `auto`, or the
+            // fresh-create case under `--update-baseline` alone; explicit
+            // `--baseline` against a missing file was already rejected as
+            // `BaselineMissing` at the CLI boundary).
+            let baseline_set = match baseline::read_baseline_capped(&baseline_path)? {
+                Some(text) => baseline::parse_baseline(&text, &baseline_path)?,
+                None => BTreeSet::new(),
+            };
+            // Capture the fingerprints of every finding PRESENT this run (the
+            // set entering the baseline stage) BEFORE filtering — this is what
+            // `--update-baseline` writes, so a later `--baseline` run suppresses
+            // them and stale entries (absent this run) are pruned for free (D-09).
+            let present: BTreeSet<String> = if *update {
+                findings
+                    .iter()
+                    .filter_map(|f| f.fingerprint.clone())
+                    .collect()
+            } else {
+                BTreeSet::new()
+            };
+            let outcome = baseline::filter_by_baseline(findings, &baseline_set);
+            if *update {
+                let serialized = baseline::serialize_baseline(&present, env!("CARGO_PKG_VERSION"));
+                std::fs::write(&baseline_path, serialized).with_context(|| {
+                    format!("failed to write baseline file {}", baseline_path.display())
+                })?;
+            }
+            (outcome.kept.clone(), Some(outcome))
+        }
+        BaselineMode::Since { .. } => {
+            // The enum/seam/flag are the final shape; the snapshot recompute is
+            // wired in 14-02. Until then `--since` is an explicit execution error
+            // rather than a silent no-op.
+            anyhow::bail!("--since is not yet wired");
+        }
+    };
+
     let mut report = FindingsReport::new(
         env!("CARGO_PKG_VERSION"),
         ProjectInfo {
@@ -247,6 +369,7 @@ pub(crate) fn collect(
     Ok(Collected {
         report,
         suppressed: filter_outcome.suppressed,
+        baseline: baseline_result,
     })
 }
 
@@ -262,7 +385,17 @@ pub fn run(args: &CheckArgs) -> anyhow::Result<u8> {
     // The ENTIRE aggregation (parse-once → fan-out → dedupe → suppress → score)
     // lives in `collect()`; `run()` re-implements none of it (CORE-01 SC2) — it
     // is now `collect()` + render + exit.
-    let Collected { report, suppressed } = collect(&args.path, &args.cfg, args.offline, &progress)?;
+    let Collected {
+        report,
+        suppressed,
+        baseline,
+    } = collect(
+        &args.path,
+        &args.cfg,
+        args.offline,
+        &args.baseline_mode,
+        &progress,
+    )?;
 
     // Derive the `-v` skipped-files view from the report. Each `SkippedEntry`'s
     // `reason` equals the original `ScanError::to_string()`, so this vector is
@@ -349,6 +482,39 @@ pub fn run(args: &CheckArgs) -> anyhow::Result<u8> {
                             "{} finding(s) suppressed by config (-v for details)",
                             suppressed.len()
                         );
+                    }
+                }
+                // Baseline suppression is NEVER silent (SC-3): a count line
+                // parallel to the config-suppressed one, with a per-finding
+                // `id file` list under `-v`. Stale entries (baseline
+                // fingerprints matching nothing this run) surface under `-v` as
+                // an info note (D-09). Only rendered when a baseline was active,
+                // so default/golden renders are unaffected.
+                if let Some(baseline) = &baseline {
+                    if !baseline.suppressed.is_empty() {
+                        if args.verbose > 0 {
+                            println!(
+                                "{} finding(s) suppressed by baseline:",
+                                baseline.suppressed.len()
+                            );
+                            for f in &baseline.suppressed {
+                                println!("  - {} {}", f.id, f.file);
+                            }
+                        } else if !args.quiet {
+                            println!(
+                                "{} finding(s) suppressed by baseline (-v for details)",
+                                baseline.suppressed.len()
+                            );
+                        }
+                    }
+                    if args.verbose > 0 && !baseline.stale.is_empty() {
+                        println!(
+                            "{} baseline entry(ies) matched nothing this run (stale):",
+                            baseline.stale.len()
+                        );
+                        for fingerprint in &baseline.stale {
+                            println!("  - {fingerprint}");
+                        }
                     }
                 }
             }
@@ -474,6 +640,7 @@ mod tests {
             &dir,
             &Config::default(),
             true,
+            &BaselineMode::None,
             &crate::progress::Progress::start(false, true, ""),
         )
         .unwrap();

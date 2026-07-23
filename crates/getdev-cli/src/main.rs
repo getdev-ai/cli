@@ -174,8 +174,24 @@ fn parse_severity(raw: &str) -> Result<Severity, String> {
 enum Command {
     /// Umbrella scan: real + audit + env(detect) + review --all over one shared
     /// parse pass, with a Ship Score banner. `check --json --fail-on high` is
-    /// the canonical CI line. Global flags only (docs/SPEC-COMMANDS.md `check`).
-    Check,
+    /// the canonical CI line. The only check-specific flags are the baseline
+    /// modes (LOOP-03; docs/SPEC-COMMANDS.md `check`); everything else is global.
+    Check {
+        /// Apply the persisted `.getdev-baseline` file, suppressing pre-existing
+        /// findings by `gdv1:` fingerprint. A missing file is an error (exit 3).
+        #[arg(long)]
+        baseline: bool,
+        /// Rewrite `.getdev-baseline` from the current run's surviving
+        /// fingerprints (creates it if absent; prunes stale entries). May
+        /// combine with `--baseline` (read-then-refresh).
+        #[arg(long)]
+        update_baseline: bool,
+        /// Suppress findings present as of snapshot `<SNAP_ID>` — an ephemeral
+        /// baseline; no file is written. Mutually exclusive with
+        /// `--baseline`/`--update-baseline`.
+        #[arg(long, value_name = "SNAP_ID", conflicts_with_all = ["baseline", "update_baseline"])]
+        since: Option<u32>,
+    },
     /// Extract hardcoded secrets to .env (dry-run by default)
     Env {
         /// Target env file (default: `[env] env_file` in config, else ".env")
@@ -424,18 +440,37 @@ fn run(cli: Cli) -> anyhow::Result<u8> {
         // flags only — no command-specific flags (CLAUDE.md rule 6). `--fix`
         // maps to `env --write` via the existing global path, not this default
         // aggregation run.
-        Command::Check => commands::check::run(&commands::check::CheckArgs {
-            path,
-            format,
-            min_score,
-            output: output.clone(),
-            no_color,
-            fail_on,
-            offline,
-            cfg: cfg.clone(),
-            quiet,
-            verbose,
-        }),
+        Command::Check {
+            baseline,
+            update_baseline,
+            since,
+        } => {
+            // Reduce the raw baseline flags (+ `[baseline].auto`) to a
+            // CLI-arg-free `BaselineMode` at the boundary (LOOP-03, D-04) —
+            // clap's `conflicts_with_all` on `--since` already rejected the
+            // mutually-exclusive combinations (exit 2); an explicit `--baseline`
+            // against a missing file surfaces here as exit 3.
+            let baseline_mode = commands::check::resolve_baseline_mode(
+                baseline,
+                update_baseline,
+                since,
+                &cfg,
+                &path,
+            )?;
+            commands::check::run(&commands::check::CheckArgs {
+                path,
+                format,
+                min_score,
+                output: output.clone(),
+                no_color,
+                fail_on,
+                offline,
+                cfg: cfg.clone(),
+                quiet,
+                verbose,
+                baseline_mode,
+            })
+        }
         // B5: global `--fix` behaves exactly like `--write` on `env` — its
         // findings are all `fixable: true`, and docs/SPEC-COMMANDS.md's
         // "--fix on check maps to this" implies the same for the bare
