@@ -239,6 +239,7 @@ fn path_is_exempt(globs: Option<&GlobSet>, rel: &str) -> bool {
 /// column, like audit's text-regex findings) with the mandatory caveat
 /// `detail` (SPEC-RULES heuristic-detail requirement — confidence != high).
 fn orphan_finding(rel: &str) -> Finding {
+    let message = format!("Introduced file '{rel}' is not imported by any project file");
     Finding {
         id: "review/orphan-file".to_owned(),
         command: "review".to_owned(),
@@ -248,7 +249,7 @@ fn orphan_finding(rel: &str) -> Finding {
         line: None,
         column: None,
         end_line: None,
-        message: format!("Introduced file '{rel}' is not imported by any project file"),
+        message: message.clone(),
         detail: Some(
             "newly added but not referenced by any relative import; may be an unused orphan \
              or a legitimate entry point (heuristic; confidence: medium)"
@@ -261,7 +262,13 @@ fn orphan_finding(rel: &str) -> Finding {
         ),
         fixable: false,
         refs: vec!["https://getdev.ai/rules/review/orphan-file".to_owned()],
-        seed: crate::fingerprint::FingerprintSeed::default(),
+        // D-02 (Shape 3, no node/span): this is a project-level finding with
+        // no tree-sitter anchor, so seed on the finding message; the batch
+        // pass normalizes `matched_text` centrally.
+        seed: crate::fingerprint::FingerprintSeed {
+            node_kind: "message_fallback",
+            matched_text: message,
+        },
         fingerprint: None,
     }
 }

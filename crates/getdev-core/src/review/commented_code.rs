@@ -257,7 +257,7 @@ fn evaluate_run(file: &ReviewFile, run: &Run) -> Option<Finding> {
     if !parses_as_code(file.lang, &run.stripped) {
         return None;
     }
-    Some(commented_code_finding(&file.rel, first_line))
+    Some(commented_code_finding(&file.rel, first_line, &run.stripped))
 }
 
 /// Case-insensitive license-header sentinel scan (input is already lowercased).
@@ -308,7 +308,7 @@ fn inspect_snippet(node: Node<'_>, clean: &mut bool, code_shaped: &mut bool) {
 
 /// Build the `review/commented-code-block` finding with the mandatory caveat
 /// `detail` (SPEC-RULES heuristic-detail requirement — confidence != high).
-fn commented_code_finding(rel: &str, line: u32) -> Finding {
+fn commented_code_finding(rel: &str, line: u32, matched_text: &str) -> Finding {
     Finding {
         id: "review/commented-code-block".to_owned(),
         command: "review".to_owned(),
@@ -331,7 +331,13 @@ fn commented_code_finding(rel: &str, line: u32) -> Finding {
         ),
         fixable: false,
         refs: vec!["https://getdev.ai/rules/review/commented-code-block".to_owned()],
-        seed: crate::fingerprint::FingerprintSeed::default(),
+        // D-01 (Shape 2, coalesced multi-comment run — no single tree-sitter
+        // node): anchor on a synthetic `comment_run` kind + the already-
+        // computed marker-stripped run text; the batch pass normalizes it.
+        seed: crate::fingerprint::FingerprintSeed {
+            node_kind: "comment_run",
+            matched_text: matched_text.to_owned(),
+        },
         fingerprint: None,
     }
 }

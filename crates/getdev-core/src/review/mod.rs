@@ -223,7 +223,12 @@ fn run_over_files(
                     .unwrap_or(u32::MAX)
                     .saturating_add(1);
                 if is_introduced_line(line, &file.added_ranges) {
-                    findings.push(review_ast_hit_to_finding(rule, node, &file.rel));
+                    findings.push(review_ast_hit_to_finding(
+                        rule,
+                        node,
+                        file.source.as_bytes(),
+                        &file.rel,
+                    ));
                 }
             }
         }
@@ -375,7 +380,12 @@ pub(crate) fn is_introduced_line(line: u32, added: &[(u32, u32)]) -> bool {
 /// Heuristic rules (confidence below `high`) surface their reasoning in
 /// `detail` from the rule's own `description` (FP policy, docs/SPEC-RULES.md)
 /// — never a hardcoded per-rule string.
-fn review_ast_hit_to_finding(rule: &rules::Rule, node: Node<'_>, file: &str) -> Finding {
+fn review_ast_hit_to_finding(
+    rule: &rules::Rule,
+    node: Node<'_>,
+    source: &[u8],
+    file: &str,
+) -> Finding {
     let pos = node.start_position();
     let end_pos = node.end_position();
     let detail = (rule.confidence != Confidence::High).then(|| rule.description.clone());
@@ -402,7 +412,14 @@ fn review_ast_hit_to_finding(rule: &rules::Rule, node: Node<'_>, file: &str) -> 
         remediation: Some(rule.remediation.clone()),
         fixable: false,
         refs: rule.refs.clone(),
-        seed: crate::fingerprint::FingerprintSeed::default(),
+        // D-01/D-11 (Shape 1, real node): anchor on the matched node's kind +
+        // its source text, captured inside review's parse-once pass (no
+        // re-parse — CLAUDE.md rule 5). `.unwrap_or_default()` keeps clippy
+        // clean and degrades an impossible non-UTF-8 span to the empty seed.
+        seed: crate::fingerprint::FingerprintSeed {
+            node_kind: node.kind(),
+            matched_text: node.utf8_text(source).unwrap_or_default().to_owned(),
+        },
         fingerprint: None,
     }
 }
