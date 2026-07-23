@@ -23,6 +23,8 @@ Cross-cutting contracts:
 
 **Output:** score banner, findings grouped by severity, "top 3 things to fix first," fixable-count hint (`getdev env --write`, later `getdev fix`). `getdev check --json --fail-on high` is the canonical CI line.
 
+**First-run hint (human render only):** when the project has no `.getdev.toml`, check prints ONE dim line near the score banner — `using built-in defaults · run `getdev init` to customize` — so a first-time user learns config is optional and where to customize it. Suppressed under `--json` (it is **never** added to the JSON envelope — determinism), `--quiet`, a non-tty stdout, and CI (the `CI` env var set). It is a single filesystem stat, never a config re-read, and never affects the Ship Score or exit code.
+
 **Flags:** global flags only (per-analyzer configuration comes from `.getdev.toml`). `--fix` maps to `env --write` in v0.1.
 
 **Mutates:** no (except via `--fix` → env apply path). **Network:** registry (via `real`); cache-only with `--offline`.
@@ -170,34 +172,45 @@ keeps env's fixable finding, dropping audit's twin at the same file:line
 
 ## `getdev init`
 
-**Synopsis:** `getdev init [--yes] [global flags]`
+**Synopsis:** `getdev init [--all] [global flags]`  (`--yes` is a back-compat alias for `--all`)
 
-**What it does:** Interactive project setup (`--yes` accepts defaults). Leads with a one-time decorative welcome banner (the getdev wordmark + a promise tagline — no call-to-action per the standing no-CTA/no-telemetry rule), then:
-1. Write `.getdev.toml` (detected stack, defaults — see `docs/SPEC-CONFIG.md`).
-2. Offer pre-commit hook → `getdev check --quiet --fail-on critical`.
-3. Offer agent-context block: append getdev usage guidance to `CLAUDE.md` / `AGENTS.md` / `.cursorrules` if present (marked managed block) — so the user's agent learns to run `getdev snap` before big changes and `getdev check` after.
-4. Offer auto-snap hook (post-checkout / pre-agent via documented pattern).
+**What it does:** Non-interactive project setup — **zero prompts, ever.** Like `-o/--output`, `init` deliberately never prompts: a prompt after `getdev init` breaks CI/pipes and determinism, and a blind cursor in an embedded/agent terminal is a hard UX failure (backlog B-07). Plain `getdev init`:
+1. Writes `.getdev.toml` (detected stack, defaults — see `docs/SPEC-CONFIG.md`), **only if absent** — an existing config is never clobbered.
+2. Prints a summary, then ONE hint line naming the optional extras and how to install them: `optional: pre-commit hook · agent-context block · auto-snap hook — run `getdev init --all` to install`.
 
-**Welcome banner:** shown once at the top of output. Suppressed under `--quiet` and `--json`; rendered plain (no ANSI) under `--no-color`, `NO_COLOR`, or a non-tty stdout. It is the only place getdev prints decorative art and it never links out or prompts an action.
+**`getdev init --all`** ALSO installs, deterministically and with no prompts:
+1. a `.git/hooks/pre-commit` hook → `getdev check --quiet --fail-on critical`;
+2. an agent-context managed block appended to an **existing** `CLAUDE.md` / `AGENTS.md` / `.cursorrules` (never creates one) — so the user's agent learns to run `getdev snap` before big changes and `getdev check` after;
+3. a `.git/hooks/post-checkout` auto-snap hook (`getdev snap`).
 
-**Flags:** `--yes`.
+**Never-clobber (contract):** init only CREATES new files or UPSERTS a marker-delimited managed block; a pre-existing `.getdev.toml` or hook is left untouched, and re-running is idempotent.
 
-**Mutates:** yes — creates new files / appends managed blocks (this is its purpose; each step is offered interactively unless `--yes`). The welcome banner is stdout-only, never a file write. **Network:** none.
+**Config is optional:** every getdev command runs on built-in defaults and NEVER requires `init` — a missing `.getdev.toml` **is** the default config (`docs/SPEC-CONFIG.md`). `init` only customizes those defaults and wires optional convenience hooks; it is a convenience, not a prerequisite.
 
-**Golden example (plain, `--no-color`):**
+**Welcome banner:** the decorative getdev wordmark + promise tagline (no call-to-action, per the standing no-CTA/no-telemetry rule) is shown **once on the first getdev invocation of any command** — not by `init`. A best-effort marker in getdev's cache dir gates it; it renders only when stdout is a TTY and output is not `--quiet`/`--json`, honoring `--no-color`/`NO_COLOR`. A failure to read or write the marker never delays or fails a command (the banner may simply show again).
+
+**Flags:** `--all` (alias `--yes`).
+
+**Mutates:** yes — creates new files / appends managed blocks (this is its purpose); all writes go through `core::mutate`. **Network:** none.
+
+**Golden example (plain `getdev init`, `--no-color`):**
 
 ```
-               __      __
-   ____ ____  / /_____/ /__ _   __
-  / __ `/ _ \/ __/ __  / _ \ | / /
- / /_/ /  __/ /_/ /_/ /  __/ |/ /
- \__, /\___/\__/\__,_/\___/|___/
-/____/
-  verify · secure · ship AI-generated code
-  v0.1.0 · local-first · nothing leaves your machine
-
 .getdev.toml — written (detected stack: node)
-…
+
+optional: pre-commit hook · agent-context block · auto-snap hook — run `getdev init --all` to install
+
+getdev is set up — run `getdev check` to see your Ship Score
+```
+
+**Golden example (`getdev init --all`, `--no-color`) — extras installed:**
+
+```
+.getdev.toml — written (detected stack: node)
+.git/hooks/pre-commit — written (getdev check)
+CLAUDE.md — managed block upserted
+.git/hooks/post-checkout — written (getdev snap)
+
 getdev is set up — run `getdev check` to see your Ship Score
 ```
 
