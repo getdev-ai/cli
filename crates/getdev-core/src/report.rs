@@ -687,4 +687,22 @@ mod tests {
         assert!(colored.contains('\u{1b}'));
         assert!(colored.contains("nothing leaves your machine"));
     }
+
+    /// The check no-config hint names the exact next step (`getdev init`) with no
+    /// call-to-action beyond that; plain mode is ANSI-free (safe to pipe), colored
+    /// mode wraps the same content in escapes. Both end with a single newline so
+    /// the line slots under the score banner.
+    #[test]
+    fn no_config_hint_names_init_and_is_ansi_free_when_plain() {
+        let plain = render_no_config_hint(ColorMode::Off);
+        assert_eq!(
+            plain,
+            "using built-in defaults · run `getdev init` to customize\n"
+        );
+        assert!(!plain.contains('\u{1b}'), "plain mode must be escape-free");
+
+        let colored = render_no_config_hint(ColorMode::On);
+        assert!(colored.contains('\u{1b}'), "colored mode wraps ANSI");
+        assert!(colored.contains("run `getdev init` to customize"));
+    }
 }

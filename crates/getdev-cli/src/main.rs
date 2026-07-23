@@ -572,10 +572,10 @@ fn maybe_first_run_welcome(quiet: bool, json: bool, no_color: bool) {
     if quiet || json || !std::io::stdout().is_terminal() {
         return;
     }
-    let marker = getdev_registry::cache::cache_dir().join(".welcomed");
+    let cache_dir = getdev_registry::cache::cache_dir();
     // Already welcomed — a best-effort existence check; a read error (treated as
     // "absent") at worst re-shows the banner, never breaks the command.
-    if marker.exists() {
+    if already_welcomed(&cache_dir) {
         return;
     }
     let color = getdev_core::report::ColorMode::resolve(no_color, true);
@@ -584,12 +584,28 @@ fn maybe_first_run_welcome(quiet: bool, json: bool, no_color: bool) {
         getdev_core::report::render_welcome_banner(env!("CARGO_PKG_VERSION"), color)
     );
     println!();
-    // Record the marker so the banner never shows again — swallow every IO error
-    // (dir create + touch). A failure here is invisible to the user by design.
-    if let Some(parent) = marker.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = std::fs::write(&marker, b"");
+    record_welcomed(&cache_dir);
+}
+
+/// The first-run marker path inside getdev's cache dir. A sibling of the
+/// registry cache DB, so the two share one best-effort, `GETDEV_CACHE_DIR`-
+/// overridable location.
+fn welcome_marker(cache_dir: &std::path::Path) -> PathBuf {
+    cache_dir.join(".welcomed")
+}
+
+/// Whether the one-time welcome has already been shown. Best-effort: any IO
+/// error is treated as "not yet welcomed" (at worst the banner shows again).
+fn already_welcomed(cache_dir: &std::path::Path) -> bool {
+    welcome_marker(cache_dir).exists()
+}
+
+/// Record that the welcome was shown so it never shows again. Best-effort —
+/// every IO error (dir create + touch) is swallowed; a failure is invisible to
+/// the user by design and never delays or fails a command (B-07 spirit).
+fn record_welcomed(cache_dir: &std::path::Path) {
+    let _ = std::fs::create_dir_all(cache_dir);
+    let _ = std::fs::write(welcome_marker(cache_dir), b"");
 }
 
 /// Map a `getdev-gitx` changed file onto `core::review`'s own input type. This
@@ -612,5 +628,80 @@ fn map_changed_file(
         path: file.path,
         status,
         added_ranges: file.added_ranges,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::{already_welcomed, record_welcomed, welcome_marker};
+
+    fn scratch_dir(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "getdev-cli-welcome-ut-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// The one-time welcome is driven entirely by the cache-dir marker: absent
+    /// on a fresh cache (so the banner would show once), present after the first
+    /// run (so it never shows again), and idempotent on re-record. An explicit
+    /// scratch dir stands in for a temp `GETDEV_CACHE_DIR` — the same override
+    /// the real `cache_dir()` reads — with no unsafe process-env mutation.
+    #[test]
+    fn welcome_marker_gates_the_banner_to_a_single_showing() {
+        let dir = scratch_dir("once");
+
+        // Fresh cache: nothing written yet → not welcomed (banner would show).
+        assert!(
+            !already_welcomed(&dir),
+            "a fresh cache dir must report not-yet-welcomed"
+        );
+
+        // First showing records the marker; now the banner is suppressed forever.
+        record_welcomed(&dir);
+        assert!(
+            already_welcomed(&dir),
+            "after recording, the marker must exist so the banner never shows again"
+        );
+        assert!(
+            welcome_marker(&dir).is_file(),
+            "the marker is a real file inside the cache dir"
+        );
+
+        // Idempotent: re-recording keeps it welcomed, never errors.
+        record_welcomed(&dir);
+        assert!(already_welcomed(&dir), "re-record stays welcomed");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `record_welcomed` is best-effort and must never panic even when the cache
+    /// dir cannot be created (here a path whose parent is a regular file) — a
+    /// marker failure can never delay or fail a command (B-07 spirit).
+    #[test]
+    fn record_welcomed_swallows_io_errors() {
+        let base = scratch_dir("io-swallow");
+        std::fs::create_dir_all(&base).unwrap();
+        // A file where a directory is expected: create_dir_all under it fails.
+        let file_as_parent = base.join("not-a-dir");
+        std::fs::write(&file_as_parent, b"x").unwrap();
+        let unwritable = file_as_parent.join("cache");
+
+        // Must not panic; and with no marker written, it stays not-welcomed.
+        record_welcomed(&unwritable);
+        assert!(
+            !already_welcomed(&unwritable),
+            "a failed marker write leaves the state not-welcomed (banner may retry), never errors"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

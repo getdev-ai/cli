@@ -311,3 +311,63 @@ fn check_json_populates_gdv1_fingerprint_on_every_finding() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The first-run no-config hint (docs/SPEC-COMMANDS.md `check`) is NEVER part of
+/// the machine-readable output: a config-less project run under `--json` must
+/// yield clean JSON with no `using built-in defaults …` line (determinism — the
+/// hint lives only in the human render). The human render additionally gates the
+/// hint on a TTY stdout, so under a piped `assert_cmd` stdout it is suppressed
+/// there too; the renderer's positive path is unit-tested in `core::report`.
+#[test]
+fn no_config_hint_is_absent_from_machine_output() {
+    let dir = tmp_dir("no-config-hint");
+    let cache_dir = dir.join("cache");
+    // A minimal source file, and crucially NO .getdev.toml — the condition that
+    // arms the hint on the human path.
+    std::fs::write(dir.join("app.js"), "const x = 1;\n").unwrap();
+    assert!(
+        !dir.join(".getdev.toml").exists(),
+        "this test requires a config-less project"
+    );
+
+    // --json: the hint must never appear in the JSON envelope.
+    let mut cmd = getdev();
+    let json_out = cmd
+        .env("GETDEV_OFFLINE", "1")
+        .env("GETDEV_CACHE_DIR", &cache_dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .args(["check", "--offline", "--json", "--path"])
+        .arg(&dir)
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let json_stdout = String::from_utf8_lossy(&json_out.stdout);
+    assert!(
+        !json_stdout.contains("using built-in defaults"),
+        "the no-config hint must never appear under --json, got:\n{json_stdout}"
+    );
+
+    // Plain (human) render over a piped stdout: the hint is TTY-gated, so it is
+    // suppressed here as well — stdout stays clean for pipes/CI.
+    let mut cmd = getdev();
+    let human_out = cmd
+        .env("GETDEV_OFFLINE", "1")
+        .env("GETDEV_CACHE_DIR", &cache_dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .args(["check", "--offline", "--no-color", "--path"])
+        .arg(&dir)
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let human_stdout = String::from_utf8_lossy(&human_out.stdout);
+    assert!(
+        !human_stdout.contains("using built-in defaults"),
+        "the hint is TTY-gated and must be suppressed on a piped stdout, got:\n{human_stdout}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
