@@ -1,0 +1,1 @@
+{ "npm": { "drizzle-orm": true, "@testing-library/react": true, "@aws-sdk/client-s3": true, "winston": true }, "pypi": {} }

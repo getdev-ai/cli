@@ -462,7 +462,11 @@ fn collect_declaration_names(decl: Node, bytes: &[u8], names: &mut BTreeSet<Stri
         | "type_alias_declaration"
         | "enum_declaration"
         | "function_declaration"
-        | "function_signature" => {
+        | "function_signature"
+        // `export namespace Foo`/`export declare namespace Foo` — the namespace
+        // name is itself exported; its inner members are separately collected by
+        // the any-depth export query.
+        | "internal_module" => {
             if let Some(name_node) = decl.child_by_field_name("name") {
                 if let Ok(text) = name_node.utf8_text(bytes) {
                     names.insert(text.to_owned());
@@ -479,6 +483,22 @@ fn collect_declaration_names(decl: Node, bytes: &[u8], names: &mut BTreeSet<Stri
                         }
                     }
                 }
+            }
+        }
+        // `export declare function/const/class/...` — a `.d.ts` file declares its
+        // surface almost entirely through `declare`, which the grammar wraps in an
+        // `ambient_declaration` around the real inner declaration. Descend one
+        // level and collect the inner names. Without this, EVERY `export declare`
+        // member is silently dropped, leaving a `Resolved` surface that looks
+        // empty and false-fires `real/nonexistent-api` High on every used member
+        // (the flat-`.d.ts` FP class — real winston/@aws-sdk/pg-core shapes). A
+        // `declare module "…"`/`declare global` child contributes no top-level
+        // name here (its inner exports are handled by the any-depth query and the
+        // WR-02 foreign-augmentation filter), so recursion is a safe no-op for it.
+        "ambient_declaration" => {
+            let mut cursor = decl.walk();
+            for child in decl.named_children(&mut cursor) {
+                collect_declaration_names(child, bytes, names);
             }
         }
         _ => {}
@@ -859,6 +879,100 @@ mod tests {
         assert!(surface.exported.contains("realConst"));
         assert!(surface.exported.contains("Baz"));
         assert!(!surface.exported.contains("fakeFn"));
+    }
+
+    #[test]
+    fn export_declare_ambient_members_are_collected() {
+        // A `.d.ts` declares its surface almost entirely via `export declare`
+        // (function/const/class/enum/namespace) — the winston/@aws-sdk/pg-core
+        // real shape. Each such member must be enumerated; before the
+        // ambient-declaration descent they were all silently dropped, leaving a
+        // Resolved-but-empty surface that false-fired High on every used member.
+        let dir = tempdir("export-declare");
+        std::fs::write(dir.join("package.json"), r#"{"types":"index.d.ts"}"#).unwrap();
+        std::fs::write(
+            dir.join("index.d.ts"),
+            "export declare const format: unknown;\n\
+             export declare function createLogger(options?: unknown): unknown;\n\
+             export declare class S3Client {}\n\
+             export declare enum Level { Info, Warn }\n\
+             export declare namespace config { const syslog: unknown; }\n",
+        )
+        .unwrap();
+
+        let surface = enumerate_js(&dir).unwrap();
+        assert_eq!(surface.tier, SurfaceTier::Resolved);
+        assert!(surface.exported.contains("format"));
+        assert!(surface.exported.contains("createLogger"));
+        assert!(surface.exported.contains("S3Client"));
+        assert!(surface.exported.contains("Level"));
+        assert!(surface.exported.contains("config"));
+        // recall preserved: a genuine miss on this trusted Resolved surface is
+        // still absent, so downstream fires a High miss (D-07).
+        assert!(!surface.exported.contains("definitelyNotAnExport"));
+    }
+
+    /// The real @aws-sdk/client-s3 shape: top-level `types` -> a one-level
+    /// relative barrel whose targets declare their classes via `export declare
+    /// class`. The whole surface must resolve (Resolved) with the members
+    /// present — this is the composition of the star-reexport-one-level walk
+    /// with the ambient-declaration descent.
+    #[test]
+    fn barrel_of_export_declare_targets_resolves_members() {
+        let dir = tempdir("barrel-export-declare");
+        std::fs::write(dir.join("package.json"), r#"{"types":"./dist/index.d.ts"}"#).unwrap();
+        std::fs::create_dir_all(dir.join("dist/commands")).unwrap();
+        std::fs::write(
+            dir.join("dist/index.d.ts"),
+            "export * from './S3Client';\nexport * from './commands/index';\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("dist/S3Client.d.ts"),
+            "export declare class S3Client { send(command: unknown): Promise<unknown>; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("dist/commands/index.d.ts"),
+            "export declare class GetObjectCommand {}\nexport declare class PutObjectCommand {}\n",
+        )
+        .unwrap();
+
+        let surface = enumerate_js(&dir).unwrap();
+        assert_eq!(surface.tier, SurfaceTier::Resolved);
+        assert!(surface.exported.contains("S3Client"));
+        assert!(surface.exported.contains("GetObjectCommand"));
+        assert!(surface.exported.contains("PutObjectCommand"));
+    }
+
+    /// The real drizzle-orm root shape: an `exports["."]` with a sibling `types`
+    /// AND nested `import`/`require` conditions AND a bare-string `default`. The
+    /// sibling `types` must win, and — because the entry re-exports through a
+    /// multi-level (deeper than one) `export *` chain — the surface must degrade
+    /// to `Dynamic`, never a false High for `{ eq, and, sql }`.
+    #[test]
+    fn drizzle_root_exports_map_two_level_star_is_dynamic() {
+        let dir = tempdir("drizzle-root");
+        std::fs::create_dir_all(dir.join("sql")).unwrap();
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name":"drizzle-orm","main":"./index.cjs","module":"./index.js","exports":{".":{"types":"./index.d.ts","import":{"types":"./index.d.ts","default":"./index.js"},"default":"./index.js","require":{"types":"./index.d.cts","default":"./index.cjs"}}}}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("index.d.ts"), "export * from './sql/index';\n").unwrap();
+        // second-level star chain — pushes members past the one-level boundary.
+        std::fs::write(
+            dir.join("sql/index.d.ts"),
+            "export * from './expressions';\nexport declare const sql: unknown;\n",
+        )
+        .unwrap();
+
+        let surface = enumerate_js(&dir).unwrap();
+        assert_eq!(
+            surface.tier,
+            SurfaceTier::Dynamic,
+            "a >1-level star chain must degrade to Dynamic (no false High)"
+        );
     }
 
     #[test]

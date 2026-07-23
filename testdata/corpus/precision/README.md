@@ -33,7 +33,8 @@ Each app directory carries:
 | App | Exercises | Expected trues |
 |-----|-----------|----------------|
 | `aliased-ts/` | PREC-02 — TS/Vite `@/…` path aliases resolve, so aliased imports are Local (no phantom/nonexistent/typosquat/orphan). | none |
-| `installed-surface/` | PREC-03 — a package whose types are declared ONLY via `exports["."].types` (with a decoy top-level `.d.ts` a pre-fix guess would have used). Real named imports enumerate the real surface. | none |
+| `installed-surface/` | PREC-03 — a package whose types are declared ONLY via `exports["."].types` (with a decoy top-level `.d.ts` a pre-fix guess would have used). Real named imports (`eq`/`and`/`sql`) enumerate the real surface (no finding); a genuinely nonexistent member on the same trusted `Resolved` surface still fires High (recall anchor). | `real/nonexistent-api` |
+| `installed-surface-realworld/` | PREC-03 — the FOUR real-world package shapes: `drizzle-orm` (exports-map sibling+nested `types`, >1-level star → Dynamic), `drizzle-orm/pg-core` (subpath via `exports["./pg-core"].types`), `@testing-library/react` (scoped, no exports map, cross-package star → Dynamic), `@aws-sdk/client-s3` (scoped, one-level barrel of `export declare class` → Resolved), `winston` (classic bundled `.d.ts` of `export declare` members → Resolved). Every real member verifies with zero false Highs — the guard that caught the `export declare` ambient-declaration drop. | none |
 | `secret-negatives/` | PREC-04 — object-data slug, URL, enum slug, `*.test.ts` filename values do NOT fire; one synthetic planted provider key does. | `env/hardcoded-secret` |
 | `sql-and-orm/` | PREC-05 — a genuine raw `${}` `.query()` interpolation fires (medium); a parameterized Drizzle `sql\`\`` tagged template does not. | `audit/sql-string-concat` |
 | `duplicate-scaffolding/` | PREC-05 — repetitive helpers in `*.spec.ts` are exempt; a genuine introduced duplicate in `src/*.ts` fires. | `review/duplicate-helper` |

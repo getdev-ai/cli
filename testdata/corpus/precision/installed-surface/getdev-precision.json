@@ -1,1 +1,1 @@
-{ "true": [] }
+{ "true": [ { "id": "real/nonexistent-api", "file": "src/index.ts" } ] }
